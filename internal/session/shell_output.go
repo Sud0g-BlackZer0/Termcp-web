@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -46,10 +47,15 @@ func (s *Session) ReadOutputForReader(ctx context.Context, readerID int, timeout
 
 // ReadTerminalStream reads PTY output for a reader without appending to the byte log (high-frequency UI streaming).
 // If maxBytes > 0, each call returns at most that many raw bytes (for WebSocket/SSE chunking); 0 means one full drain to end of buffer.
-func (s *Session) ReadTerminalStream(ctx context.Context, readerID int, timeout time.Duration, stripAnsi bool, maxLines int, maxBytes int) (string, error) {
+//
+// The second return value is the raw stream's partial tail: how many bytes at
+// the end of THIS read follow the last '\n'. It is a property of the raw window
+// (computed before any cleaning), so a line-protocol consumer knows whether the
+// chunk it received ends on a line boundary, whatever stripping did to the text.
+func (s *Session) ReadTerminalStream(ctx context.Context, readerID int, timeout time.Duration, stripAnsi bool, maxLines int, maxBytes int) (string, int64, error) {
 	cs := s.PrimaryShell()
 	if cs == nil {
-		return "", fmt.Errorf("session shell has exited")
+		return "", 0, fmt.Errorf("session shell has exited")
 	}
 	return cs.ReadTerminalStream(ctx, readerID, timeout, stripAnsi, maxLines, maxBytes)
 }
@@ -145,17 +151,24 @@ func (cs *ChildShell) UnregisterReader(id int) {
 }
 
 // ReadTerminalStream reads PTY output for a reader without appending to the byte log.
-func (cs *ChildShell) ReadTerminalStream(ctx context.Context, readerID int, timeout time.Duration, stripAnsi bool, maxLines int, maxBytes int) (string, error) {
+// The second return value is the raw window's partial tail (bytes after the last
+// '\n' of this read), computed on the raw bytes before any cleaning; see the
+// Session wrapper above.
+func (cs *ChildShell) ReadTerminalStream(ctx context.Context, readerID int, timeout time.Duration, stripAnsi bool, maxLines int, maxBytes int) (string, int64, error) {
 	data, err := cs.buf.ReadLimited(ctx, readerID, timeout, maxBytes, maxLines)
 	if err != nil && err != io.EOF {
-		return "", err
+		return "", 0, err
+	}
+	partial := int64(len(data))
+	if idx := bytes.LastIndexByte(data, '\n'); idx >= 0 {
+		partial -= int64(idx + 1)
 	}
 	output := string(data)
 	if stripAnsi {
 		output = ansi.Strip(output)
 		output = ansi.Compact(output)
 	}
-	return output, nil
+	return output, partial, nil
 }
 
 // HasMoreOutput returns whether the given reader has unread data.

@@ -23,7 +23,7 @@ type outputSource struct {
 	live    *session.ChildShell // non-nil ⇒ live source
 	sessID  string
 	shellID string           // resolved shell id; "" = merged persisted stream
-	msgMgr  *message.Manager // non-nil ⇒ persisted source (DEAD / restored)
+	msgMgr  *message.Manager // line addressing reads the persisted log through it
 	status  api.SessionStatus
 	created int64 // Unix ms; live sources only (for session_uptime_seconds)
 }
@@ -108,7 +108,7 @@ func (s *Server) resolveOutputSource(id string) (*outputSource, *mcpgo.CallToolR
 				return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Session '%s' has no shell", sess.ID))
 			}
 			info := cs.Info()
-			return &outputSource{live: cs, sessID: sess.ID, shellID: cs.ID, status: info.Status, created: info.CreatedAt}, nil
+			return &outputSource{live: cs, sessID: sess.ID, shellID: cs.ID, msgMgr: s.msgMgr, status: info.Status, created: info.CreatedAt}, nil
 		}
 		// DEAD / restored session without live shells: resolve by the channel index
 		// retained in the snapshot, which is the same number the live session gave
@@ -133,7 +133,7 @@ func (s *Server) resolveOutputSource(id string) (*outputSource, *mcpgo.CallToolR
 			// value is reported as the session id rather than empty if it ever is.
 			sessID = id
 		}
-		return &outputSource{live: cs, sessID: sessID, shellID: cs.ID, status: info.Status, created: info.CreatedAt}, nil
+		return &outputSource{live: cs, sessID: sessID, shellID: cs.ID, msgMgr: s.msgMgr, status: info.Status, created: info.CreatedAt}, nil
 	}
 	if sess := s.sessMgr.Get(id); sess != nil {
 		// A bare session id means the primary CHANNEL (index 1) wherever it now
@@ -149,7 +149,7 @@ func (s *Server) resolveOutputSource(id string) (*outputSource, *mcpgo.CallToolR
 		// to be alive would answer a different question than the one asked.
 		if cs := sess.PrimaryShell(); cs != nil {
 			info := cs.Info()
-			return &outputSource{live: cs, sessID: sess.ID, shellID: cs.ID, status: info.Status, created: info.CreatedAt}, nil
+			return &outputSource{live: cs, sessID: sess.ID, shellID: cs.ID, msgMgr: s.msgMgr, status: info.Status, created: info.CreatedAt}, nil
 		}
 		// Restored DEAD session: no live shell objects, so the persisted log of
 		// this session's first shell serves as the stream. The shell id must be

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/open-mcp-ai/termcp/internal/message"
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
 
@@ -46,4 +47,24 @@ func (m *Manager) OutputSize(sessionID, shellID string) (int64, error) {
 		return 0, nil
 	}
 	return m.msgMgr.OutputSize(sessionID, m.resolveShellID(sessionID, shellID))
+}
+
+// LineCount returns the number of complete lines in a shell's byte log (or,
+// with an empty shellID, the session's primary shell). It lives beside
+// Marks/OutputSize because it is the same kind of read: transcript metadata
+// that must survive a DEAD session and resolve the primary shell the same way.
+func (m *Manager) LineCount(sessionID, shellID string) (int64, error) {
+	if m.msgMgr == nil {
+		return 0, message.ErrLinesUnavailable
+	}
+	return m.msgMgr.LineCount(sessionID, m.resolveShellID(sessionID, shellID))
+}
+
+// LineSpanOfOffsets maps a byte range onto line numbers (see message.Manager);
+// same shell resolution as LineCount.
+func (m *Manager) LineSpanOfOffsets(sessionID, shellID string, start, end int64) (int64, int64, error) {
+	if m.msgMgr == nil {
+		return 0, 0, message.ErrLinesUnavailable
+	}
+	return m.msgMgr.LineSpanOfOffsets(sessionID, m.resolveShellID(sessionID, shellID), start, end)
 }

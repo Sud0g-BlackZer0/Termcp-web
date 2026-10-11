@@ -11,23 +11,24 @@ import (
 // assembly (managers, transports) rather than as a 230-line table.
 func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 	mcpServer.AddTool(s.newTool("session_start",
-		mcpgo.WithDescription("Start a session (connection container) plus its primary shell. ssh_config REQUIRED: a profile name from ssh_config(action=list), \"internal\" for the termcp host loopback, or a termcp:// entry locator pasted by the user (e.g. \"termcp://mac\" — parsed directly, no lookup needed). Empty command/args = the profile's default_shell, else the target's own login shell (pty), else an error (pipe). WARNING: command/args = single run-and-exit program; for multi-step or stateful work omit them and drive an interactive shell instead. Returns session_id and shell_id."),
+		mcpgo.WithDescription("Start a session (connection container) plus its primary shell. ssh_config REQUIRED: a profile name from ssh_config(action=list), \"internal\" for a local terminal on the termcp host itself (no SSH), or a termcp:// entry locator pasted by the user (e.g. \"termcp://mac\" — parsed directly, no lookup needed). Empty command/args = the profile's default_shell, else the target's own login shell (pty), else an error (pipe). WARNING: command/args = single run-and-exit program; for multi-step or stateful work omit them and drive an interactive shell instead. Returns session_id and shell_id."),
 		mcpgo.WithString("command", mcpgo.Description("Executable line; empty with no args = login shell / profile default_shell")),
 		mcpgo.WithArray("args", mcpgo.Description("Argv after command"), mcpgo.WithStringItems()),
-		mcpgo.WithString("mode", mcpgo.Description("Mode of the primary shell only (per-shell setting): \"pty\" (default, interactive TUI) or \"pipe\" (no TTY, line-oriented). Other shells pick their own mode in shell_open."), mcpgo.DefaultString("pty")),
+		mcpgo.WithString("mode", mcpgo.Description("Mode of the primary shell only: \"pty\" (default, interactive TUI; echoes input — Windows cannot disable this, line protocols use pipe) or \"pipe\" (no TTY, no echo; programmatic IO)."), mcpgo.DefaultString("pty")),
 		mcpgo.WithString("on_exit", mcpgo.Description("What happens to the session when its last shell ends by itself: \"keep\" (default) leaves it running for reuse (forwards, SFTP, more shells); \"close\" terminates it, so a run-and-exit command's session archives itself instead of piling up in the running list. Its output stays readable either way."), mcpgo.DefaultString("keep"), mcpgo.Enum("keep", "close")),
 		mcpgo.WithString("name"),
 		mcpgo.WithNumber("rows", mcpgo.DefaultNumber(24)),
 		mcpgo.WithNumber("cols", mcpgo.DefaultNumber(80)),
-		mcpgo.WithString("ssh_config", mcpgo.Required(), mcpgo.Description("REQUIRED: \"internal\" for the termcp host loopback, a profile name from ssh_config(action=list), or a termcp:// entry locator (e.g. \"termcp://mac\")")),
+		mcpgo.WithString("ssh_config", mcpgo.Required(), mcpgo.Description("REQUIRED: \"internal\" = local terminal on the termcp host (no SSH), a profile name from ssh_config(action=list), or a termcp:// entry locator (e.g. \"termcp://mac\")")),
 	), withLogging("session_start", s.handleStartSession))
 
 	mcpServer.AddTool(s.newTool("shell_open",
-		mcpgo.WithDescription("Open another shell channel on an existing session connection (reuses SSH transport). Returns shell_id for I/O and session_id of the parent."),
+		mcpgo.WithDescription("Open another shell channel on an existing session connection (reuses SSH transport). Returns shell_id for I/O and session_id of the parent. command+args run as argv (like session_start): a command string containing spaces is ONE executable name and fails — pass the extra tokens as args instead (e.g. command=\"node\", args=[\"app.js\",\"stream\"])."),
 		mcpgo.WithString("session_id", mcpgo.Required()),
 		mcpgo.WithString("name"),
 		mcpgo.WithString("command", mcpgo.Description("Executable; empty = resolve down the chain: profile default_shell, then (pty only) the target's own login shell. pipe with an empty command and no default_shell is refused — there is no login shell to request on a pipe channel.")),
-		mcpgo.WithString("mode", mcpgo.Description("Mode for this shell channel: \"pty\" (default, interactive TUI) or \"pipe\" (no TTY, line-oriented run-to-exit command). Per shell — the session is only the connection."), mcpgo.DefaultString("pty")),
+		mcpgo.WithArray("args", mcpgo.Description("Argv after command"), mcpgo.WithStringItems()),
+		mcpgo.WithString("mode", mcpgo.Description("Mode for this shell channel: \"pty\" (default, interactive TUI; echoes input) or \"pipe\" (no TTY, no echo, run-to-exit; line protocols). Per shell — the session is only the connection."), mcpgo.DefaultString("pty")),
 		mcpgo.WithNumber("rows", mcpgo.DefaultNumber(24)),
 		mcpgo.WithNumber("cols", mcpgo.DefaultNumber(80)),
 	), withLogging("shell_open", s.handleStartSubShell))
@@ -43,7 +44,7 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 	), withLogging("shell_close", s.handleCloseShell))
 
 	mcpServer.AddTool(s.newTool("shell_input",
-		mcpgo.WithDescription("Write text bytes to a shell's stdin. Follow with shell_key(key=\"enter\") to execute the typed line, then shell_output for the result. shell_id accepts a raw id, a session id, or a termcp:// locator (\"termcp://#<sid>\" = primary shell, \"termcp://#<sid>:2\" = 2nd shell channel)."),
+		mcpgo.WithDescription("Write text bytes to a shell's stdin. Follow with shell_key(key=\"enter\") to execute the typed line, then shell_output for the result. shell_id accepts a raw id, a session id, or a termcp:// locator (\"termcp://#<sid>\" = primary shell, \"termcp://#<sid>:2\" = 2nd shell channel). Returns {success, offset, total_lines, line}: offset is the stream end at submission — where this input's echo begins (a pipe shell records no echo; the zero-length a/i mark in message(action=list) lands there). line is the line the echo continues, 0 when it starts a fresh line (it becomes total_lines+1 once complete)."),
 		mcpgo.WithString("shell_id", mcpgo.Required()),
 		mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("UTF-8 text to write (no automatic newline)")),
 	), withLogging("shell_input", s.handleSendInput))
@@ -56,7 +57,7 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 	), withLogging("shell_key", s.handlePressKey))
 
 	mcpServer.AddTool(s.newTool("shell_output",
-		mcpgo.WithDescription("Unified output reader for live AND closed (DEAD) shells with one byte-stream cursor model. shell_id may be a shell_id, a session_id, or a termcp:// locator (\"termcp://#<sid>\" = primary shell, \"termcp://#<sid>:N\" = Nth shell channel). Default: live = new output since the last read on reader_id (blocking up to timeout); closed = recent tail. tail_lines=N returns the last N lines; offset>=0 reads raw bytes from that position (stateless paging with has_more). Returns {output, has_more, lines_returned, bytes_returned, start_offset, end_offset, total_bytes, source, session_id, shell_id, session_status, session_uptime_seconds?}."),
+		mcpgo.WithDescription("Unified output reader for live AND closed (DEAD) shells with one byte-stream cursor model. shell_id may be a shell_id, a session_id, or a termcp:// locator (\"termcp://#<sid>\" = primary shell, \"termcp://#<sid>:N\" = Nth shell channel). Default: live = new output since the last read on reader_id (blocking up to timeout); closed = recent tail. tail_lines=N returns the last N lines; offset>=0 reads raw bytes from that position (stateless paging with has_more); from_line=N reads whole numbered lines from the persisted log (1-based, line numbers are absolute and never shift; the trailing partial line has no number).\n\nByte fields describe the RAW stream: start_offset + raw_bytes == end_offset always, and cursors advance by end_offset (or raw_bytes) — never by bytes_returned, which is the CLEANED text length and differs whenever strip_ansi removes anything. partial_tail_bytes > 0 means the window's last bytes have no '\\n' yet: a line-protocol consumer must hold them back until the line completes. Returns {output, has_more, lines_returned, bytes_returned, returned_bytes, raw_bytes, start_offset, end_offset, total_bytes, partial_tail_bytes, source, session_id, shell_id, session_status, session_uptime_seconds?}; from_line adds from_line/to_line/total_lines/line_bytes."),
 		mcpgo.WithString("shell_id", mcpgo.Required(), mcpgo.Description("shell_id, session_id, or termcp:// locator (termcp://#<sid> / termcp://#<sid>:N)")),
 		mcpgo.WithBoolean("strip_ansi", mcpgo.Description("If true, strip ANSI SGR/cursor escapes and compress terminal noise"), mcpgo.DefaultBool(true)),
 		mcpgo.WithNumber("timeout", mcpgo.Description("Blocking wait for new output on LIVE shells, in seconds (0–60); 0 = non-blocking; ignored for closed-session reads"), mcpgo.DefaultNumber(3)),
@@ -64,6 +65,7 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 		mcpgo.WithNumber("max_bytes", mcpgo.Description("Max raw bytes per call (from offset or tail); 0 = no limit. Use with start_offset/end_offset/has_more to paginate"), mcpgo.DefaultNumber(8192)),
 		mcpgo.WithNumber("offset", mcpgo.Description("Raw byte position to start reading; -1 = reader cursor (live, default) / tail (closed)"), mcpgo.DefaultNumber(-1)),
 		mcpgo.WithNumber("tail_lines", mcpgo.Description("Return only the last N lines of the stream (overrides offset); 0 = off"), mcpgo.DefaultNumber(0)),
+		mcpgo.WithNumber("from_line", mcpgo.Description("Read whole lines from line N (1-based, absolute, from the persisted log; pairs with max_lines/max_bytes; exclusive of offset/tail_lines/reader_id)"), mcpgo.DefaultNumber(0)),
 		mcpgo.WithNumber("reader_id", mcpgo.DefaultNumber(0)),
 	), withLogging("shell_output", s.handleReadOutput))
 
@@ -104,7 +106,7 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 	), withLogging("ssh_config", s.handleSSHConfigOps))
 
 	mcpServer.AddTool(s.newTool("message",
-		mcpgo.WithDescription("A session's transcript index: action=list returns the spans of the shell's byte log (status, time, start, end) in order. The bytes themselves are read with shell_output(offset=start, max_bytes=end-start).\n\nstatus is the one field worth reading: it says who produced the span. o = output from the shell, a = input an AI agent wrote through MCP, i = input written at the terminal (the human, through the Web UI), q = an approval was requested at this point, A = an approved input was released and written. An i or q span is the evidence that a human has operated this terminal, which is otherwise invisible in the byte stream (the agent's and the human's keystrokes produce the same echo). Input spans are zero-length marks: start == end, because the bytes live in the terminal's echo rather than being written twice. Both `a` and `i` mark the point where a line was submitted, not where typing started."),
+		mcpgo.WithDescription("A session's transcript index: action=list returns the spans of the shell's byte log (status, time, start, end) in order, each also carrying from_line/to_line — the lines of the raw stream it covers (line numbers are absolute, 1-based; a span ending mid-line reports to_line < from_line, meaning it completes no line). total_lines gives the stream's complete-line count. The bytes themselves are read with shell_output(offset=start, max_bytes=end-start), or by line with shell_output(from_line=...).\n\nstatus is the one field worth reading: it says who produced the span. o = output from the shell, a = input an AI agent wrote through MCP, i = input written at the terminal (the human, through the Web UI), q = an approval was requested at this point, A = an approved input was released and written. An i or q span is the evidence that a human has operated this terminal, which is otherwise invisible in the byte stream (the agent's and the human's keystrokes produce the same echo). Input spans are zero-length marks: start == end, because the bytes live in the terminal's echo rather than being written twice. Both `a` and `i` mark the point where a line was submitted, not where typing started."),
 		mcpgo.WithString("action", mcpgo.Required(), mcpgo.Enum("list")),
 		mcpgo.WithString("session_id", mcpgo.Required()),
 	), withLogging("message", s.handleMessageOps))

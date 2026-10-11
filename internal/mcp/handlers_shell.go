@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -90,6 +91,27 @@ func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequ
 		return bad, nil
 	}
 
+	// The write's handle in the transcript is read BEFORE the bytes go out: the
+	// input itself reaches log.bin only through the terminal's echo (a pipe shell
+	// records no echo at all), so the stream end at this moment is where this
+	// input's echo will begin — the one per-call anchor a line-protocol consumer
+	// needs to pair a later response with its request. A failed lookup only
+	// costs the field, never the write: the index is advisory, the send is not.
+	result := map[string]any{"success": true}
+	sessID := shell.ParentSessionID()
+	if offset, err := s.sessMgr.OutputSize(sessID, shell.ID); err == nil {
+		result["offset"] = offset
+		if total, err := s.sessMgr.LineCount(sessID, shell.ID); err == nil {
+			result["total_lines"] = total
+		}
+		if line, _, err := s.sessMgr.LineSpanOfOffsets(sessID, shell.ID, offset, offset); err == nil {
+			// Zero-length position semantics, same as message spans: the line the
+			// echo continues, or 0 when it starts a fresh (still unnumbered) line —
+			// the consumer derives that as total_lines+1.
+			result["line"] = line
+		}
+	}
+
 	// Under approval mode the text is held, not written and not yet queued.
 	//
 	// A command line is text plus the enter that ends it, and those arrive as two
@@ -107,7 +129,7 @@ func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequ
 	if err := shell.SendTerminalBytesFrom([]byte(text), false, session.InputFromAI); err != nil {
 		return toolError(CodeOperationFailed, "%s", err.Error()), nil
 	}
-	return successResult(), nil
+	return jsonResult(result), nil
 }
 
 func (s *Server) handlePressKey(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -159,6 +181,10 @@ func (s *Server) handleStartSubShell(_ context.Context, request mcpgo.CallToolRe
 	parentID := getString(args, "session_id", "")
 	name := getString(args, "name", "")
 	command := getString(args, "command", "")
+	toolArgs := getStringSlice(args, "args")
+	if strings.TrimSpace(command) == "" && len(toolArgs) > 0 {
+		return toolError(CodeInvalidArgument, "%s", "command is required when args are provided"), nil
+	}
 	mode := strings.TrimSpace(getString(args, "mode", "pty"))
 	if mode != "pty" && mode != "pipe" {
 		return toolError(CodeInvalidArgument, "%s", fmt.Sprintf("mode must be 'pty' or 'pipe', got %q", mode)), nil
@@ -170,7 +196,7 @@ func (s *Server) handleStartSubShell(_ context.Context, request mcpgo.CallToolRe
 	if bad != nil {
 		return bad, nil
 	}
-	cs, err := sess.CreateChildShell(command, nil, mode == "pty", rows, cols, name)
+	cs, err := sess.CreateChildShell(command, toolArgs, mode == "pty", rows, cols, name)
 	if err != nil {
 		return toolError(CodeOperationFailed, "%s", err.Error()), nil
 	}
@@ -270,6 +296,7 @@ type readParams struct {
 	readerID  int
 	offset    int64
 	tailLines int
+	fromLine  int64
 }
 
 // parseReadParams reads and range-checks the arguments of a shell_output call.
@@ -287,11 +314,29 @@ func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
 	readerID := int(getFloat64(args, "reader_id", 0))
 	offset := int64(getFloat64(args, "offset", -1))
 	tailLines := int(getFloat64(args, "tail_lines", 0))
+	fromLine := int64(getFloat64(args, "from_line", 0))
 	if tailLines < 0 {
 		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("tail_lines must be >= 0, got %d", tailLines))
 	}
 	if offset < -1 {
 		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("offset must be >= -1, got %d", offset))
+	}
+	if fromLine < 0 {
+		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("from_line must be >= 0, got %d", fromLine))
+	}
+	// from_line picks the window by line number, so it replaces the byte/cursor
+	// selectors rather than combining with them: each names a different position
+	// for the same read, and honoring both would mean silently choosing one.
+	if fromLine > 0 {
+		if tailLines > 0 {
+			return readParams{}, toolError(CodeInvalidArgument, "%s", "from_line and tail_lines are mutually exclusive; use one selector per read")
+		}
+		if offset >= 0 {
+			return readParams{}, toolError(CodeInvalidArgument, "%s", "from_line and offset are mutually exclusive; use one selector per read")
+		}
+		if readerID > 0 {
+			return readParams{}, toolError(CodeInvalidArgument, "%s", "from_line addresses the persisted log; reader_id is a live cursor — use one selector per read")
+		}
 	}
 	return readParams{
 		stripAnsi: stripAnsi,
@@ -301,6 +346,7 @@ func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
 		readerID:  readerID,
 		offset:    offset,
 		tailLines: tailLines,
+		fromLine:  fromLine,
 	}, nil
 }
 
@@ -308,12 +354,23 @@ func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
 // that slice sits in the whole stream. Those offsets are what lets a caller page:
 // end_offset is where the next read starts, and has_more says whether anything
 // follows it.
+//
+// Every byte field describes the RAW stream; the cleaned text is a rendering of
+// it. partialTail is that rule applied to line boundaries: how many bytes at the
+// end of the window follow the last '\n' (0 = the window ends on a line
+// boundary). fromLine/toLine/totalLines/lineBytes are filled only by the
+// from_line selector, which reads whole lines from the line index.
 type outputWindow struct {
-	output  string
-	start   int64
-	end     int64
-	total   int64
-	hasMore bool
+	output      string
+	start       int64
+	end         int64
+	total       int64
+	hasMore     bool
+	partialTail int64
+	fromLine    int64
+	toLine      int64
+	totalLines  int64
+	lineBytes   []int64
 }
 
 // result renders the window as the tool's JSON payload. The stream identity comes
@@ -325,13 +382,29 @@ func (w outputWindow) result(src *outputSource) map[string]any {
 		"has_more":       w.hasMore,
 		"lines_returned": strings.Count(w.output, "\n"),
 		"bytes_returned": len(w.output),
-		"start_offset":   w.start,
-		"end_offset":     w.end,
-		"total_bytes":    w.total,
-		"source":         src.source(),
-		"session_id":     src.sessID,
-		"shell_id":       src.shellID,
-		"session_status": string(src.status),
+		"returned_bytes": len(w.output),
+		// raw_bytes is the cursor-safe quantity: raw window bytes, so
+		// start_offset + raw_bytes == end_offset holds whatever stripping did.
+		// Cursors advance by end_offset (or raw_bytes), never bytes_returned.
+		"raw_bytes":          w.end - w.start,
+		"start_offset":       w.start,
+		"end_offset":         w.end,
+		"total_bytes":        w.total,
+		"partial_tail_bytes": w.partialTail,
+		"source":             src.source(),
+		"session_id":         src.sessID,
+		"shell_id":           src.shellID,
+		"session_status":     string(src.status),
+	}
+	if w.totalLines > 0 {
+		result["total_lines"] = w.totalLines
+	}
+	if w.fromLine > 0 {
+		result["from_line"] = w.fromLine
+		result["to_line"] = w.toLine
+		if w.lineBytes != nil {
+			result["line_bytes"] = w.lineBytes
+		}
 	}
 	if src.live != nil {
 		result["session_uptime_seconds"] = int(clock.Since(src.created).Seconds())
@@ -351,15 +424,86 @@ func readOutputWindow(ctx context.Context, src *outputSource, p readParams) (out
 		}
 		return ansi.Compact(ansi.Strip(string(raw)))
 	}
+	// rawPartialTail is the read window's line-boundary fact: bytes after the
+	// last '\n' of the RAW window. Computed on raw, never on the cleaned text —
+	// the stream is what a line protocol is reading, and cleaning may merge or
+	// drop its line endings.
+	rawPartialTail := func(raw []byte) int64 {
+		partial := int64(len(raw))
+		if idx := bytes.LastIndexByte(raw, '\n'); idx >= 0 {
+			partial -= int64(idx + 1)
+		}
+		return partial
+	}
 
 	var w outputWindow
 	switch {
+	case p.fromLine > 0:
+		// Line-addressed read, served from the persisted log: log.bin is the
+		// stream of record for live and DEAD shells alike, and the line index
+		// (log.lines) numbers exactly those bytes. Reading the live buffer here
+		// could race its own compaction for long-past lines; the log cannot.
+		if src.msgMgr == nil {
+			return outputWindow{}, toolError(CodeInvalidArgument, "%s", "from_line is unavailable: this transcript has no persistent log")
+		}
+		totalLines, err := src.msgMgr.LineCount(src.sessID, src.shellID)
+		if err != nil {
+			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
+		}
+		if p.fromLine > totalLines {
+			return outputWindow{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("from_line %d out of range (stream has %d complete line(s))", p.fromLine, totalLines))
+		}
+		total, err := src.Len()
+		if err != nil {
+			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
+		}
+		start, err := src.msgMgr.LineStartOffset(src.sessID, src.shellID, p.fromLine)
+		if err != nil {
+			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
+		}
+		max := p.maxBytes
+		if max <= 0 {
+			max = int(total - start)
+			if max < 0 {
+				max = 0
+			}
+		}
+		raw, _, err := src.msgMgr.OutputByteRange(src.sessID, src.shellID, start, max)
+		if err != nil {
+			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
+		}
+		raw = truncateAtLines(raw, p.maxLines, false)
+		end := start + int64(len(raw))
+		// The window starts at a line start, so counting its newlines numbers
+		// every complete line it holds, and their byte lengths come from the
+		// gaps between them - no second pass over the index needed.
+		newlines := int64(bytes.Count(raw, []byte{'\n'}))
+		lineBytes := make([]int64, 0, newlines)
+		prev := start - 1
+		for i, c := range raw {
+			if c == '\n' {
+				lineBytes = append(lineBytes, start+int64(i)-prev)
+				prev = start + int64(i)
+			}
+		}
+		w = outputWindow{
+			output:      clean(raw),
+			start:       start,
+			end:         end,
+			total:       total,
+			hasMore:     end < total,
+			partialTail: rawPartialTail(raw),
+			fromLine:    p.fromLine,
+			toLine:      p.fromLine - 1 + newlines,
+			totalLines:  totalLines,
+			lineBytes:   lineBytes,
+		}
 	case p.tailLines > 0 || (src.live == nil && p.offset < 0):
 		raw, st, tot, err := src.scanTailWindow(p.tailLines, p.maxBytes)
 		if err != nil {
 			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
 		}
-		w = outputWindow{output: clean(raw), start: st, end: tot, total: tot}
+		w = outputWindow{output: clean(raw), start: st, end: tot, total: tot, partialTail: rawPartialTail(raw)}
 	case p.offset >= 0:
 		total, err := src.Len()
 		if err != nil {
@@ -378,20 +522,20 @@ func readOutputWindow(ctx context.Context, src *outputSource, p readParams) (out
 		}
 		raw = truncateAtLines(raw, p.maxLines, p.offset+int64(len(raw)) >= total)
 		end := p.offset + int64(len(raw))
-		w = outputWindow{output: clean(raw), start: p.offset, end: end, total: total, hasMore: end < total}
+		w = outputWindow{output: clean(raw), start: p.offset, end: end, total: total, hasMore: end < total, partialTail: rawPartialTail(raw)}
 	default:
 		// Live streaming cursor path (unchanged semantics).
 		pre := src.live.ReaderCursor(p.readerID)
 		if pre < 0 {
 			return outputWindow{}, toolError(CodeReaderNotRegistered, "%s", fmt.Sprintf("reader_id %d is not registered on this shell", p.readerID))
 		}
-		out, err := src.live.ReadTerminalStream(ctx, p.readerID, time.Duration(p.timeout*float64(time.Second)), p.stripAnsi, p.maxLines, p.maxBytes)
+		out, partial, err := src.live.ReadTerminalStream(ctx, p.readerID, time.Duration(p.timeout*float64(time.Second)), p.stripAnsi, p.maxLines, p.maxBytes)
 		if err != nil {
 			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
 		}
 		end := src.live.ReaderCursor(p.readerID)
 		total := src.live.BufferLen()
-		w = outputWindow{output: out, start: pre, end: end, total: total, hasMore: end < total}
+		w = outputWindow{output: out, start: pre, end: end, total: total, hasMore: end < total, partialTail: partial}
 	}
 	return w, nil
 }
@@ -455,25 +599,42 @@ func (s *Server) handleListMessages(ctx context.Context, request mcpgo.CallToolR
 	// Each span's end is the next mark's start; the last span runs to the current
 	// end of the log, so it is derived rather than stored.
 	size, _ := s.sessMgr.OutputSize(sess.ID, shellID)
+	// Line numbers come from the line index over the same log. The index is
+	// advisory, like the marks themselves: if it cannot answer (no persistence,
+	// unreadable files), the spans stay correct and simply go out without line
+	// numbers rather than the whole transcript failing. The session manager
+	// resolves an empty shell_id to the primary shell, exactly as Marks does.
+	totalLines, lineErr := s.sessMgr.LineCount(sess.ID, shellID)
 	spans := make([]map[string]any, 0, len(marks))
 	for i, m := range marks {
 		end := size
 		if i+1 < len(marks) {
 			end = marks[i+1].Offset
 		}
-		spans = append(spans, map[string]any{
+		span := map[string]any{
 			"status": string(m.Status),
 			"time":   m.Time,
 			"start":  m.Offset,
 			"end":    end,
-		})
+		}
+		if lineErr == nil {
+			if fromLine, toLine, lerr := s.sessMgr.LineSpanOfOffsets(sess.ID, shellID, m.Offset, end); lerr == nil {
+				span["from_line"] = fromLine
+				span["to_line"] = toLine
+			}
+		}
+		spans = append(spans, span)
 	}
-	return jsonResult(map[string]any{
+	result := map[string]any{
 		"spans":       spans,
 		"total_bytes": size,
 		"session_id":  sess.ID,
 		"shell_id":    shellID,
-	}), nil
+	}
+	if lineErr == nil {
+		result["total_lines"] = totalLines
+	}
+	return jsonResult(result), nil
 }
 
 // resolveShellIDForRead maps a shell_id argument onto a shell id that a READ can

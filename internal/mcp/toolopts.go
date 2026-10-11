@@ -30,12 +30,12 @@ const sshConfigImportFormat = " IMPORT/EXPORT FORMAT (Web UI batch import; HTTP 
 // advertised to MCP clients is reduced.
 var compactToolDescriptions = map[string]string{
 	"session_start":           "Start a session; returns session_id + shell_id. ssh_config REQUIRED (\"internal\" = host loopback, or profile name). DEFAULT: omit command/args for a multi-step/stateful interactive shell. command/args = one run-and-exit program: set on_exit=\"close\" so its session archives itself; never split steps across starts.",
-	"shell_open":              "Open another shell channel on a session; returns shell_id.",
+	"shell_open":              "Open another shell channel on a session; returns shell_id. command+args = argv (no shell line: spaced command = ONE name; pass tokens as args).",
 	"shell_list":              "List shell channels for a session.",
 	"shell_close":             "Close one shell channel; use session_terminate for the whole session.",
-	"shell_input":             "Write text to shell stdin without executing; use shell_key(enter) to run it.",
+	"shell_input":             "Write text to shell stdin without executing; use shell_key(enter) to run it. Returns offset/total_lines/line — where this input lands in the transcript; pair responses via message spans.",
 	"shell_key":               "Send a named key to a shell.",
-	"shell_output":            "Read output of a live or closed shell; empty read != no output (poll with timeout<=3). Unified cursor (offset/tail_lines/reader_id).",
+	"shell_output":            "Read output of a live or closed shell; empty read != done (poll, timeout<=3). Cursor (offset/tail_lines/from_line/reader_id): raw bytes — advance by end_offset, never bytes_returned; partial_tail_bytes>0 = mid-line tail.",
 	"session_list":            "List sessions.",
 	"session_info":            "Session details + its shells.",
 	"session_terminate":       "Close a session (DEAD): stops shells and forwards; entry stays in the registry and readable.",
@@ -56,10 +56,10 @@ var compactToolDescriptions = map[string]string{
 	"file_link":               "Link ops: readlink, symlink, or hard link.",
 	"file_fs":                 "Path/filesystem ops: truncate, realpath, or statvfs.",
 	"file_getwd":              "Get the SFTP working directory for a session.",
-	"message":                 "Transcript span index: status, time, byte offsets. status tells who produced it: o output, a AI input, i human input, q approval asked, A approved input. i/q = human operated. Bytes via shell_output(offset, max_bytes).",
+	"message":                 "Transcript span index: status, time, byte offsets, from_line/to_line line numbers. status: o output, a AI input, i human input, q approval asked, A approved input; i/q = human operated. Bytes via shell_output(offset, max_bytes); lines via shell_output(from_line).",
 	"ssh_config":              "SSH profiles: action=list names, or (if enabled) create/edit/copy/delete." + sshConfigImportFormat,
-	"shell_notify":            "Manage event notifications (wake-up) for a shell: register/unregister/list rules. USE IT TO WAIT ON A HUMAN AT A PROMPT (sudo/password, an interactive installer, anything they must answer in the terminal): after notify_user (see that tool), register event=output HERE and stop polling shell_output in a loop — their next output wakes you. unregister once they have answered; closing the shell or session clears the rule too.",
-	"notify_user":             "Notify the human user via the termcp Web UI: toast on every open page + browser system notification; session_id highlights that session's card. CALL IT BEFORE ASKING THE HUMAN FOR ANYTHING (password/sudo/MFA/passphrase, confirmation, approval, a decision, or any interactive input) and the moment a long task ends or fails: the human may not be watching, so an unannounced question stalls the work until they happen to look. Once you have asked, WAIT: never poll, guess or fake a human answer. Blocking asks: level=warn or error, duration_seconds=0 (sticky), the affected session_id. Repeat the same message in your reply; delivered=0 means no Web UI page was open.",
+	"shell_notify":            "Manage wake-up rules for a shell (register/unregister/list). TO WAIT ON A HUMAN AT A PROMPT (sudo/password, interactive prompts): notify_user first, register event=output HERE, stop polling shell_output — their next keystroke wakes you; unregister when they have answered.",
+	"notify_user":             "Notify the human user via the termcp Web UI: toast + system notification on every open page; session_id highlights that session's card. CALL IT BEFORE ASKING THE HUMAN FOR ANYTHING (password/sudo/MFA/passphrase, confirmation, approval, a choice, or interactive input) and when a long task ends or fails. Blocking asks: level=warn or error, duration_seconds=0 (sticky), the affected session_id. Once you have asked, WAIT: never poll, guess or fake an answer. delivered=0 means no Web UI page was open.",
 }
 
 // newTool applies termcp's compact wire representation to a tool definition.

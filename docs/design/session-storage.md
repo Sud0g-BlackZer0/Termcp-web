@@ -34,11 +34,27 @@ st.Size()                  // LogSize → total
         manifest.json         # shell 本身的信息
         log.bin               # 逐字节完整内容（唯一真相）
         log.jsonl             # 状态 + 时间戳 + 偏移，只索引，无载荷
+        log.lines             # 行索引：每个 '\n' 的绝对偏移，8 字节 LE 定长记录
 ```
 
 - shell 列表由子目录派生，`manifest.json` 不冗余存 shells 数组
 - `:N` 定位符顺序 = shell `manifest.json` 的 `created_at` 排序
 - 清理 = 删除整个 `sessions/<session_id>/` 目录（点 X 即关闭+删除，无归档逻辑）
+
+## log.lines
+
+**行号 = 第 N 条记录 = 结束第 N 行的那个 `\n` 的绝对偏移**（8 字节小端，无头部）。
+第 N 行内容 = `[上一条记录+1, 本条记录]`（首行从 0 起）。由此：
+
+- 行号 1-based、绝对、**永不平移**：`log.bin` 只追加不淘汰，第 N 行永远是同样的字节
+- 末尾半行（无 `\n` 收尾）没有记录、**不占行号**；半行长度 = `logSize-1-最后一条记录`
+- 维护与修复都在 logSink 单线程内：append `log.bin` 的同一请求里扫描 chunk 顺带追加记录；
+  缺失/滞后（老会话、崩溃）由 `SyncLineIndex` 从「最后已索引 `\n`」增量重扫补齐，幂等
+- 记录可能因崩溃留下**残缺尾**（字节数非 8 的倍数）：读路径按整记录数向下取整，
+  下一次 append 打开句柄时截掉残尾再写，不会写歪
+- 索引是**建议性**的（与 `log.jsonl` 同级）：损坏只影响按行寻址的效率，不动字节本身
+
+消费方：`shell_output(from_line=...)`、`message(action=list)` 的 `from_line`/`to_line`/`total_lines`。
 
 ## log.jsonl
 

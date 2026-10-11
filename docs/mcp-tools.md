@@ -151,12 +151,12 @@ ssh_config(action=list)
 |------|------|------|------|------|
 | `command` | string | 否 | — | 可执行文件；空 = 按**命令优先级链**解析：profile 的 `default_shell` → （仅 pty）目标机自己的登录 shell。`pipe` + 空命令且 profile 无 `default_shell` 会被拒绝：pipe 通道没有登录 shell 可申请，客户端也不会拿本机 PATH 去猜目标机的 shell |
 | `args` | string[] | 否 | `[]` | 命令行参数，仅 `command` 非空时有效 |
-| `mode` | string | 否 | `"pty"` | **首个 shell** 的模式：`"pty"` 或 `"pipe"`。模式属于 shell，不属于会话；后续 shell 的 mode 由 `shell_open` 决定 |
+| `mode` | string | 否 | `"pty"` | **首个 shell** 的模式：`"pty"` 或 `"pipe"`。模式属于 shell，不属于会话；后续 shell 的 mode 由 `shell_open` 决定。pty 会**回显输入**（Windows 上无法关闭）；机器行协议（JSONL）请用 `pipe`（无回显） |
 | `on_exit` | string | 否 | `"keep"` | 最后一个 shell **自行结束**（`exit`、一次性命令跑完）时会话怎么处理：`"keep"` 保留为运行会话（可继续复用连接：转发/SFTP/新开 shell）；`"close"` 关闭会话并进归档。一次性命令用 `"close"`，否则它会一直留在运行列表里。两种取值下输出都仍可用 `shell_output` 读取 |
 | `name` | string | 否 | ssh_config | 会话显示名称 |
 | `rows` | number | 否 | `24` | 初始 PTY 行数（1–1000） |
 | `cols` | number | 否 | `80` | 初始 PTY 列数（1–1000） |
-| `ssh_config` | string | **是** | — | profile 名称：`"internal"` = 本机 loopback，其他 = `ssh_configs/<name>/` 下的远端连接（可用 `ssh_config(action=list)` 查询） |
+| `ssh_config` | string | **是** | — | profile 名称：`"internal"` = termcp 宿主机自己的**本地终端**（完整 shell 控制，不走 SSH；要操作本机就用它，不要以为自己只能 SSH 远端），其他 = `ssh_configs/<name>/` 下的远端连接（可用 `ssh_config(action=list)` 查询） |
 
 **返回**：`{ session_id, shell_id, ssh_config, index }`（`index` = 主 shell 的频道编号，恒为 1）
 
@@ -169,7 +169,8 @@ ssh_config(action=list)
 | `session_id` | string | **是** | — | 父会话 ID |
 | `name` | string | 否 | — | 子通道显示名 |
 | `command` | string | 否 | — | **可执行文件**（非命令行）；空 = 按**命令优先级链**解析：profile 的 `default_shell` → （仅 pty）目标机自己的登录 shell。`pipe` + 空命令且 profile 无 `default_shell` 会被拒绝。传 `"ls -la"` 会被当成单个文件名报 `executable file not found`，应传 `command="ls"` + `args=["-la"]` |
-| `mode` | string | 否 | `"pty"` | 本 shell 通道的模式：`"pty"` 或 `"pipe"`（`"pipe"` = 无 TTY、逐行、运行即退出的命令）。模式是 shell 级属性，同一个会话可以同时挂 pty 与 pipe shell |
+| `args` | string[] | 否 | — | 命令参数（argv，与 `command` 配对，同 `session_start`）。command 与 args 直传 argv，**不做 shell 拼接**；`command="node"` + `args=["app.js","stream"]` = `node app.js stream` |
+| `mode` | string | 否 | `"pty"` | 本 shell 通道的模式：`"pty"` 或 `"pipe"`（`"pipe"` = 无 TTY、**无回显**、逐行、运行即退出的命令——JSONL 等机器行协议走 pipe；pty 会回显输入，**Windows 上无法关闭**）。模式是 shell 级属性，同一个会话可以同时挂 pty 与 pipe shell |
 | `rows` | number | 否 | `24` | PTY 行数 |
 | `cols` | number | 否 | `80` | PTY 列数 |
 
@@ -201,6 +202,12 @@ ssh_config(action=list)
 |------|------|------|------|------|
 | `shell_id` | string | **是** | — | |
 | `text` | string | **是** | — | UTF-8 文本（不自动追加换行） |
+
+**返回**：`{ success, offset, total_lines, line }`（行协议驱动的关键返回值）
+
+- `offset`：**提交那一刻的流末尾**——本次输入的回显将从这个位置开始写入（pty 靠回显进流；pipe 无回显，这个位置只有 log.jsonl 的零长度 `a`/`i` mark）。拿到它就能：用 `shell_output(offset=…)` 读"这次输入之后发生了什么"，或在 `message(action=list)` 里定位它落进哪个 status span。
+- `total_lines`：提交时的完整行数；`line`：按零长度位置语义（与 message spans 一致）——回显将续写的行号，流正好结束在行边界时为 `0`（回显将成为 `total_lines+1` 行，完成后经 `message` 可查）。
+- 时序提醒：pty 回显是异步的，`offset` 之后可能有进程输出插队；把 `offset` 当"提交位置"用，不要当"回显精确起点"断言。审阅模式（review pending）返回等待审阅的文本回复，无 offset——什么都没写入。
 
 ### shell_key
 
@@ -242,23 +249,28 @@ ssh_config(action=list)
 | `timeout` | number | 否 | `3` | 仅活会话：阻塞等待秒数（0–60）；0 = 非阻塞；多 shell 轮询建议 ≤3 |
 | `offset` | number | 否 | `-1` | 无状态字节游标：从该原始字节位置向后读；-1 = 默认模式（见下） |
 | `tail_lines` | number | 否 | `0` | 只返回流末尾最后 N 行（优先于 offset）；0 = 关闭 |
+| `from_line` | number | 否 | `0` | 按行号读取：从第 N 行（1-based，绝对行号，来自 `log.lines` 索引）读整行；与 `offset`/`tail_lines`/`reader_id` 互斥；0 = 关闭 |
 | `max_lines` | number | 否 | `0` | 最多返回 N 个完整行（窗口内裁切）；0 = 无限制 |
 | `max_bytes` | number | 否 | `8192` | 单次返回最大原始字节数；0 = 无限制 |
 | `reader_id` | number | 否 | `0` | 仅活会话流式游标；已关闭会话不支持 |
 
-**读取模式（三选一）**：
+**读取模式（四选一）**：
 
 1. **流式游标（默认，活会话）**：返回 reader 上次读取后的新输出，游标前移、不重复。`shell_input → shell_key(enter) → shell_output` 是驱动一条命令的完整循环（上一步的类型、回车、读取只是工具语义，不是回合边界）——应在同一轮内批处理：一个 `mcpScript` 里打字、回车、然后轮询到匹配或到期再返回。每次微步骤（打字/回车/读取各占一个模型回合）会让每个微步骤多付出 ~6–9s 的回合开销，而单次工具调用只要 2–10ms。
 2. **`offset >= 0`（无状态绝对定位）**：读字节区间 `[offset, offset+max_bytes)`。任意时刻从头/任意位置翻页；每次调用显式传 `offset`（用返回的 `end_offset` 续读），服务器不保存状态，活会话与已关闭会话一视同仁。
 3. **`tail_lines > 0`（末尾截取）**：反向取流末尾最后 N 行——只读最近输出，绝不拖入整段历史（token 友好）。无 `offset`/`tail_lines` 且目标是已关闭/死亡会话时，默认也取末尾最近一块（≤8 KiB），不会全量导出。
+4. **`from_line > 0`（按行号读取）**：从持久化日志的第 N 行读起（配合 `max_lines`/`max_bytes`）。行号建在 `log.lines` 索引上：**1-based、绝对、永不平移**（`log.bin` 只追加不淘汰），活会话与已关闭会话同一套行号，第 N 行永远是同样的字节；末尾未满一行（无 `\n` 收尾）不占行号。适合 JSONL 等行协议消费方按行拉增量（配合 `shell_notify` 唤醒后 `from_line=上次读到+1`）。
 
-**返回**：`{ output, has_more, lines_returned, bytes_returned, start_offset, end_offset, total_bytes, source, session_id, shell_id, session_status, session_uptime_seconds? }`
+**返回**：`{ output, has_more, lines_returned, bytes_returned, returned_bytes, raw_bytes, start_offset, end_offset, total_bytes, partial_tail_bytes, source, session_id, shell_id, session_status, session_uptime_seconds? }`；`from_line` 读取额外返回 `{ from_line, to_line, total_lines, line_bytes }`。
 
-- `start_offset` / `end_offset`：本次返回的原始字节区间；`total_bytes`：流总长；`has_more = end_offset < total_bytes`。
+- `start_offset` / `end_offset`：本次返回的**原始字节**区间；`total_bytes`：流总长；`has_more = end_offset < total_bytes`。
+- **字节口径**：所有 offset/字节数字段都描述原始字节流；`raw_bytes` 是原始窗口字节数（`start_offset + raw_bytes == end_offset` 恒成立），`bytes_returned`/`returned_bytes` 是**清洗后**文本长度——`strip_ansi` 剥掉了东西时两者必不相等。**游标只按 `end_offset`（或 `raw_bytes`）推进，禁止用 `bytes_returned` 推进**，否则有 ANSI 时会永久错位。
+- **`partial_tail_bytes`**：本次窗口末尾跟在最后一个 `\n` 之后的原始字节数（0 = 正好结束在行边界）。行协议消费方必须把它扣住不解析，等下一读拼成完整行再处理。
+- `from_line` / `to_line`：本次返回覆盖的行号范围；`total_lines`：流中完整行总数；`line_bytes`：每个返回行的原始字节长度（应对 MB 级单行，避免整行拉回才能定位）。
 - `source`：`"live"`（内存缓冲）或 `"persisted"`（磁盘消息流）。
 - 活会话流式读（模式 1）时 `start_offset`/`end_offset` 反映 reader 游标位置。
 
-> 例：只读已关闭会话最后 10 行 → `shell_output(shell_id=已关闭session_id, tail_lines=10)`；从头翻页 → `shell_output(shell_id, offset=0, max_bytes=8000)` 后用 `end_offset` 续读。
+> 例：只读已关闭会话最后 10 行 → `shell_output(shell_id=已关闭session_id, tail_lines=10)`；从头翻页 → `shell_output(shell_id, offset=0, max_bytes=8000)` 后用 `end_offset` 续读；按行拉增量 → `shell_output(shell_id, from_line=上一读的 to_line+1)`。
 
 ### session_list
 
@@ -414,9 +426,10 @@ ssh_config(action=list)
 | `session_id` | string | **是** | 会话 ID（省略 `shell_id` 时解析到该会话的 primary shell） |
 | `shell_id` | string | 否 | 指定 shell 通道；省略则用会话的 primary shell |
 
-- `action="list"`：返回 `{ "spans": [{ status, time, start, end }], "total_bytes": N, "session_id": "..." }`
+- `action="list"`：返回 `{ "spans": [{ status, time, start, end, from_line, to_line }], "total_bytes": N, "total_lines": N, "session_id": "..." }`
 - `status` = **这段字节是谁产生的**，共 5 个取值：`"o"` 输出（shell 自己打印的）、`"a"` AI 输入（MCP）、`"i"` 终端输入（人，经 Web UI）、`"q"` 此处请求了一次审批、`"A"` 审批通过并写入。**Agent 与人的敲键回显完全一样**，字节日志里分不出人是否操作过；`i` / `q` 区段就是「人碰过这个终端」的证据（`q` 后面不一定有字节：审批被拒/超时就不产生任何输入）。
 - `start`/`end`：该区段在 `log.bin` 中的字节区间；取内容用 `shell_output(shell_id, offset=start, max_bytes=end-start)`
+- `from_line`/`to_line`：该区段覆盖的**行号**（绝对、1-based，与 `shell_output(from_line=...)` 同一套编号）。区段在行中间结束时 `to_line < from_line`（未完成任何完整行）；零长度标记（输入）报告它所在的行；落在末尾半行/流起始/越过末尾的位置报告 0。
 - 输入是**零长度标记**（`start == end`）：按键已由终端回显进输出流，不重复写入；且标记的是**提交那一行**（按 enter / ctrl+c / ctrl+d / ctrl+z）的时刻，不是开始打字的时刻
 
 ### session_delete（彻底删除会话）
