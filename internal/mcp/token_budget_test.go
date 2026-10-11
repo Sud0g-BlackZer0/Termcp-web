@@ -105,8 +105,8 @@ func TestDeferLoadingPolicy(t *testing.T) {
 		}
 	}
 
-	// Opt-in: the hot path stays eager, the wide/low-frequency surfaces defer.
-	on := collect(t, DeferTools())
+	// partial: the hot path stays eager, the wide/low-frequency surfaces defer.
+	on := collect(t, DeferLevel(DeferPartial))
 	for _, name := range core {
 		deferred, ok := on[name]
 		if !ok {
@@ -135,5 +135,26 @@ func TestDeferLoadingPolicy(t *testing.T) {
 			continue
 		}
 		t.Errorf("tool %q is neither in the core list nor deferredTools; classify it", name)
+	}
+
+	// all: only the minimum driving loop stays eager; everything else —
+	// including the partial-level core — defers. A client that supports
+	// deferred loading pays one search round trip per first use; that is the
+	// level's whole point.
+	all := collect(t, DeferLevel(DeferAll))
+	for name := range all {
+		if !allLevelCore[name] && !deferredTools[name] && !isCore[name] {
+			t.Errorf("tool %q is neither all-level core nor classified; it would silently go eager under level=all", name)
+		}
+	}
+	for name := range allLevelCore {
+		deferred, ok := all[name]
+		if !ok {
+			t.Errorf("all-level core tool %q is not registered", name)
+			continue
+		}
+		if deferred {
+			t.Errorf("all-level core tool %q must stay eager: the minimum driving loop cannot require a search", name)
+		}
 	}
 }

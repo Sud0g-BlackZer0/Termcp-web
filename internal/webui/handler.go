@@ -9,6 +9,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/approval"
 	"github.com/open-mcp-ai/termcp/internal/forward"
+	"github.com/open-mcp-ai/termcp/internal/message"
 	"github.com/open-mcp-ai/termcp/internal/notify"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
@@ -59,6 +60,7 @@ func markdownContentType(next http.Handler) http.Handler {
 // Handler serves the browser UI and JSON/SSE APIs at / and /api/... .
 type Handler struct {
 	Sessions   *session.Manager
+	MsgMgr     *message.Manager
 	SSH        *sshconfig.Store
 	ForwardMgr *forward.ForwardManager
 	NotifyMgr  *notify.Manager // active shell notification rules (read-only listing + delete)
@@ -161,6 +163,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/shells/{id}/output-range", h.handleShellOutputRange)
 	// The status index behind output-range: where each span starts and what made it.
 	mux.HandleFunc("GET /api/shells/{id}/marks", h.handleShellMarks)
+	// Line-addressed reads over the same log (REST twin of shell_output from_line).
+	mux.HandleFunc("GET /api/shells/{id}/lines", h.handleShellLines)
 	// The row layout of that log for one terminal width, with the marks on it.
 	mux.HandleFunc("GET /api/shells/{id}/rail", h.handleShellRail)
 	mux.HandleFunc("DELETE /api/shells/{id}", h.handleCloseShell)

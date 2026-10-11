@@ -35,6 +35,7 @@ st.Size()                  // LogSize → total
         log.bin               # 逐字节完整内容（唯一真相）
         log.jsonl             # 状态 + 时间戳 + 偏移，只索引，无载荷
         log.lines             # 行索引：每个 '\n' 的绝对偏移，8 字节 LE 定长记录
+        log.stdio             # 流切换索引：stdout/stderr 切换点，int64 LE 定长记录
 ```
 
 - shell 列表由子目录派生，`manifest.json` 不冗余存 shells 数组
@@ -55,6 +56,16 @@ st.Size()                  // LogSize → total
 - 索引是**建议性**的（与 `log.jsonl` 同级）：损坏只影响按行寻址的效率，不动字节本身
 
 消费方：`shell_output(from_line=...)`、`message(action=list)` 的 `from_line`/`to_line`/`total_lines`。
+
+## log.stdio
+
+**每个 8 字节 int64 记录 = 一次流切换**：producer 从 stdout ↔ stderr 翻转的位置。符号位即类型——**正数 = stdout 段起点，负数 = stderr 段起点**，幅值 `-1` 为偏移（`offset = |v| - 1`；+1 平移是为了让 offset 0 的 stderr 起点 = `-1`，与 `stdout@0` 的 `+1` 区分，0 值永不出现）。
+
+- **只记切换，不记 chunk**：连续同源 chunk 不产生记录，一条记录 = 一个极长段的起点；段延伸到下一条记录或流末尾。文件无记录 = 空流。
+- 写入与字节同一 sink 请求，**索引在字节之后**（仓库铁律）：crash 丢记录 → 该段回落按 stdout 读（e 集合缩小），不会误判；残缺尾（size%8≠0）打开时截断。
+- **pty 无记录**：终端在源头合并 stderr，Stderr reader 永远无数据。
+- 它是**传输层**索引：回答"这段字节从哪个管道来"；谁在操作（业务层）看 `log.jsonl`，行边界看 `log.lines`。
+- 消费方：`shell_output(stream="o"|"e")` 过滤读。
 
 ## log.jsonl
 

@@ -68,3 +68,22 @@ func (m *Manager) LineSpanOfOffsets(sessionID, shellID string, start, end int64)
 	}
 	return m.msgMgr.LineSpanOfOffsets(sessionID, m.resolveShellID(sessionID, shellID), start, end)
 }
+
+// StderrRanges returns the stderr byte ranges of a shell's byte log (or, with
+// an empty shellID, the session's primary shell) - the transport-layer index
+// the stream filter consumes. Same shell resolution as LineCount.
+func (m *Manager) StderrRanges(sessionID, shellID string) ([][2]int64, error) {
+	if m.msgMgr == nil {
+		return nil, nil
+	}
+	return m.msgMgr.StderrRanges(sessionID, m.resolveShellID(sessionID, shellID))
+}
+
+// LineSpans returns the line spans [from, to] (1-based, inclusive); same shell
+// resolution as LineCount.
+func (m *Manager) LineSpans(sessionID, shellID string, from, to int64) ([]message.LineSpan, error) {
+	if m.msgMgr == nil {
+		return nil, message.ErrLinesUnavailable
+	}
+	return m.msgMgr.LineSpans(sessionID, m.resolveShellID(sessionID, shellID), from, to)
+}

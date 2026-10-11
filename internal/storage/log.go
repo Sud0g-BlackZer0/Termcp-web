@@ -17,11 +17,16 @@ import (
 // meaningful without any bookkeeping: it is a fact about the file, not a sum of
 // lengths that can drift out of agreement with the bytes.
 //
+// stream says which low-level producer the bytes came from (StdioOut or
+// StdioErr): the sink uses it to maintain the stream-switch index, recording
+// only when the producing stream changes. The bytes themselves all live in the
+// one log.bin regardless of stream.
+//
 // The append happens through a cached handle so a burst of small writes does not
 // pay an open() per write. Callers must AppendMark *after* this returns so a
 // crash can only ever leave a trailing span with no mark (attributed to the
 // previous status), never a mark pointing past the end of the data.
-func (s *Store) AppendLog(sessionID, shellID string, data []byte) (int64, error) {
+func (s *Store) AppendLog(sessionID, shellID string, data []byte, stream StdioStream) (int64, error) {
 	if err := validateID(sessionID); err != nil {
 		return 0, err
 	}
@@ -31,7 +36,7 @@ func (s *Store) AppendLog(sessionID, shellID string, data []byte) (int64, error)
 	if len(data) == 0 {
 		return s.LogSize(sessionID, shellID)
 	}
-	return s.logSink.append(sessionID, shellID, data)
+	return s.logSink.append(sessionID, shellID, data, stream)
 }
 
 // AppendMark appends one status transition to a shell's log.jsonl.
@@ -78,6 +83,114 @@ func (s *Store) LogSize(sessionID, shellID string) (int64, error) {
 		return 0, err
 	}
 	return st.Size(), nil
+}
+
+// --- stream index (log.stdio) -----------------------------------------------
+//
+// log.stdio records where a shell's byte stream switches between its two
+// low-level producers, stdout and stderr (pipe channels only: a pty merges
+// stderr into the terminal stream at the source, so a pty shell's index stays
+// empty). It is the transport-layer counterpart of log.jsonl, which records
+// who acted (agent, human, review) rather than which pipe the bytes came from.
+//
+// The file is a flat array of 8-byte little-endian int64 records, one per
+// SWITCH - the offset where the producing stream changes - never per chunk:
+// consecutive chunks from the same stream record nothing, so a record is the
+// start of a maximal run. The sign carries the type, the magnitude the
+// position:
+//
+//	value > 0  a stdout run starts at value-1
+//	value < 0  a stderr run starts at -value-1
+//
+// The offset is stored +1 because a stderr switch at offset 0 would otherwise
+// be -0, which is indistinguishable from a stdout switch at 0. With the shift,
+// 0 is not a legal value: an empty stream has no records, and a stream's first
+// chunk always records, so the records tile the stream from offset 0 with no
+// implicit starting state. Reading is self-describing per record - a lost or
+// torn record can only shrink the stderr set (the bytes it covered read as
+// stdout, today's behaviour), never misattribute anything else.
+
+// StdioPath returns the path of a shell's stream-switch index.
+func (s *Store) StdioPath(sessionID, shellID string) string {
+	return filepath.Join(s.shellDir(sessionID, shellID), "log.stdio")
+}
+
+// StdioStream identifies which low-level producer a chunk came from. The zero
+// value is stdout, so a caller that does not care records stdout switches.
+type StdioStream int8
+
+const (
+	// StdioOut is the process's stdout.
+	StdioOut StdioStream = 0
+	// StdioErr is the process's stderr.
+	StdioErr StdioStream = 1
+)
+
+// stdioRecord packs one switch into an int64: sign = stream, |value|-1 = the
+// absolute offset where the run starts.
+func stdioRecord(offset int64, stream StdioStream) int64 {
+	v := offset + 1
+	if stream == StdioErr {
+		v = -v
+	}
+	return v
+}
+
+// DecodeStdioRecord unpacks one log.stdio record: sign = stream, magnitude-1 =
+// the absolute offset where that stream's run starts. ok is false for 0, which
+// no legal record ever holds (the +1 shift makes sure of it).
+func DecodeStdioRecord(v int64) (offset int64, stream StdioStream, ok bool) {
+	if v == 0 {
+		return 0, 0, false
+	}
+	if v < 0 {
+		return -v - 1, StdioErr, true
+	}
+	return v - 1, StdioOut, true
+}
+
+// ReadStdioRecords returns a shell's raw switch records in file order.
+func (s *Store) ReadStdioRecords(sessionID, shellID string) ([]int64, error) {
+	if err := validateID(sessionID); err != nil {
+		return nil, err
+	}
+	if err := validateID(shellID); err != nil {
+		return nil, err
+	}
+	st, err := os.Stat(s.StdioPath(sessionID, shellID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	count := st.Size() / lineRecordSize
+	if count == 0 {
+		return nil, nil
+	}
+	return s.readInt64Records(s.StdioPath(sessionID, shellID), count)
+}
+
+// readInt64Records reads n little-endian int64 records from a fixed-record
+// sidecar file. Shared by the line and stdio indexes.
+func (s *Store) readInt64Records(path string, n int64) ([]int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, n*lineRecordSize)
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return nil, err
+	}
+	out := make([]int64, 0, n)
+	for i := 0; i+lineRecordSize <= len(buf); i += lineRecordSize {
+		out = append(out, int64(binary.LittleEndian.Uint64(buf[i:])))
+	}
+	return out, nil
 }
 
 // --- line index (log.lines) -------------------------------------------------

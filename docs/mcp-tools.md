@@ -41,18 +41,21 @@ Termcp 的 31 个工具按"热路径 / 低频面"分成两类。MCP 标准的 `d
 - **核心常驻**（永远不标记）：`session_start` / `session_list` / `session_info` / `session_terminate` / `session_delete` / `shell_open` / `shell_list` / `shell_close` / `shell_input` / `shell_key` / `shell_output` / `notify_user`。这些构成"开会话 → 打字 → 读输出"的主循环，若需先搜索才能用，每次交互都要多一个来回——**开启懒加载时它们依然立即可见**。
 - **低频宽面**（19 个，`--mcp-defer-tools` 下才标记）：11 个 SFTP 文件工具、`forward`、`shell_resize` / `shell_detect` / `shell_notify` / `shell_reader_register` / `shell_reader_unregister`、`message`、`ssh_config`。这些工具参数面宽、调用频率低，客户端可按需检索后再拉取 Schema，节省每轮注入的上下文预算。
 
-### 两种模式
+### 三级开关（`--mcp-defer-tools-level`）
 
-| 模式 | `tools/list` 行为 |
+| 级别 | `tools/list` 行为 |
 |------|------------------|
-| **默认** | 31 个工具全部返回完整 Schema，不打 `defer_loading` |
-| **`--mcp-defer-tools`** | 12 个核心工具完整返回；19 个低频工具带 `defer_loading: true` |
+| **`off`（默认）** | 31 个工具全部返回完整 Schema，不打 `defer_loading` |
+| **`partial`** | 12 个核心工具完整返回；19 个低频工具带 `defer_loading: true`。等价于旧布尔开关 `--mcp-defer-tools` |
+| **`all`** | 只保留最小驱动环 4 个（`session_start` / `shell_input` / `shell_key` / `shell_output`）常驻，其余 27 个全部带 `defer_loading: true`——为支持按需拉取的客户端压出最小的首次上下文 |
 
-两种模式都是**同样 31 个工具**，开关从不删除工具，只影响首次列表是否附带 Schema。
+三种模式都是**同样 31 个工具**，开关从不删除工具，只影响首次列表是否附带 Schema。旧布尔开关 `--mcp-defer-tools` 仍然可用（等价 `partial`）；`--mcp-defer-tools-level` 设置后优先。
 
 默认关闭的原因很实际：不认识 `defer_loading` 的客户端、或经网关转发而被丢弃标记的链路（实测 **Codex 0.155.1 经 AxonHub** 会把带标记的工具整个吞掉，模型侧看到"零工具"），会让这些工具**从模型视野里直接消失**，而不是"稍后能搜到"。只有确认客户端支持按需拉取（mcp-go 系、Claude Code）时才建议开启。
 
-分类由 `internal/mcp/toolopts.go` 的 `deferredTools` 表定义，开关由 `Server.shouldDeferTool` 决定（`mcp.DeferTools()` option）；`TestDeferLoadingPolicy` 会分别校验两种模式，并拦住"新工具未分类"与"僵尸条目"。若要调整分类，改表即可，无需改各处注册代码。
+分类由 `internal/mcp/toolopts.go` 的 `deferredTools` 表与 `allLevelCore` 表定义，开关由 `Server.shouldDeferTool` 按级别决定（`mcp.DeferLevel(level)` option）；`TestDeferLoadingPolicy` 会分别校验三种级别，并拦住"新工具未分类"与"僵尸条目"。若要调整分类，改表即可，无需改各处注册代码。
+
+另见：完整的工具参考本来就以 MCP resource 形式随实例提供（`resources/list` 里的 `api.md` / `skills.md`），instructions 的规则 0 已指向它——这正是 #95 "提示放资源展开"的落点：`tools/list` 只带紧凑描述，深度文档按需取。
 
 **ID 规则（硬）：**
 
@@ -158,7 +161,7 @@ ssh_config(action=list)
 | `cols` | number | 否 | `80` | 初始 PTY 列数（1–1000） |
 | `ssh_config` | string | **是** | — | profile 名称：`"internal"` = termcp 宿主机自己的**本地终端**（完整 shell 控制，不走 SSH；要操作本机就用它，不要以为自己只能 SSH 远端），其他 = `ssh_configs/<name>/` 下的远端连接（可用 `ssh_config(action=list)` 查询） |
 
-**返回**：`{ session_id, shell_id, ssh_config, index }`（`index` = 主 shell 的频道编号，恒为 1）
+**返回**：`{ session_id, shell_id, ssh_config, index, stderr }`（`index` = 主 shell 的频道编号，恒为 1；`stderr` = `"merged(pty)"` 或 `"separate"`——后者表示 `shell_output(stream="e")` 能取到 stderr 字节）
 
 ### shell_open
 
@@ -174,7 +177,7 @@ ssh_config(action=list)
 | `rows` | number | 否 | `24` | PTY 行数 |
 | `cols` | number | 否 | `80` | PTY 列数 |
 
-**返回**：`{ shell_id, session_id, name, index }`（`index` = 该频道的编号，即 `termcp://#<会话id>:<index>` 里的 N）
+**返回**：`{ shell_id, session_id, name, index, stderr }`（`index` = 该频道的编号，即 `termcp://#<会话id>:<index>` 里的 N；`stderr` = `"separate"`（pipe）/ `"merged(pty)"`）
 
 ### shell_list
 
@@ -250,6 +253,7 @@ ssh_config(action=list)
 | `offset` | number | 否 | `-1` | 无状态字节游标：从该原始字节位置向后读；-1 = 默认模式（见下） |
 | `tail_lines` | number | 否 | `0` | 只返回流末尾最后 N 行（优先于 offset）；0 = 关闭 |
 | `from_line` | number | 否 | `0` | 按行号读取：从第 N 行（1-based，绝对行号，来自 `log.lines` 索引）读整行；与 `offset`/`tail_lines`/`reader_id` 互斥；0 = 关闭 |
+| `stream` | string | 否 | `"all"` | 按底层流过滤返回字节：`"all"` 全部（默认）/ `"o"` 仅 stdout / `"e"` 仅 stderr。**offset 永远指原始流**——`start_offset`/`end_offset`/`total_bytes`/`raw_bytes` 不因过滤改变，只有返回内容（`bytes_returned`）变小。pty 在源头合流 stderr，`"e"` 恒为空、`"o"` 等价 `"all"`；一行跨 o/e 边界时过滤读把它拆成多段拼接，不丢字节 |
 | `max_lines` | number | 否 | `0` | 最多返回 N 个完整行（窗口内裁切）；0 = 无限制 |
 | `max_bytes` | number | 否 | `8192` | 单次返回最大原始字节数；0 = 无限制 |
 | `reader_id` | number | 否 | `0` | 仅活会话流式游标；已关闭会话不支持 |
@@ -427,7 +431,7 @@ ssh_config(action=list)
 | `shell_id` | string | 否 | 指定 shell 通道；省略则用会话的 primary shell |
 
 - `action="list"`：返回 `{ "spans": [{ status, time, start, end, from_line, to_line }], "total_bytes": N, "total_lines": N, "session_id": "..." }`
-- `status` = **这段字节是谁产生的**，共 5 个取值：`"o"` 输出（shell 自己打印的）、`"a"` AI 输入（MCP）、`"i"` 终端输入（人，经 Web UI）、`"q"` 此处请求了一次审批、`"A"` 审批通过并写入。**Agent 与人的敲键回显完全一样**，字节日志里分不出人是否操作过；`i` / `q` 区段就是「人碰过这个终端」的证据（`q` 后面不一定有字节：审批被拒/超时就不产生任何输入）。
+- `status` = **这段字节是谁产生的**（业务语义：谁在操作；不含 stdout/stderr 之分——`o` 同时覆盖两者，流的归属用 `shell_output(stream=)` 读），共 5 个取值：`"o"` 输出（shell 自己打印的）、`"a"` AI 输入（MCP）、`"i"` 终端输入（人，经 Web UI）、`"q"` 此处请求了一次审批、`"A"` 审批通过并写入。**Agent 与人的敲键回显完全一样**，字节日志里分不出人是否操作过；`i` / `q` 区段就是「人碰过这个终端」的证据（`q` 后面不一定有字节：审批被拒/超时就不产生任何输入）。
 - `start`/`end`：该区段在 `log.bin` 中的字节区间；取内容用 `shell_output(shell_id, offset=start, max_bytes=end-start)`
 - `from_line`/`to_line`：该区段覆盖的**行号**（绝对、1-based，与 `shell_output(from_line=...)` 同一套编号）。区段在行中间结束时 `to_line < from_line`（未完成任何完整行）；零长度标记（输入）报告它所在的行；落在末尾半行/流起始/越过末尾的位置报告 0。
 - 输入是**零长度标记**（`start == end`）：按键已由终端回显进输出流，不重复写入；且标记的是**提交那一行**（按 enter / ctrl+c / ctrl+d / ctrl+z）的时刻，不是开始打字的时刻

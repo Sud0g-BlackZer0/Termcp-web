@@ -2,12 +2,13 @@ package webui
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/open-mcp-ai/termcp/internal/session"
+	"github.com/open-mcp-ai/termcp/internal/transcript"
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
 
@@ -68,20 +69,6 @@ func (h *Handler) redirectShells(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/api/sessions/"+id+"/shells", http.StatusMovedPermanently)
 }
 
-// resolveOutputShell resolves a shell for output-range endpoints.
-// Prefer shell_id; fall back to session primary shell when a session_id is passed.
-func (h *Handler) resolveOutputShell(id string) *session.ChildShell {
-	if cs := h.Sessions.GetChildShell(id); cs != nil {
-		return cs
-	}
-	if sess := h.Sessions.Get(id); sess != nil {
-		if cs := sess.PrimaryShell(); cs != nil {
-			return cs
-		}
-	}
-	return nil
-}
-
 // handleShellOutputRange is the canonical shell history endpoint: GET /api/shells/{id}/output-range.
 func (h *Handler) handleShellOutputRange(w http.ResponseWriter, r *http.Request) {
 	h.writeOutputRange(w, r, r.PathValue("id"))
@@ -118,89 +105,77 @@ func (h *Handler) writeOutputRange(w http.ResponseWriter, r *http.Request, id st
 		}
 	}
 
-	var data []byte
-	var total int64
-
-	// One read path for every session state. A live shell reads its buffer; a DEAD
-	// or restart-restored session reads the persisted byte log. Both answer in the
-	// same offset space, so a client can hold an offset across a restart.
-	//
-	// The two differ only in where the bytes come from, so they are resolved into
-	// one (len, read) pair instead of duplicating the tail/read/error handling.
-	var sizeFn func() (int64, error)
-	var readFn func(start int64, max int) ([]byte, int64, error)
-	var baseOffset int64
-
-	if shell := h.resolveOutputShell(id); shell != nil {
-		sizeFn = func() (int64, error) { return shell.BufferLen(), nil }
-		readFn = shell.OutputByteRange
-		baseOffset = shell.OutputBaseOffset()
-	} else {
-		// DEAD/restored sessions have no live buffer; serve the read-only view from
-		// the persisted log so tabs still work after a teardown or a restart.
-		sid, shid, ok := h.persistedOutputFor(id)
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		sizeFn = func() (int64, error) { return h.Sessions.OutputSize(sid, shid) }
-		readFn = func(s int64, m int) ([]byte, int64, error) {
-			return h.Sessions.OutputByteRange(sid, shid, s, m)
-		}
+	// One read path for every session state, shared with the MCP tool through
+	// the transcript package: resolve the id onto the unified byte stream, then
+	// read the window. start/end/total always describe the raw window; a
+	// stream= filter only shrinks the returned content.
+	src, err := transcript.Resolve(h.Sessions, h.MsgMgr, id)
+	if err != nil {
+		writeTranscriptError(w, err)
+		return
 	}
 
+	stream := strings.TrimSpace(r.URL.Query().Get("stream"))
+	if stream != "" && stream != "all" && stream != "o" && stream != "e" {
+		http.Error(w, `stream must be "all", "o" or "e"`, http.StatusBadRequest)
+		return
+	}
+
+	total, terr := src.Len()
+	if terr != nil {
+		http.Error(w, terr.Error(), http.StatusInternalServerError)
+		return
+	}
 	if tail {
-		total, err = sizeFn()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
 		if t := total - int64(max); t > 0 {
 			start = t
 		} else {
 			start = 0
 		}
 	}
-
-	data, total, err = readFn(start, max)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	// An absolute start below the earliest retained byte (dropped by buffer
 	// compaction) clamps forward; report the start actually served.
-	if start < baseOffset {
-		start = baseOffset
+	if start < src.BaseOffset() {
+		start = src.BaseOffset()
 	}
 	if start > total {
 		start = total
 	}
 
+	win, rerr := transcript.Read(r.Context(), src, transcript.Params{
+		Offset:    start,
+		MaxBytes:  max,
+		Stream:    stream,
+		StripAnsi: false, // the terminal repaints raw bytes
+	})
+	if rerr != nil {
+		writeTranscriptError(w, rerr)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"start": start,
-		"end":   start + int64(len(data)),
-		"total": total,
-		"d":     string(data),
+		"start": win.Start,
+		"end":   win.End,
+		"total": win.Total,
+		"d":     win.Output,
 	})
 }
 
-// persistedOutputFor resolves a DEAD/restored session (and optional shell) for a
-// read-only output range. id may be a session_id (whole merged stream) or a
-// shell_id (single-shell stream). ok is false for known-live sessions (which use
-// their in-memory buffer) and for unknown ids.
-func (h *Handler) persistedOutputFor(id string) (sessionID, shellID string, ok bool) {
-	if sess := h.Sessions.Get(id); sess != nil {
-		if sess.Info().Status != api.SessionRunning {
-			return sess.ID, "", true
-		}
-		return "", "", false
-	}
-	if sess := h.Sessions.GetSessionByShellID(id); sess != nil {
-		if sess.Info().Status != api.SessionRunning {
-			return sess.ID, id, true
+// writeTranscriptError maps the shared read path's typed errors onto HTTP
+// statuses, the same kinds the MCP tool maps onto its error codes.
+func writeTranscriptError(w http.ResponseWriter, err error) {
+	var te *transcript.Error
+	if errors.As(err, &te) {
+		switch te.Kind {
+		case transcript.ErrShellNotFound, transcript.ErrSessionNotFound:
+			http.Error(w, te.Msg, http.StatusNotFound)
+			return
+		case transcript.ErrInvalid, transcript.ErrReader:
+			http.Error(w, te.Msg, http.StatusBadRequest)
+			return
 		}
 	}
-	return "", "", false
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
 func (h *Handler) handleListShells(w http.ResponseWriter, r *http.Request) {

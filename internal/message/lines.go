@@ -274,3 +274,66 @@ type LineOutOfRangeError struct {
 func (e *LineOutOfRangeError) Error() string {
 	return fmt.Sprintf("line %d out of range (stream has %d complete line(s))", e.Line, e.Total)
 }
+
+// LineSpan is one line's number and its half-open byte range in the raw
+// stream (end exclusive, i.e. the range includes the terminating newline).
+type LineSpan struct {
+	N     int64
+	Start int64
+	End   int64
+}
+
+// LineSpans returns the spans of lines [from, to] (1-based, inclusive). It is
+// the batch form of LineBounds: one index read prices the whole range, which
+// is what a REST lines endpoint needs to answer a page without per-line reads.
+func (m *Manager) LineSpans(sessionID, shellID string, from, to int64) ([]LineSpan, error) {
+	if m.store == nil {
+		return nil, ErrLinesUnavailable
+	}
+	if from < 1 || to < from {
+		return nil, nil
+	}
+	if err := m.syncLines(sessionID, shellID); err != nil {
+		return nil, err
+	}
+	total, err := m.store.LineRecordCount(sessionID, shellID)
+	if err != nil {
+		return nil, err
+	}
+	if from > total {
+		return nil, errLineOutOfRange(from, total)
+	}
+	if to > total {
+		to = total
+	}
+	// Records from-2 (0-based, giving line `from` its start) through to-1
+	// (ending line `to`); line 1 has no predecessor record and starts at 0.
+	first := from - 2
+	if first < 0 {
+		first = 0
+	}
+	recs, err := m.store.ReadLineRecords(sessionID, shellID, first, int(to-first))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]LineSpan, 0, to-from+1)
+	prevEnd := int64(-1)
+	idx := 0
+	if from > 1 {
+		if len(recs) == 0 {
+			return nil, errLineOutOfRange(from, total)
+		}
+		prevEnd = recs[0]
+		idx = 1
+	}
+	for line := from; line <= to; line++ {
+		if idx >= len(recs) {
+			break
+		}
+		end := recs[idx]
+		idx++
+		out = append(out, LineSpan{N: line, Start: prevEnd + 1, End: end + 1})
+		prevEnd = end
+	}
+	return out, nil
+}

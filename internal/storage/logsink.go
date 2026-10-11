@@ -27,7 +27,11 @@ type sinkRequest struct {
 	session string
 	shell   string
 	data    []byte
-	reply   chan sinkResult
+	// stream says which low-level producer the data came from (stdout or
+	// stderr); the owner compares it against the shell's last chunk to decide
+	// whether this append switches streams and needs a log.stdio record.
+	stream StdioStream
+	reply  chan sinkResult
 }
 
 type sinkResult struct {
@@ -70,13 +74,17 @@ func newLogSink(store *Store) *logSink {
 
 // run owns the open handles and is the only goroutine that touches them.
 //
-// Each shell has two handles: one for log.bin (the byte log) and one for
-// log.lines (the line index). Both live in the same two maps, keyed the same
-// way, and both are closed by the same close operations, so a shell's index can
-// never outlive its byte log's handle or the reverse.
+// Each shell has three handles: log.bin (the byte log), log.lines (the line
+// index) and log.stdio (the stream-switch index), plus a lastStream entry per
+// shell so a switch record is only written when the producing stream actually
+// changes. All of them live on this one goroutine, so a byte append, its line
+// records and its stream switch cannot interleave with each other or with a
+// concurrent shell's appends.
 func (sink *logSink) run() {
 	handles := make(map[string]*os.File)
 	lineHandles := make(map[string]*os.File)
+	stdioHandles := make(map[string]*os.File)
+	lastStream := make(map[string]StdioStream)
 
 	for req := range sink.reqs {
 		switch req.op {
@@ -108,6 +116,18 @@ func (sink *logSink) run() {
 				slog.Warn("log.lines append failed; index will be repaired on next sync",
 					"session", req.session, "shell", req.shell, "err", err)
 			}
+			// Same advisory contract for the stream-switch record: a chunk whose
+			// switch was not recorded reads as stdout (the pre-#104 behaviour),
+			// and the next chunk from the stderr stream retries the record.
+			k := logKey(req.session, req.shell)
+			if prev, seen := lastStream[k]; !seen || prev != req.stream {
+				if err := sink.appendStdioRecord(stdioHandles, req.session, req.shell, off, req.stream); err != nil {
+					slog.Warn("log.stdio switch record failed; stream reads as stdout until it succeeds",
+						"session", req.session, "shell", req.shell, "err", err)
+				} else {
+					lastStream[k] = req.stream
+				}
+			}
 			req.reply <- sinkResult{offset: off}
 
 		case opSyncLines:
@@ -124,6 +144,11 @@ func (sink *logSink) run() {
 				_ = f.Close()
 				delete(lineHandles, k)
 			}
+			if f, ok := stdioHandles[k]; ok {
+				_ = f.Close()
+				delete(stdioHandles, k)
+			}
+			delete(lastStream, k)
 			req.reply <- sinkResult{}
 
 		case opCloseSession:
@@ -138,6 +163,17 @@ func (sink *logSink) run() {
 				if strings.HasPrefix(k, prefix) {
 					_ = f.Close()
 					delete(lineHandles, k)
+				}
+			}
+			for k, f := range stdioHandles {
+				if strings.HasPrefix(k, prefix) {
+					_ = f.Close()
+					delete(stdioHandles, k)
+				}
+			}
+			for k := range lastStream {
+				if strings.HasPrefix(k, prefix) {
+					delete(lastStream, k)
 				}
 			}
 			req.reply <- sinkResult{}
@@ -156,6 +192,13 @@ func (sink *logSink) run() {
 				}
 				delete(lineHandles, k)
 			}
+			for k, f := range stdioHandles {
+				if err := f.Close(); err != nil && firstErr == nil {
+					firstErr = err
+				}
+				delete(stdioHandles, k)
+			}
+			lastStream = make(map[string]StdioStream)
 			req.reply <- sinkResult{err: firstErr}
 		}
 	}
@@ -292,6 +335,50 @@ func (sink *logSink) lastIndexedNewline(sessionID, shellID string) (int64, error
 	return recs[0], nil
 }
 
+// appendStdioRecord writes one stream-switch record: the offset where a run of
+// `stream` bytes begins, packed as ±(offset+1) so the sign carries the type and
+// a stderr switch at offset 0 is still distinguishable from a stdout one.
+// Runs on run's goroutine.
+func (sink *logSink) appendStdioRecord(stdioHandles map[string]*os.File, sessionID, shellID string, offset int64, stream StdioStream) error {
+	f, err := sink.stdioHandle(stdioHandles, sessionID, shellID)
+	if err != nil {
+		return err
+	}
+	var buf [lineRecordSize]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(stdioRecord(offset, stream)))
+	_, err = f.Write(buf[:])
+	return err
+}
+
+// stdioHandle returns the cached log.stdio append handle for a shell, opening
+// it if needed. Opening repairs a torn tail first: a crash between record
+// writes can leave a partial record, and appending after it would misalign
+// every later record. The partial bytes are dropped, not interpreted.
+func (sink *logSink) stdioHandle(stdioHandles map[string]*os.File, sessionID, shellID string) (*os.File, error) {
+	k := logKey(sessionID, shellID)
+	if f, ok := stdioHandles[k]; ok {
+		return f, nil
+	}
+
+	if err := sink.store.initLogDir(sessionID, shellID); err != nil {
+		return nil, err
+	}
+	path := sink.store.StdioPath(sessionID, shellID)
+	if st, err := os.Stat(path); err == nil {
+		if torn := st.Size() % lineRecordSize; torn != 0 {
+			if err := os.Truncate(path, st.Size()-torn); err != nil {
+				return nil, err
+			}
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	stdioHandles[k] = f
+	return f, nil
+}
+
 // handle returns the cached append handle for a shell, opening it if needed.
 // Runs on run's goroutine, which is why handles needs no lock.
 func (sink *logSink) handle(handles map[string]*os.File, sessionID, shellID string) (*os.File, error) {
@@ -321,8 +408,8 @@ func (sink *logSink) do(req sinkRequest) sinkResult {
 	return <-req.reply
 }
 
-func (sink *logSink) append(sessionID, shellID string, data []byte) (int64, error) {
-	res := sink.do(sinkRequest{op: opAppend, session: sessionID, shell: shellID, data: data})
+func (sink *logSink) append(sessionID, shellID string, data []byte, stream StdioStream) (int64, error) {
+	res := sink.do(sinkRequest{op: opAppend, session: sessionID, shell: shellID, data: data, stream: stream})
 	return res.offset, res.err
 }
 

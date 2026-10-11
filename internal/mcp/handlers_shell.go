@@ -1,19 +1,18 @@
 package mcp
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/open-mcp-ai/termcp/internal/ansi"
 	"github.com/open-mcp-ai/termcp/internal/clock"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshclient"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
+	"github.com/open-mcp-ai/termcp/internal/transcript"
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
 
@@ -72,13 +71,29 @@ func (s *Server) handleStartSession(ctx context.Context, request mcpgo.CallToolR
 	// index is the primary channel's number, read from the session rather than
 	// hardcoded: it must be the number the locator resolver will honour, because
 	// the browser labels and copies the first tab from this value.
+	//
+	// stderr tells the caller whether the channel can ever report stderr
+	// separately: pipe channels keep the two producers apart at the source and
+	// shell_output(stream=) can select between them; a pty merges stderr into the
+	// terminal stream at the source, so no read of this shell will ever isolate it.
 	result := map[string]any{
 		"session_id": sess.ID,
 		"shell_id":   sess.PrimaryShellID(),
 		"ssh_config": cfgName,
 		"index":      sess.PrimaryShellIndex(),
+		"stderr":     stderrReceipt(mode),
 	}
 	return jsonResult(result), nil
+}
+
+// stderrReceipt names a shell mode's stderr visibility, in the shell_open and
+// session_start receipts: "separate" promises shell_output(stream="e") can
+// select stderr bytes; "merged(pty)" promises they never appear apart.
+func stderrReceipt(mode string) string {
+	if mode == "pipe" {
+		return "separate"
+	}
+	return "merged(pty)"
 }
 
 func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -203,7 +218,7 @@ func (s *Server) handleStartSubShell(_ context.Context, request mcpgo.CallToolRe
 	// Echo sess.ID, not the argument: the response's ids must be usable as ids, and
 	// a locator echoed into session_id would be pasted back verbatim by a caller
 	// that trusts the response.
-	return jsonResult(map[string]any{"shell_id": cs.ID, "session_id": sess.ID, "name": cs.Name, "index": cs.Index}), nil
+	return jsonResult(map[string]any{"shell_id": cs.ID, "session_id": sess.ID, "name": cs.Name, "index": cs.Index, "stderr": stderrReceipt(mode)}), nil
 }
 
 func (s *Server) handleListSubshells(_ context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -275,269 +290,112 @@ func (s *Server) handleReadOutput(ctx context.Context, request mcpgo.CallToolReq
 	if bad != nil {
 		return bad, nil
 	}
-	if p.readerID > 0 && src.live == nil {
-		return toolError(CodeInvalidArgument, "%s", "reader_id requires a live shell; closed sessions are read with offset/tail_lines"), nil
-	}
 
-	win, bad := readOutputWindow(ctx, src, p)
-	if bad != nil {
-		return bad, nil
+	w, err := transcript.Read(ctx, src, p)
+	if err != nil {
+		return toolResultForErr(err), nil
 	}
-	return jsonResult(win.result(src)), nil
+	return jsonResult(windowResult(w, src)), nil
 }
 
-// readParams is a shell_output request after parsing: which bytes to return, how
-// to render them, and how long to wait for a live cursor.
-type readParams struct {
-	stripAnsi bool
-	timeout   float64
-	maxLines  int
-	maxBytes  int
-	readerID  int
-	offset    int64
-	tailLines int
-	fromLine  int64
+// resolveOutputSource maps an id onto the unified output stream (raw shell id,
+// session id, or termcp:// locator). Resolution lives in the transcript
+// package; this wrapper only maps its typed errors onto the tool vocabulary.
+func (s *Server) resolveOutputSource(id string) (*transcript.Source, *mcpgo.CallToolResult) {
+	src, err := transcript.Resolve(s.sessMgr, s.msgMgr, id)
+	if err != nil {
+		return nil, toolResultForErr(err)
+	}
+	return src, nil
 }
+
+// toolResultForErr maps a transcript read error onto the tool's error-code
+// vocabulary, so the shared read path can stay transport-neutral.
+func toolResultForErr(err error) *mcpgo.CallToolResult {
+	var te *transcript.Error
+	if errors.As(err, &te) {
+		switch te.Kind {
+		case transcript.ErrShellNotFound:
+			return toolError(CodeShellNotFound, "%s", te.Msg)
+		case transcript.ErrSessionNotFound:
+			return toolError(CodeSessionNotFound, "%s", te.Msg)
+		case transcript.ErrReader:
+			return toolError(CodeReaderNotRegistered, "%s", te.Msg)
+		case transcript.ErrInvalid:
+			return toolError(CodeInvalidArgument, "%s", te.Msg)
+		}
+	}
+	return toolError(CodeOperationFailed, "%s", err.Error())
+}
+
+// readParams is the shell_output request after JSON mapping: the shared
+// transcript read contract. Validation and the read itself live in the
+// transcript package, so the HTTP API consumes the identical contract.
+type readParams = transcript.Params
 
 // parseReadParams reads and range-checks the arguments of a shell_output call.
-// The ranges are part of the tool contract rather than defensive noise: timeout,
-// tail_lines and offset each have a documented domain, and a caller that sends
-// something outside it gets told why instead of silently getting a different read.
+// The ranges are part of the tool contract rather than defensive noise: a
+// caller that sends something outside the documented domain gets told why
+// instead of silently getting a different read. The blocking timeout is the one
+// surface-specific range (the Web UI has no waiting reads).
 func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
-	stripAnsi := getBool(args, "strip_ansi", true)
-	timeout := getFloat64(args, "timeout", 3.0)
-	if timeout < 0 || timeout > 60 {
-		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("timeout must be between 0 and 60, got %v", timeout))
+	p := readParams{
+		StripAnsi: getBool(args, "strip_ansi", true),
+		Timeout:   getFloat64(args, "timeout", 3.0),
+		MaxLines:  int(getFloat64(args, "max_lines", 0)),
+		MaxBytes:  int(getFloat64(args, "max_bytes", 8192)),
+		ReaderID:  int(getFloat64(args, "reader_id", 0)),
+		Offset:    int64(getFloat64(args, "offset", -1)),
+		TailLines: int(getFloat64(args, "tail_lines", 0)),
+		FromLine:  int64(getFloat64(args, "from_line", 0)),
+		Stream:    getString(args, "stream", ""),
 	}
-	maxLines := int(getFloat64(args, "max_lines", 0))
-	maxBytes := int(getFloat64(args, "max_bytes", 8192))
-	readerID := int(getFloat64(args, "reader_id", 0))
-	offset := int64(getFloat64(args, "offset", -1))
-	tailLines := int(getFloat64(args, "tail_lines", 0))
-	fromLine := int64(getFloat64(args, "from_line", 0))
-	if tailLines < 0 {
-		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("tail_lines must be >= 0, got %d", tailLines))
+	if p.Timeout < 0 || p.Timeout > 60 {
+		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("timeout must be between 0 and 60, got %v", p.Timeout))
 	}
-	if offset < -1 {
-		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("offset must be >= -1, got %d", offset))
+	if err := transcript.ValidateParams(p); err != nil {
+		return readParams{}, toolResultForErr(err)
 	}
-	if fromLine < 0 {
-		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("from_line must be >= 0, got %d", fromLine))
-	}
-	// from_line picks the window by line number, so it replaces the byte/cursor
-	// selectors rather than combining with them: each names a different position
-	// for the same read, and honoring both would mean silently choosing one.
-	if fromLine > 0 {
-		if tailLines > 0 {
-			return readParams{}, toolError(CodeInvalidArgument, "%s", "from_line and tail_lines are mutually exclusive; use one selector per read")
-		}
-		if offset >= 0 {
-			return readParams{}, toolError(CodeInvalidArgument, "%s", "from_line and offset are mutually exclusive; use one selector per read")
-		}
-		if readerID > 0 {
-			return readParams{}, toolError(CodeInvalidArgument, "%s", "from_line addresses the persisted log; reader_id is a live cursor — use one selector per read")
-		}
-	}
-	return readParams{
-		stripAnsi: stripAnsi,
-		timeout:   timeout,
-		maxLines:  maxLines,
-		maxBytes:  maxBytes,
-		readerID:  readerID,
-		offset:    offset,
-		tailLines: tailLines,
-		fromLine:  fromLine,
-	}, nil
+	return p, nil
 }
 
-// outputWindow is the slice of a shell's output that a read returned, plus where
-// that slice sits in the whole stream. Those offsets are what lets a caller page:
-// end_offset is where the next read starts, and has_more says whether anything
-// follows it.
-//
-// Every byte field describes the RAW stream; the cleaned text is a rendering of
-// it. partialTail is that rule applied to line boundaries: how many bytes at the
-// end of the window follow the last '\n' (0 = the window ends on a line
-// boundary). fromLine/toLine/totalLines/lineBytes are filled only by the
-// from_line selector, which reads whole lines from the line index.
-type outputWindow struct {
-	output      string
-	start       int64
-	end         int64
-	total       int64
-	hasMore     bool
-	partialTail int64
-	fromLine    int64
-	toLine      int64
-	totalLines  int64
-	lineBytes   []int64
-}
-
-// result renders the window as the tool's JSON payload. The stream identity comes
-// from the source, so it is passed in rather than stored: a window is a fact about
-// one read, not about the shell it was read from.
-func (w outputWindow) result(src *outputSource) map[string]any {
+// windowResult renders a read window as the tool's JSON payload. The byte
+// fields are the raw-stream facts transcript.Read computed; this only names
+// them for the model and adds what the source knows (identity, uptime).
+func windowResult(w transcript.Window, src *transcript.Source) map[string]any {
 	result := map[string]any{
-		"output":         w.output,
-		"has_more":       w.hasMore,
-		"lines_returned": strings.Count(w.output, "\n"),
-		"bytes_returned": len(w.output),
-		"returned_bytes": len(w.output),
+		"output":         w.Output,
+		"has_more":       w.HasMore,
+		"lines_returned": strings.Count(w.Output, "\n"),
+		"bytes_returned": len(w.Output),
+		"returned_bytes": len(w.Output),
 		// raw_bytes is the cursor-safe quantity: raw window bytes, so
 		// start_offset + raw_bytes == end_offset holds whatever stripping did.
 		// Cursors advance by end_offset (or raw_bytes), never bytes_returned.
-		"raw_bytes":          w.end - w.start,
-		"start_offset":       w.start,
-		"end_offset":         w.end,
-		"total_bytes":        w.total,
-		"partial_tail_bytes": w.partialTail,
-		"source":             src.source(),
-		"session_id":         src.sessID,
-		"shell_id":           src.shellID,
-		"session_status":     string(src.status),
+		"raw_bytes":          w.End - w.Start,
+		"start_offset":       w.Start,
+		"end_offset":         w.End,
+		"total_bytes":        w.Total,
+		"partial_tail_bytes": w.PartialTail,
+		"source":             src.SourceName(),
+		"session_id":         src.SessID,
+		"shell_id":           src.ShellID,
+		"session_status":     string(src.Status),
 	}
-	if w.totalLines > 0 {
-		result["total_lines"] = w.totalLines
+	if w.TotalLines > 0 {
+		result["total_lines"] = w.TotalLines
 	}
-	if w.fromLine > 0 {
-		result["from_line"] = w.fromLine
-		result["to_line"] = w.toLine
-		if w.lineBytes != nil {
-			result["line_bytes"] = w.lineBytes
+	if w.FromLine > 0 {
+		result["from_line"] = w.FromLine
+		result["to_line"] = w.ToLine
+		if w.LineBytes != nil {
+			result["line_bytes"] = w.LineBytes
 		}
 	}
-	if src.live != nil {
-		result["session_uptime_seconds"] = int(clock.Since(src.created).Seconds())
+	if src.Live != nil {
+		result["session_uptime_seconds"] = int(clock.Since(src.Created).Seconds())
 	}
 	return result
-}
-
-// readOutputWindow produces the window a read asked for. The three forms share a
-// result shape but not a source, which is the point of shell_output being one tool:
-// a tail or a positional offset reads bytes, so it works on a live shell and on a
-// closed one alike, while a reader_id read is a live cursor that consumes the stream
-// and only exists while the shell does.
-func readOutputWindow(ctx context.Context, src *outputSource, p readParams) (outputWindow, *mcpgo.CallToolResult) {
-	clean := func(raw []byte) string {
-		if !p.stripAnsi {
-			return string(raw)
-		}
-		return ansi.Compact(ansi.Strip(string(raw)))
-	}
-	// rawPartialTail is the read window's line-boundary fact: bytes after the
-	// last '\n' of the RAW window. Computed on raw, never on the cleaned text —
-	// the stream is what a line protocol is reading, and cleaning may merge or
-	// drop its line endings.
-	rawPartialTail := func(raw []byte) int64 {
-		partial := int64(len(raw))
-		if idx := bytes.LastIndexByte(raw, '\n'); idx >= 0 {
-			partial -= int64(idx + 1)
-		}
-		return partial
-	}
-
-	var w outputWindow
-	switch {
-	case p.fromLine > 0:
-		// Line-addressed read, served from the persisted log: log.bin is the
-		// stream of record for live and DEAD shells alike, and the line index
-		// (log.lines) numbers exactly those bytes. Reading the live buffer here
-		// could race its own compaction for long-past lines; the log cannot.
-		if src.msgMgr == nil {
-			return outputWindow{}, toolError(CodeInvalidArgument, "%s", "from_line is unavailable: this transcript has no persistent log")
-		}
-		totalLines, err := src.msgMgr.LineCount(src.sessID, src.shellID)
-		if err != nil {
-			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
-		}
-		if p.fromLine > totalLines {
-			return outputWindow{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("from_line %d out of range (stream has %d complete line(s))", p.fromLine, totalLines))
-		}
-		total, err := src.Len()
-		if err != nil {
-			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
-		}
-		start, err := src.msgMgr.LineStartOffset(src.sessID, src.shellID, p.fromLine)
-		if err != nil {
-			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
-		}
-		max := p.maxBytes
-		if max <= 0 {
-			max = int(total - start)
-			if max < 0 {
-				max = 0
-			}
-		}
-		raw, _, err := src.msgMgr.OutputByteRange(src.sessID, src.shellID, start, max)
-		if err != nil {
-			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
-		}
-		raw = truncateAtLines(raw, p.maxLines, false)
-		end := start + int64(len(raw))
-		// The window starts at a line start, so counting its newlines numbers
-		// every complete line it holds, and their byte lengths come from the
-		// gaps between them - no second pass over the index needed.
-		newlines := int64(bytes.Count(raw, []byte{'\n'}))
-		lineBytes := make([]int64, 0, newlines)
-		prev := start - 1
-		for i, c := range raw {
-			if c == '\n' {
-				lineBytes = append(lineBytes, start+int64(i)-prev)
-				prev = start + int64(i)
-			}
-		}
-		w = outputWindow{
-			output:      clean(raw),
-			start:       start,
-			end:         end,
-			total:       total,
-			hasMore:     end < total,
-			partialTail: rawPartialTail(raw),
-			fromLine:    p.fromLine,
-			toLine:      p.fromLine - 1 + newlines,
-			totalLines:  totalLines,
-			lineBytes:   lineBytes,
-		}
-	case p.tailLines > 0 || (src.live == nil && p.offset < 0):
-		raw, st, tot, err := src.scanTailWindow(p.tailLines, p.maxBytes)
-		if err != nil {
-			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
-		}
-		w = outputWindow{output: clean(raw), start: st, end: tot, total: tot, partialTail: rawPartialTail(raw)}
-	case p.offset >= 0:
-		total, err := src.Len()
-		if err != nil {
-			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
-		}
-		max := p.maxBytes
-		if max <= 0 {
-			max = int(total - p.offset)
-			if max < 0 {
-				max = 0
-			}
-		}
-		raw, _, err := src.ByteRange(p.offset, max)
-		if err != nil {
-			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
-		}
-		raw = truncateAtLines(raw, p.maxLines, p.offset+int64(len(raw)) >= total)
-		end := p.offset + int64(len(raw))
-		w = outputWindow{output: clean(raw), start: p.offset, end: end, total: total, hasMore: end < total, partialTail: rawPartialTail(raw)}
-	default:
-		// Live streaming cursor path (unchanged semantics).
-		pre := src.live.ReaderCursor(p.readerID)
-		if pre < 0 {
-			return outputWindow{}, toolError(CodeReaderNotRegistered, "%s", fmt.Sprintf("reader_id %d is not registered on this shell", p.readerID))
-		}
-		out, partial, err := src.live.ReadTerminalStream(ctx, p.readerID, time.Duration(p.timeout*float64(time.Second)), p.stripAnsi, p.maxLines, p.maxBytes)
-		if err != nil {
-			return outputWindow{}, toolError(CodeOperationFailed, "%s", err.Error())
-		}
-		end := src.live.ReaderCursor(p.readerID)
-		total := src.live.BufferLen()
-		w = outputWindow{output: out, start: pre, end: end, total: total, hasMore: end < total, partialTail: partial}
-	}
-	return w, nil
 }
 
 func (s *Server) handleResizePty(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

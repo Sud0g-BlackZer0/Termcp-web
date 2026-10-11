@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -30,7 +31,7 @@ type Server struct {
 	docsFS          fs.FS                 // embedded agent docs, set via SetDocsFS
 	NoInternal      bool                  // when true, hide and refuse the built-in loopback profile
 	sshConfigWrites bool                  // expose write actions on the unified ssh_config tool
-	deferTools      bool                  // opt-in: tag low-frequency tools defer_loading (default: list every tool eagerly)
+	deferLevel      string                // defer_loading level: off (default) | partial | all
 	sseOpts         []mcpserver.SSEOption // forwarded to the mcp-go SSE transport
 
 	// uiNotify delivers a user-facing notification to the Web UI (the notify_user
@@ -49,25 +50,58 @@ func WithHTTPServer(h *http.Server) Option {
 	return func(s *Server) { s.sseOpts = append(s.sseOpts, mcpserver.WithHTTPServer(h)) }
 }
 
-// shouldDeferTool reports whether a tool's schema may be withheld from the
-// initial tools/list. The classification lives in deferredTools; the switch
-// lives on the Server, so this is the single decision point for both the tools
-// registered in New and the ones added later by RegisterSSHConfigWriteTools.
-func (s *Server) shouldDeferTool(name string) bool {
-	if !s.deferTools {
-		return false
-	}
-	return deferredTools[name]
+// Defer levels (--mcp-defer-tools-level). "off" lists every tool eagerly.
+// "partial" defers the wide, low-frequency surfaces (SFTP, forwarding,
+// plumbing, config) and keeps the driving loop eager. "all" additionally
+// defers everything but the minimum loop — a client that supports deferred
+// loading then pays one search round trip per first use, which is the point:
+// the smallest possible tools/list.
+const (
+	DeferOff     = "off"
+	DeferPartial = "partial"
+	DeferAll     = "all"
+)
+
+// allLevelCore is the tool set that stays eager under DeferAll: the minimum
+// "open a session and drive it" loop.
+var allLevelCore = map[string]bool{
+	"session_start": true,
+	"shell_input":   true,
+	"shell_key":     true,
+	"shell_output":  true,
 }
 
-// DeferTools lists low-frequency MCP tools with defer_loading so clients can
-// fetch their schemas on demand, trimming the initial tools/list payload.
-//
-// Opt-in, and off by default: clients that ignore the marker — or reach termcp
-// through a gateway that drops it — would otherwise see those tools vanish
-// entirely. Enabling it trades a larger initial tools/list for a smaller one.
-func DeferTools() Option {
-	return func(s *Server) { s.deferTools = true }
+// shouldDeferTool reports whether a tool's schema may be withheld from the
+// initial tools/list. The classification lives in deferredTools and
+// allLevelCore; the level lives on the Server, so this is the single decision
+// point for both the tools registered in New and the ones added later by
+// RegisterSSHConfigWriteTools.
+func (s *Server) shouldDeferTool(name string) bool {
+	switch s.deferLevel {
+	case DeferPartial:
+		return deferredTools[name]
+	case DeferAll:
+		return !allLevelCore[name]
+	default:
+		return false
+	}
+}
+
+// DeferLevel sets the defer_loading level: "off" (default), "partial" (core
+// eager, low-frequency surfaces deferred) or "all" (only the minimum driving
+// loop eager). Unknown levels degrade to "off" with a warning rather than
+// guessing: clients that drop the defer marker would otherwise lose tools
+// silently.
+func DeferLevel(level string) Option {
+	return func(s *Server) {
+		switch level {
+		case DeferOff, DeferPartial, DeferAll:
+			s.deferLevel = level
+		default:
+			slog.Warn("unknown mcp defer level; defer_loading disabled", "level", level)
+			s.deferLevel = DeferOff
+		}
+	}
 }
 
 // RegisterSSHConfigWriteTools upgrades the ssh_config tool schema in place with

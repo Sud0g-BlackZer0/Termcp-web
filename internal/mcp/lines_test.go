@@ -260,8 +260,8 @@ func TestParseReadParams_FromLineConflicts(t *testing.T) {
 		if bad != nil {
 			t.Fatalf("rejected from_line alone: %v", bad.Content[0])
 		}
-		if p.fromLine != 5 {
-			t.Errorf("fromLine = %d, want 5", p.fromLine)
+		if p.FromLine != 5 {
+			t.Errorf("fromLine = %d, want 5", p.FromLine)
 		}
 	})
 }
@@ -453,7 +453,7 @@ func TestShellInput_ReturnsTranscriptHandle(t *testing.T) {
 	m2 := sendInput(t, "echo HANDLE_TWO\n")
 	offset2, ok := m2["offset"].(float64)
 	if !ok {
-		t.Fatalf("second input returned no offset: %v", m2)
+		t.Fatalf("second input returned no Offset: %v", m2)
 	}
 	if offset2 < offset1 {
 		t.Fatalf("second offset %v < first %v: the handle went backwards", offset2, offset1)

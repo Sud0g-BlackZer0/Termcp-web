@@ -620,6 +620,9 @@ Query:
   start=0          first byte (default 0; mutually exclusive with tail=1)
   max=262144       max bytes returned (hard cap 512KiB)
   tail=1           take max bytes from the end (ignores start)
+  stream=all       which bytes return: "o" stdout only, "e" stderr only
+                   (pipe channels; a pty merges stderr at the source, so
+                   "e" is always empty there), default "all"
 
 Response 200:
 {
@@ -629,6 +632,14 @@ Response 200:
   "d": "<bytes as a JSON string>"
 }
 ```
+
+> `stream=` filters which of the window's bytes are returned, by low-level
+> producer. It never moves an offset: `start`, `end` and `total` always
+> describe the raw window (start..end covers everything the window held), only
+> `d` shrinks. A line that spans an o/e boundary is split by the filter and
+> rejoined across segments without losing a byte. This is the REST twin of the
+> MCP `shell_output(stream=)` parameter, reading the same `log.stdio` switch
+> index through the same manager.
 
 > `d` is the raw byte window placed in a standard JSON string (not base64). A
 > byte sequence that is not valid UTF-8 cannot survive a JSON string; on Windows
@@ -696,6 +707,39 @@ reason over the entire history asks without them.
 
 Errors: `404` unknown shell; `400` a half-named or invalid window
 (`start and end must be byte offsets with start <= end`).
+
+### `GET /api/shells/{id}/lines`
+
+Line-addressed reads over a shell's byte log — the REST twin of the MCP
+`shell_output(from_line=...)` parameter, reading the same line index
+(`log.stdio`'s sibling `log.lines`) through the same manager. Line numbers are
+1-based and absolute, they never shift for the life of the shell, and the
+trailing partial line (bytes with no closing newline) takes no number.
+
+```
+Query:
+  from=1           first line to return (1-based)
+  count=50         max lines per page (hard cap 1000)
+  content=1        include each line's raw text (newline included); without it
+                   the response carries only the offsets, so a megabyte-sized
+                   line costs nothing until requested
+
+Response 200:
+{
+  "lines": [ { "n": 1, "start": 0, "end": 6, "content": "alpha
+" },
+             { "n": 2, "start": 6, "end": 11 } ],
+  "total_lines": 2,
+  "total_bytes": 16,
+  "session_id": "s-lines",
+  "requested_id": "sh-lines"
+}
+```
+
+`from` past the end is `400` with the reason (the stream has N complete lines),
+never a silent page from elsewhere. Reads work on live and DEAD/restored
+sessions alike; `requested_id` echoes the path id, `session_id` the resolved
+session.
 
 ### `GET /api/shells/{id}/rail`
 
