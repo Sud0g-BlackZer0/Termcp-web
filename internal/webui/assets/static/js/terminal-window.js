@@ -358,8 +358,12 @@ SHELL_WINDOW_PANELS_HTML +
           win._primaryShellId = (tabs[0].shell_id || tabs[0].id);
         }
         tabs.forEach(function(s) { createChannelTab(win, s.shell_id || s.id, { index: s.index || 0 }); });
-        // Restore last active tab.
-        var lastActive = window._shellLastActive && window._shellLastActive[sessionId];
+        /* The caller's channel wins over the remembered one: a window opened from
+           the extension panel is a request for one extension's terminal, and the
+           session behind it may be serving several. Falling back to the last
+           active tab keeps every other caller's behaviour. */
+        var want = opts.shell && win._channels[opts.shell] ? opts.shell : '';
+        var lastActive = want || (window._shellLastActive && window._shellLastActive[sessionId]);
         if (lastActive && win._channels[lastActive]) switchChannelTab(win, lastActive);
         if (readOnly) lockWindowReadonly(win);
       } else {

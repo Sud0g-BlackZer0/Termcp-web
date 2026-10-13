@@ -170,6 +170,11 @@ function runningSessionsForNode(name) {
   for (var i = 0; i < sess.length; i++) {
     var s = sess[i];
     if (!s || s.status !== 'running') continue;
+    /* A subsystem's own connection is not this node's session: an extension dials
+       the profile for its own reasons, and counting it here would put a session on
+       a card whose count the user cannot act on — the session has no card of its
+       own to act from (see isHiddenSession). */
+    if (typeof isHiddenSession === 'function' && isHiddenSession(s)) continue;
     if (sessionBelongsToNode(s, name, wins)) out.push(s);
   }
   return out;

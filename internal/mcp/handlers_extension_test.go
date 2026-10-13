@@ -328,7 +328,9 @@ func TestExtensionRetryBringsUp(t *testing.T) {
 }
 
 // TestExtensionUpdateRestarts pins that editing a live template is reflected in
-// the handle the tool hands out — the reconciler reconnects on save.
+// the handle the tool hands out: the reconciler reopens the extension's channel on
+// save, and the connection it shares is left alone — the session belongs to every
+// extension on that host, so an edit must not redial for all of them.
 func TestExtensionUpdateRestarts(t *testing.T) {
 	s := newExtensionTestServer(t)
 	callExtension(t, s, map[string]any{
@@ -337,12 +339,14 @@ func TestExtensionUpdateRestarts(t *testing.T) {
 	})
 	before := waitForExtensionStatus(t, s, "live", extensions.StatusAvailable)
 	sid, _ := before["session_id"].(string)
-	if sid == "" {
-		t.Fatal("an available extension should carry a session id")
+	shellID, _ := before["shell_id"].(string)
+	if sid == "" || shellID == "" {
+		t.Fatalf("an available extension should carry its handles, got %v", before)
 	}
 
 	// A change to the session template (here the pty width) alters the
-	// extension's fingerprint, which is what tells the reconciler to reconnect.
+	// extension's fingerprint, which is what tells the reconciler to rebuild what
+	// the extension itself holds.
 	callExtension(t, s, map[string]any{
 		"action": "update", "name": "live", "cols": 100,
 	})
@@ -350,12 +354,57 @@ func TestExtensionUpdateRestarts(t *testing.T) {
 	deadline := time.Now().Add(8 * time.Second)
 	for {
 		after := waitForExtensionStatus(t, s, "live", extensions.StatusAvailable)
-		if newSid, _ := after["session_id"].(string); newSid != "" && newSid != sid {
+		if newShell, _ := after["shell_id"].(string); newShell != "" && newShell != shellID {
+			if newSid, _ := after["session_id"].(string); newSid != sid {
+				t.Errorf("the edit reopened the channel but replaced the shared session (%q → %q)", sid, newSid)
+			}
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("editing an extension should reconnect it on a new session id")
+			t.Fatal("editing an extension should reopen its channel on a new shell id")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestExtensionSessionsStayOutOfSessionList pins the visibility rule: the
+// connection the reconciler keeps for an extension is infrastructure, so
+// session_list does not offer it — an agent discovers extensions through
+// extension(action=list), which is where the handles come from. The id itself
+// keeps working everywhere an id is accepted, because a handle already in hand
+// must not stop resolving.
+func TestExtensionSessionsStayOutOfSessionList(t *testing.T) {
+	s := newExtensionTestServer(t)
+	callExtension(t, s, map[string]any{
+		"action": "create", "name": "quiet", "kind": "prompt", "target": "internal",
+		"command": blockingCommand(), "args": []any{},
+	})
+	st := waitForExtensionStatus(t, s, "quiet", extensions.StatusAvailable)
+	sid, _ := st["session_id"].(string)
+	if sid == "" {
+		t.Fatal("an available extension should carry a session id")
+	}
+
+	res, err := s.handleListSessions(context.Background(), makeRequest(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range parseResult(t, res)["sessions"].([]any) {
+		if rec, ok := raw.(map[string]any); ok && rec["id"] == sid {
+			t.Fatalf("an extension's session must not be listed by session_list: %v", rec)
+		}
+	}
+
+	// The handle still resolves: session_info takes an explicit id, and the
+	// extension's agents are told to read it.
+	info, err := s.handleGetSessionInfo(context.Background(), makeRequest(map[string]any{"session_id": sid}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsError {
+		t.Fatalf("session_info on an extension's session should work: %s", resultText(info))
+	}
+	if got := parseResult(t, info)["id"]; got != sid {
+		t.Errorf("session_info returned %v, want %q", got, sid)
 	}
 }

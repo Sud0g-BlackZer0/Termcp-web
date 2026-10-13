@@ -9,6 +9,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/forward"
 	"github.com/open-mcp-ai/termcp/internal/message"
+	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
 	"github.com/open-mcp-ai/termcp/internal/sshserver"
@@ -105,6 +106,30 @@ func dumpReconciler(t *testing.T, r *Reconciler, name string) {
 	}
 }
 
+// waitForFailureReason polls until an extension has recorded a failure whose
+// reason contains substr. The initial status of any extension is unavailable, so
+// waiting on the status alone cannot prove the reconciler ran — only a recorded
+// failure can — and the reason is what distinguishes "the process said why" from
+// "something else happened".
+func waitForFailureReason(t *testing.T, r *Reconciler, name, substr string) Status {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if st, ok := r.Status(name); ok {
+			for _, f := range st.Failures {
+				if strings.Contains(f.Reason, substr) {
+					return st
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			st, _ := r.Status(name)
+			t.Fatalf("extension %q never recorded a failure containing %q (last: %+v)", name, substr, st)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // waitForFailure polls until an extension has recorded a failure in stage. The
 // initial status of any extension is unavailable, so waiting on the status alone
 // cannot prove the reconciler ran — only a recorded failure can.
@@ -168,6 +193,12 @@ func TestReconcilerBringsUpSkillExtension(t *testing.T) {
 // TestReconcilerReportsStartupFailure pins that a process that cannot stay
 // running is reported as unavailable with the reason it printed, rather than
 // being silently retried forever or reported as up.
+//
+// Which stage records it is timing the test does not get to decide: a command
+// that takes longer to die than the probe's grace window is caught by the next
+// walk instead ("session"), one that dies inside the window by the probe
+// ("start"). Both carry the process's own exit line, which is the part that tells
+// an author what to fix, so both stages are accepted here.
 func TestReconcilerReportsStartupFailure(t *testing.T) {
 	r := startReconciler(t)
 	ext := Preset(KindMCP)
@@ -176,16 +207,21 @@ func TestReconcilerReportsStartupFailure(t *testing.T) {
 	ext.Command, ext.Args = immediateExitCommand()
 	mustSave(t, r.store, &ext)
 
-	st := waitForFailure(t, r, "broken", "start")
+	st := waitForFailureReason(t, r, "broken", "exit code")
 	last := st.Failures[len(st.Failures)-1]
-	if !strings.Contains(last.Reason, "exit code") {
-		t.Errorf("failure should name the exit code, got %q", last.Reason)
+	if last.Stage != "start" && last.Stage != "session" {
+		t.Errorf("failure stage = %q, want start or session", last.Stage)
 	}
-	if st.SessionID != "" {
-		t.Error("a failed startup should not leave a session id behind")
+	if st.ShellID != "" {
+		t.Error("a failed startup should not leave a channel handle behind")
 	}
 	if st.NextRetry == 0 {
 		t.Error("a transient failure should schedule a retry")
+	}
+	// The connection the failure came up on is the group's and is left standing:
+	// the next attempt opens a channel on it rather than dialing the host again.
+	if n := len(r.sessMgr.ListAll()); n != 1 {
+		t.Errorf("the group's session should outlive a failed member start, got %d sessions", n)
 	}
 }
 
@@ -334,8 +370,12 @@ func TestReconcilerSessionDeathMarksUnavailable(t *testing.T) {
 		t.Fatalf("the extension's death should be recorded, got %+v", st.Failures)
 	}
 
-	// The backoff is short enough that the loop restores it on its own.
-	waitForStatus(t, r, "live", StatusAvailable)
+	// The backoff is short enough that the loop restores it on its own, on a
+	// connection rebuilt underneath it.
+	st = waitForStatus(t, r, "live", StatusAvailable)
+	if st.SessionID == sess.ID {
+		t.Error("the extension should be served by a new session after the old one died")
+	}
 }
 
 // TestReconcilerForwardEstablished pins that a declared forward is set up with
@@ -386,9 +426,12 @@ func TestReconcilerForwardEstablished(t *testing.T) {
 	}
 }
 
-// TestReconcilerEditRestartsSession pins that editing a template replaces its
-// session instead of leaving a live session shaped like the old template.
-func TestReconcilerEditRestartsSession(t *testing.T) {
+// TestReconcilerEditRebuildsTheChannel pins the edit contract under sharing: a
+// template edit rebuilds what the extension itself holds — its channel — while the
+// connection it shares with its host's other extensions stays up. The session is
+// the group's, and rebuilding it to change one member's command would redial the
+// host for everyone.
+func TestReconcilerEditRebuildsTheChannel(t *testing.T) {
 	r := startReconciler(t)
 	ext := Preset(KindMCP)
 	ext.Name = "edited"
@@ -397,7 +440,10 @@ func TestReconcilerEditRestartsSession(t *testing.T) {
 	ext.Args = nil
 	mustSave(t, r.store, &ext)
 	st := waitForStatus(t, r, "edited", StatusAvailable)
-	first := st.SessionID
+	session, firstShell := st.SessionID, st.ShellID
+	if firstShell == "" {
+		t.Fatal("an mcp extension should report the channel it runs on")
+	}
 
 	ext.Command = "sort"
 	mustSave(t, r.store, &ext)
@@ -405,13 +451,182 @@ func TestReconcilerEditRestartsSession(t *testing.T) {
 	deadline := time.Now().Add(8 * time.Second)
 	for {
 		st, _ = r.Status("edited")
-		if st.SessionID != "" && st.SessionID != first && st.Status == StatusAvailable {
+		if st.Status == StatusAvailable && st.ShellID != "" && st.ShellID != firstShell {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("session was not replaced after the edit (still %q)", st.SessionID)
+			t.Fatalf("channel was not replaced after the edit (still %q)", st.ShellID)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if st.SessionID != session {
+		t.Errorf("an edit that only changes the command must not replace the shared session (%q → %q)", session, st.SessionID)
+	}
+}
+
+// TestReconcilerSharesOneSessionPerHost pins the singleton: two extensions that
+// dial the same profile with the same capability set are served by one connection,
+// each through its own channel. The point of the grouping is that one extension
+// per tool stays affordable — a second MCP server on a host costs a channel, not a
+// dial.
+func TestReconcilerSharesOneSessionPerHost(t *testing.T) {
+	r := startReconciler(t)
+	for _, name := range []string{"first", "second"} {
+		ext := Preset(KindMCP)
+		ext.Name = name
+		ext.Target = "internal"
+		ext.Command = testShellCommand()
+		ext.Args = nil
+		mustSave(t, r.store, &ext)
+	}
+
+	first := waitForStatus(t, r, "first", StatusAvailable)
+	second := waitForStatus(t, r, "second", StatusAvailable)
+
+	if first.SessionID != second.SessionID {
+		t.Fatalf("extensions on one host should share a session: %q vs %q", first.SessionID, second.SessionID)
+	}
+	if first.ShellID == second.ShellID || first.ShellID == "" || second.ShellID == "" {
+		t.Fatalf("each extension should drive its own channel: %q vs %q", first.ShellID, second.ShellID)
+	}
+	if n := len(r.sessMgr.ListAll()); n != 1 {
+		t.Errorf("two extensions on one host should hold one session, got %d", n)
+	}
+
+	// Both channels are in the one session, so either extension's handle resolves
+	// to the same connection.
+	sess := r.sessMgr.Get(first.SessionID)
+	if sess == nil {
+		t.Fatal("shared session not found in the manager")
+	}
+	if sess.GetChildShell(first.ShellID) == nil || sess.GetChildShell(second.ShellID) == nil {
+		t.Error("both extensions' channels should live in the shared session")
+	}
+
+	// Killing the shared connection takes both extensions down, and both come back
+	// on a new one: the singleton is rebuilt, not left half-served.
+	r.sessMgr.Terminate(sess.ID, true, 0)
+	waitForStatus(t, r, "first", StatusUnavailable)
+	waitForStatus(t, r, "second", StatusUnavailable)
+	first = waitForStatus(t, r, "first", StatusAvailable)
+	second = waitForStatus(t, r, "second", StatusAvailable)
+	if first.SessionID == sess.ID {
+		t.Error("the extension should not still report the dead session")
+	}
+	if first.SessionID != second.SessionID {
+		t.Errorf("both extensions should come back on the same rebuilt session: %q vs %q", first.SessionID, second.SessionID)
+	}
+	if n := len(r.sessMgr.ListAll()); n != 1 {
+		t.Errorf("the rebuilt group should hold one session, got %d", n)
+	}
+}
+
+// TestReconcilerSeparatesByCapability pins the boundary of the sharing: a session
+// enforces one whitelist, so two extensions that were granted different
+// capabilities are served by different connections. Sharing them would hand each
+// of them the other's reach — the one thing the layer promises it cannot do.
+func TestReconcilerSeparatesByCapability(t *testing.T) {
+	r := startReconciler(t)
+	first := Preset(KindSkill)
+	first.Name = "docs-a"
+	first.Target = "internal"
+	first.Paths = []string{"/srv/skills/a/"}
+	mustSave(t, r.store, &first)
+
+	second := Preset(KindSkill)
+	second.Name = "docs-b"
+	second.Target = "internal"
+	second.Paths = []string{"/srv/skills/b/"}
+	mustSave(t, r.store, &second)
+
+	a := waitForStatus(t, r, "docs-a", StatusAvailable)
+	b := waitForStatus(t, r, "docs-b", StatusAvailable)
+	if a.SessionID == b.SessionID {
+		t.Fatal("extensions with different path windows must not share a session")
+	}
+	if n := len(r.sessMgr.ListAll()); n != 2 {
+		t.Errorf("want one session per capability set, got %d", n)
+	}
+
+	// The window each one declares is the window its session enforces: neither
+	// session can reach into the other's tree.
+	for _, tc := range []struct {
+		sid    string
+		mine   string
+		theirs string
+	}{
+		{a.SessionID, "/srv/skills/a/SKILL.md", "/srv/skills/b/SKILL.md"},
+		{b.SessionID, "/srv/skills/b/SKILL.md", "/srv/skills/a/SKILL.md"},
+	} {
+		sess := r.sessMgr.Get(tc.sid)
+		if sess == nil {
+			t.Fatalf("session %q not found", tc.sid)
+		}
+		rest := sess.Restriction()
+		if !rest.AllowsPath(tc.mine) {
+			t.Errorf("session %q should reach %q", tc.sid, tc.mine)
+		}
+		if rest.AllowsPath(tc.theirs) {
+			t.Errorf("session %q must not reach the other extension's path %q", tc.sid, tc.theirs)
+		}
+	}
+}
+
+// TestReconcilerSessionIsNamespaced pins that the sessions the reconciler creates
+// carry the namespace their text and archives are hidden by, and that they are
+// named after the group so a leftover is identifiable.
+func TestReconcilerSessionIsNamespaced(t *testing.T) {
+	r := startReconciler(t)
+	ext := Preset(KindSkill)
+	ext.Name = "hidden"
+	ext.Target = "internal"
+	ext.Paths = []string{"/srv/"}
+	mustSave(t, r.store, &ext)
+
+	st := waitForStatus(t, r, "hidden", StatusAvailable)
+	sess := r.sessMgr.Get(st.SessionID)
+	if sess == nil {
+		t.Fatal("reported session not found in the manager")
+	}
+	info := sess.Info()
+	if !ns.IsExtensions(info.Namespace) {
+		t.Errorf("namespace = %q, want an extension namespace", info.Namespace)
+	}
+	if !ns.Hidden(info.Namespace) {
+		t.Error("a session in a namespace must be hidden from the ordinary surfaces")
+	}
+	if info.Name != ns.ForExtensions("internal") {
+		t.Errorf("session name = %q, want the group it belongs to", info.Name)
+	}
+}
+
+// TestReconcilerSweepsRestoredSessions pins the restart path: a session a
+// previous process kept for an extension comes back from its manifest as a
+// placeholder nothing can be driven through, so the reconciler drops it instead of
+// leaving an entry that can never be reopened.
+func TestReconcilerSweepsRestoredSessions(t *testing.T) {
+	r := startReconciler(t)
+	// The session stands in for one a previous run left behind: same namespace,
+	// created outside this reconciler's groups.
+	cfg := session.Config{Name: "ext:internal", SSHConfig: "internal", NoShell: true, Namespace: ns.ForExtensions("internal")}
+	leftover, err := r.sessMgr.Create(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second reconciler over the same manager is what a restart looks like from
+	// the manager's side.
+	restarted := NewReconciler(NewStore(t.TempDir()), r.sessMgr, r.msgMgr, r.sshConfigs, r.forwardMgr)
+	if err := restarted.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Stop()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for r.sessMgr.Get(leftover.ID) != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("a restored extension session should be swept on start")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -477,5 +692,61 @@ func TestReconcilerStatusUnknownName(t *testing.T) {
 	}
 	if err := r.Retry("never-saved"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("retry of a missing extension = %v, want ErrNotFound", err)
+	}
+}
+
+// shortLivedCommand runs for longer than the probe's grace window and then exits
+// on its own: the shape of a process that starts fine and dies later.
+func shortLivedCommand() (string, []string) {
+	if runtime.GOOS == "windows" {
+		return "powershell.exe", []string{"-NoLogo", "-NoProfile", "-Command", "Start-Sleep -Seconds 2"}
+	}
+	return "bash", []string{"-c", "sleep 2"}
+}
+
+// TestReconcilerReopensChannelOfDeadProcess pins what sharing means for a process
+// that dies after it was reported available: the extension goes unavailable with
+// the exit line it left behind, and comes back on a channel opened on the SAME
+// session. The connection was never the problem, so redialing the host — and
+// dropping every other extension on it — would be the wrong repair.
+func TestReconcilerReopensChannelOfDeadProcess(t *testing.T) {
+	r := startReconciler(t)
+	ext := Preset(KindMCP)
+	ext.Name = "short-lived"
+	ext.Target = "internal"
+	ext.Command, ext.Args = shortLivedCommand()
+	mustSave(t, r.store, &ext)
+
+	st := waitForStatus(t, r, "short-lived", StatusAvailable)
+	session, firstShell := st.SessionID, st.ShellID
+	if firstShell == "" {
+		t.Fatal("an mcp extension should report the channel it runs on")
+	}
+
+	// The process exits on its own; nothing notifies the reconciler, so the walk is
+	// what notices (nudged here rather than waited for, to keep the test quick).
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		r.Trigger()
+		cur, _ := r.Status("short-lived")
+		if cur.Status == StatusAvailable && cur.ShellID != "" && cur.ShellID != firstShell {
+			if cur.SessionID != session {
+				t.Errorf("the channel was reopened on a new session (%q → %q); the connection was not the problem", session, cur.SessionID)
+			}
+			found := false
+			for _, f := range cur.Failures {
+				if f.Stage == "session" {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("the process's death should be recorded as a session failure, got %+v", cur.Failures)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the dead process was not replaced on the same session (last: %+v)", cur)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }

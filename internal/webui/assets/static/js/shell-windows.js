@@ -1064,7 +1064,11 @@ function shellWindowForFrame(id) {
 }
 
 /** Session tiles and the mobile switcher resolve a session, opening its window
- *  if needed. The tab bar already owns its window, including pending dials. */
+ *  if needed. The tab bar already owns its window, including pending dials.
+ *
+ *  opts.shell names a channel to land on, for a caller that asked for one
+ *  extension's terminal rather than for the session — several extensions can be
+ *  served by one connection, so the session alone does not say which one. */
 function focusSessionWindow(connLabel, sessionId, pos, opts) {
   var ex = getShellWindowBySid(sessionId);
   if (!ex) {
@@ -1083,6 +1087,12 @@ function focusShellWindow(ex, opts) {
   /* Collapsed to its header: a collapsed window cannot show the terminal the
      user just asked for, so expand it. */
   expandShellWindow(ex);
+  /* A window that is already up switches to the requested channel directly; a
+     freshly opened one does it once its tabs have been restored (openShellWindow
+     reads the same option). */
+  if (opts.shell && ex._channels && ex._channels[opts.shell] && typeof switchChannelTab === 'function') {
+    switchChannelTab(ex, opts.shell);
+  }
   if (isTiledWin(ex)) {
     if (_paneMaxedWin && _paneMaxedWin !== ex) { _paneMaxedWin = null; applyPaneGrid(); }
     try { ex.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}

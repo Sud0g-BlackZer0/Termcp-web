@@ -71,7 +71,7 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 	), withLogging("shell_output", s.handleReadOutput, s))
 
 	mcpServer.AddTool(s.newTool("session_list",
-		mcpgo.WithDescription("Return metadata for every running parent session (exited ones are auto-removed). Child shells excluded — use shell_list."),
+		mcpgo.WithDescription("Return metadata for every running parent session (exited ones are auto-removed). Child shells excluded — use shell_list. Sessions a subsystem keeps for itself (an extension's shared connection) are excluded too; reach those through that subsystem's own handle."),
 	), withLogging("session_list", s.handleListSessions, s))
 	mcpServer.AddTool(s.newTool("session_info",
 		mcpgo.WithDescription("Return a JSON document with detailed fields for one session: identifiers, command line, PTY size, remote connection metadata, exit state, etc. session_id accepts a raw id or a termcp:// locator (\"termcp://#<sid>\"). Mode is a per-shell property and is not on the session record; read it from shell_list."),

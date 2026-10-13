@@ -215,7 +215,10 @@ function renderExtensionCard(ext) {
     inner.addEventListener('click', function (e) {
       if (e.target.closest('.ext-retry-btn, .ext-edit-btn, .ext-del-btn')) return;
       if (!openable) return;
-      focusSessionWindow(name, ext.session_id, windowPositionFromClick(e), null);
+      /* The session may be serving several extensions — one connection per host —
+         so the channel is named too and the window lands on this extension's
+         terminal rather than on whichever channel was last used. */
+      focusSessionWindow(name, ext.session_id, windowPositionFromClick(e), { shell: ext.shell_id });
     });
   }
   var btn = tile.querySelector('.ext-retry-btn');

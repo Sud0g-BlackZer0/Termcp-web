@@ -374,6 +374,14 @@ non-secret label added for host attribution. It is separate from `name` because
 the display name is user-editable: the NetHub reads it to decide which host a
 session belongs to, so a renamed session keeps its lamp.
 
+A record may also carry `namespace` (absent on ordinary sessions). It marks a
+session a subsystem owns rather than one a caller asked for: the extension layer
+keeps one connection per host and serves its extensions through channels in it,
+so those sessions are reported in the extension column (section 15) instead of as
+session or archive cards. They are still addressable everywhere an id is
+accepted — an extension hands out `{session_id, shell_id}` — but they are not
+listed by the MCP `session_list`, and the Web UI hides their cards.
+
 Session records carry no `pid`, for the reason given under `POST /api/sessions`.
 
 ### `POST /api/sessions`
@@ -1509,3 +1517,58 @@ paths above.
 > the registry as a DEAD, read-only entry). To erase it for good use
 > `DELETE /api/sessions/{id}`. All three routes accept a comma-separated id
 > list (batch) and then answer 200 with per-id results — see section 6.
+
+## 15. Extensions
+
+An extension is a stored template for a session whose capabilities are trimmed to
+what the template's author decided (an MCP server over a pipe shell, a read-only
+file window, an interactive terminal). termcp keeps every enabled extension's
+session warm; extensions that dial the same profile with the same whitelist share
+one session and each drives its own shell channel in it. The same templates are
+authorable over MCP with the `extension` tool — these routes are its REST twin,
+writing the same files in `<data>/extensions/<name>/config.toml`.
+
+### `GET /api/extensions`
+
+Lists every extension with its reconciler status.
+
+```
+Response 200:
+{
+  "extensions": [
+    { "name": "docs", "kind": "skill", "target": "internal", "description": "docs tree",
+      "enabled": true, "status": "available", "session_id": "8f2c1b", "shell_id": "3a91d0" }
+  ]
+}
+```
+
+A row carries `session_id`/`shell_id` when the extension is available (the handles
+to drive it through), `forwards` with the address each declared tunnel bound, and
+`failure` + `next_retry_ms` when it is not. `status` is one of `available`,
+`probing`, `unavailable`, `disabled`.
+
+### `GET /api/extensions/{name}`
+
+One template in full: the shape (`kind`, `target`, `mode`, `command`, `args`), the
+whitelist (`allow`, `paths`), the `notes`, and the failure history.
+
+### `POST /api/extensions`
+
+Creates a template. `name` and `target` are required; `kind` picks the preset that
+fills the rest (`mcp`, `skill`, `prompt`, or `custom`). Responds `201`, or `409`
+when the name is taken.
+
+### `PUT /api/extensions/{name}`
+
+Patches a stored template: an **omitted** field keeps its value, an **empty array**
+clears it. `PATCH`-style semantics on `PUT`, matching what the MCP tool does.
+
+### `DELETE /api/extensions/{name}`
+
+Removes the template. The session kept warm for it is closed once no other
+extension is served by it.
+
+### `POST /api/extensions/{name}/retry`
+
+Reconnects an unavailable extension now instead of waiting out its backoff.
+Answers 200 with `{ "ok": true }` or `{ "ok": false, "error": ... }`.
