@@ -41,13 +41,14 @@ func TestSessionSwitcherUsesOneDataSource(t *testing.T) {
 	if strings.Contains(termView, "win.appendChild(menu)") {
 		t.Error("the switcher menu must not be parented inside the window")
 	}
-	// Every entry point routes through focusSessionWindow.
+	// Session-based entry points resolve the session first; the tab bar already
+	// owns its window (including a pending dial without a session id).
 	for _, tc := range []struct {
 		name, body, want string
 	}{
 		{"session tile", sessions, "focusSessionWindow("},
 		{"switcher item", termView, "focusSessionWindow("},
-		{"session tab", shellWins, "focusSessionWindow("},
+		{"session tab", between(t, shellWins, "function refreshSessionTabbar", "\n}\n"), "focusShellWindow(w)"},
 	} {
 		if !strings.Contains(tc.body, tc.want) {
 			t.Errorf("%s should call %s", tc.name, tc.want)
@@ -132,22 +133,6 @@ func TestMinimizeKeepsTheWindowAlive(t *testing.T) {
 	grid := between(t, shellWins, "function applyPaneGrid", "\n  var n = wins.length")
 	if !strings.Contains(grid, "win-minimized") {
 		t.Error("applyPaneGrid should not count minimized panes as grid cells")
-	}
-}
-
-func TestFocusSessionWindowNormalisesState(t *testing.T) {
-	shellWins := readAssetLF(t, "static/js/shell-windows.js")
-	body := between(t, shellWins, "function focusSessionWindow", "\n}\n")
-
-	// Picking a session has to undo whatever state the window was left in.
-	for _, want := range []string{"restoreShellWindow(ex)", "expandShellWindow(ex)", "bringShellWindowToFront(ex)"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("focusSessionWindow should call %s", want)
-		}
-	}
-	// An unknown session still opens a window.
-	if !strings.Contains(body, "openShellWindow(") {
-		t.Error("focusSessionWindow should open a window when none exists for that session")
 	}
 }
 

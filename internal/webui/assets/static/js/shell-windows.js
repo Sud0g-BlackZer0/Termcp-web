@@ -24,15 +24,15 @@ function refreshSessionTabbar() {
   bar.classList.toggle('hidden', wins.length === 0 && _layoutMode !== 'tile');
   if (!bar.classList.contains('hidden')) restoreSessionTabbarPos(bar);
   var topWin = null;
-  if (_layoutMode === 'tile') {
+  if (!_winsHidden && _layoutMode === 'tile') {
     topWin = (_paneActiveWin && isTiledWin(_paneActiveWin)) ? _paneActiveWin : null;
-  } else {
+  } else if (!_winsHidden) {
     var topZ = -1;
     wins.forEach(function (w) {
       if (isTiledWin(w)) return;
       /* A minimized window keeps its inline z-index but is not on screen, so it
          must not win the "which tab is active" test. */
-      if (w.classList.contains('win-minimized')) return;
+      if (w.classList.contains('win-minimized') || w.classList.contains('win-hidden')) return;
       /* A full-screen window's z-index usually comes from bringShellWindowToFront;
          when it does not (e.g. a resize cleared it), fall back to the stylesheet's
          value. Ties are real at that point — same computed z-index — and the one
@@ -82,10 +82,9 @@ function refreshSessionTabbar() {
         '<svg viewBox="0 0 12 12" width="10" height="10"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M2 2l8 8M10 2L2 10"/></svg></span>';
       tab.addEventListener('click', function (e) {
         if (e.target.closest('.session-tab-close')) return;
-        /* Same entry point as the session tiles and the mobile switcher: it
-           restores a minimized window and expands a collapsed one before
-           raising it. */
-        focusSessionWindow(w._connName || '', w._sid, null, null);
+        /* A connecting window has no session id yet. Use the window this tab
+           owns so simultaneous dials cannot both resolve to the first null id. */
+        focusShellWindow(w);
       });
       tab.addEventListener('mousedown', function (e) {
         if (e.button === 1) { // middle-click closes the window
@@ -337,12 +336,12 @@ function _fitWinSoon(win) {
   window.addEventListener('orientationchange', onViewportChange);
 })();
 
-/** Ensure the tiled overlay is visible (e.g. first window after restoring a saved tile preference). */
+/** Open the tiled overlay unless the operator has hidden all windows. */
 function openPaneWorkspace() {
   var ws = paneWorkspaceEl();
   if (!ws) return;
-  ws.classList.add('open');
-  ws.setAttribute('aria-hidden', 'false');
+  ws.classList.toggle('open', !_winsHidden);
+  ws.setAttribute('aria-hidden', _winsHidden ? 'true' : 'false');
   applyPaneGrid();
 }
 
@@ -364,7 +363,7 @@ function setLayoutMode(mode) {
     ws.classList.remove('open');
     ws.setAttribute('aria-hidden', 'true');
   }
-  refreshSessionTabbar();
+  syncShellWindowVisibility();
 }
 
 /** Auto-merge: more than AUTO_TILE_THRESHOLD floating windows tiles everything once; re-arms at/below threshold. */
@@ -396,22 +395,33 @@ var _wasMobileViewport = (function () {
   }
 })();
 
+/* Layout changes move windows between containers. Reapply the global hide
+   choice after each move: floats hide individually, panes hide with their
+   workspace and must not retain a float's display:none marker. */
+function syncShellWindowVisibility() {
+  var ws = paneWorkspaceEl();
+  var showPanes = _layoutMode === 'tile' && !_winsHidden;
+  if (ws) {
+    ws.classList.toggle('open', showPanes);
+    ws.setAttribute('aria-hidden', showPanes ? 'false' : 'true');
+  }
+  allShellWins().forEach(function (w) {
+    w.classList.toggle('win-hidden', _winsHidden && !isTiledWin(w));
+    if (!_winsHidden && !w.classList.contains('win-minimized')) _fitWinSoon(w);
+  });
+  if (showPanes) applyPaneGrid();
+  updateSessionTabbarToggle();
+  refreshSessionTabbar();
+}
+
 function hideAllWindows() {
   _winsHidden = true;
-  var ws = paneWorkspaceEl();
-  if (ws && _layoutMode === 'tile') { ws.classList.remove('open'); ws.setAttribute('aria-hidden', 'true'); }
-  allShellWins().forEach(function (w) {
-    if (!isTiledWin(w)) w.classList.add('win-hidden');
-  });
-  updateSessionTabbarToggle();
+  syncShellWindowVisibility();
 }
 
 function showAllWindows() {
   _winsHidden = false;
-  var ws = paneWorkspaceEl();
-  if (ws && _layoutMode === 'tile') { ws.classList.add('open'); ws.setAttribute('aria-hidden', 'false'); applyPaneGrid(); }
-  allShellWins().forEach(function (w) { w.classList.remove('win-hidden'); _fitWinSoon(w); });
-  updateSessionTabbarToggle();
+  syncShellWindowVisibility();
 }
 
 function toggleAllWindowsVisible() { _winsHidden ? showAllWindows() : hideAllWindows(); }
@@ -995,6 +1005,7 @@ function deleteSessionById(sid, win) {
 }
 
 function getShellWindowBySid(sessionId) {
+  if (!sessionId) return null;
   var wins = allShellWins();
   for (var i = 0; i < wins.length; i++) {
     if (wins[i]._sid === sessionId) return wins[i];
@@ -1031,17 +1042,21 @@ function shellWindowForFrame(id) {
   return bySid;
 }
 
-/** The one entry point for "the user picked this session". Every trigger routes
- *  here: the session tiles, the mobile switcher, and the session tab bar. It
- *  normalises the three states a window can be in (minimized, collapsed, tiled)
- *  before raising it, so callers never have to know about any of them. */
+/** Session tiles and the mobile switcher resolve a session, opening its window
+ *  if needed. The tab bar already owns its window, including pending dials. */
 function focusSessionWindow(connLabel, sessionId, pos, opts) {
-  opts = opts || {};
   var ex = getShellWindowBySid(sessionId);
   if (!ex) {
     openShellWindow(connLabel, sessionId, pos, opts);
     return;
   }
+  focusShellWindow(ex, opts);
+}
+
+/** Shared focus behavior for session lookup and window-owned tab clicks. */
+function focusShellWindow(ex, opts) {
+  if (!ex || !ex.parentNode) return;
+  opts = opts || {};
   /* Minimized: bring it back before anything else looks at its geometry. */
   restoreShellWindow(ex);
   /* Collapsed to its header: a collapsed window cannot show the terminal the
