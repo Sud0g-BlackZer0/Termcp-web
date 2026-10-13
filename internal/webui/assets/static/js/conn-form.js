@@ -1199,8 +1199,10 @@ fetch(apiPath('/api/version'))
      load (it cannot exist before this expression runs). Re-apply that state so
      a narrow first paint with a stored desktop preference shows the overlay
      AND its scrim together — otherwise the body opens behind a scrim that
-     never learns it is open. */
-  setNetHubCollapsed(currentNetHubCollapsed(), false);
+     never learns it is open. The initial state is the drawer-aware one: below
+     the breakpoint the panel arrives closed, and re-applying the raw stored
+     preference here would open it again anyway. */
+  setNetHubCollapsed(initialNetHubCollapsed(), false);
 
   /* The header button and the rail's expand key run the same toggle, so the
      control is one decision with two doors. Capture phase keeps a click from

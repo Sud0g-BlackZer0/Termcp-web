@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/open-mcp-ai/termcp/internal/approval"
+	"github.com/open-mcp-ai/termcp/internal/extensions"
 	"github.com/open-mcp-ai/termcp/internal/forward"
 	"github.com/open-mcp-ai/termcp/internal/message"
 	"github.com/open-mcp-ai/termcp/internal/notify"
@@ -64,8 +65,12 @@ type Handler struct {
 	SSH        *sshconfig.Store
 	ForwardMgr *forward.ForwardManager
 	NotifyMgr  *notify.Manager // active shell notification rules (read-only listing + delete)
-	NoInternal bool            // when true, hide and refuse the built-in loopback profile
-	Version    string          // build version (`termcp -version`), served at GET /api/version
+	// Extensions drives the right-side panel: it lists the pinned,
+	// capability-trimmed sessions and reports whether each is up. nil in a build
+	// that does not run the reconciler, in which case the panel is simply empty.
+	Extensions *extensions.Reconciler
+	NoInternal bool   // when true, hide and refuse the built-in loopback profile
+	Version    string // build version (`termcp -version`), served at GET /api/version
 
 	// Daemon marks this process as a background instance (started with
 	// `termcp daemon start` or `termcp daemon stdio`): it may carry an idle
@@ -121,6 +126,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	if h.SSH != nil {
 		h.SSH.SetOnChange(h.sessionHub().broadcast)
 	}
+	if h.Extensions != nil {
+		// An extension's status transition is what the right panel renders, so it
+		// rides the same signal as a connection change: every tab refetches.
+		h.Extensions.SetOnChange(h.sessionHub().broadcast)
+	}
 	// Build metadata
 	mux.HandleFunc("GET /api/version", h.handleVersion)
 	// Daemon management (`termcp daemon status|start|stop`): an instance is
@@ -136,6 +146,17 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/connections/{name}", h.handlePutConnection)
 	mux.HandleFunc("DELETE /api/connections/{name}", h.handleDeleteConnection)
 	mux.HandleFunc("POST /api/connections/test", h.handleTestConnection)
+
+	// Extensions (the right panel): templates for pinned, capability-trimmed
+	// sessions with the reconciler's live status on each. The authoring routes
+	// write through the same store the MCP `extension` tool uses, so a template
+	// saved from the browser and one saved by an agent are indistinguishable.
+	mux.HandleFunc("GET /api/extensions", h.handleListExtensions)
+	mux.HandleFunc("POST /api/extensions", h.handleCreateExtension)
+	mux.HandleFunc("GET /api/extensions/{name}", h.handleGetExtension)
+	mux.HandleFunc("PUT /api/extensions/{name}", h.handleUpdateExtension)
+	mux.HandleFunc("DELETE /api/extensions/{name}", h.handleDeleteExtension)
+	mux.HandleFunc("POST /api/extensions/{name}/retry", h.handleRetryExtension)
 
 	// Sessions
 	mux.HandleFunc("GET /api/sessions", h.handleListSessions)

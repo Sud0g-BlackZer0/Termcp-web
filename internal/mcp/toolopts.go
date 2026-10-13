@@ -58,6 +58,7 @@ var compactToolDescriptions = map[string]string{
 	"file_getwd":              "Get the SFTP working directory for a session.",
 	"message":                 "Transcript span index: status, time, byte offsets, from_line/to_line line numbers. status: o output, a AI input, i human input, q approval asked, A approved input; i/q = human operated. Bytes via shell_output(offset, max_bytes); lines via shell_output(from_line).",
 	"ssh_config":              "SSH profiles: action=list names, or (if enabled) create/edit/copy/delete." + sshConfigImportFormat,
+	"extension":               "Extensions — pinned sessions with trimmed capabilities. action=list → status + the session_id/shell_id to drive them through; get → one template with its notes (read them before first use); create/update author one (kind+target suffices; an omitted field keeps its stored value, an empty array clears it); delete; retry reconnects an unavailable one now. kind: mcp = stdio MCP server over a pipe shell, skill = read-only file window (no shell), prompt = terminal with instructions. An available extension is an ordinary session: drive it with shell_input/shell_output or file_read against its session_id; a call the template did not whitelist is really refused. Never terminate an extension's session. Full guide: resource extensions.md.",
 	"shell_notify":            "Manage wake-up rules (register/unregister/list). TO WAIT ON A HUMAN AT A PROMPT (sudo/password, interactive prompts): notify_user first, register event=output HERE, stop polling shell_output — their next keystroke wakes you; unregister when they have answered.",
 	"notify_user":             "Notify the human user via the termcp Web UI: toast + system notification on every open page; session_id highlights that session's card. CALL IT BEFORE ASKING THE HUMAN FOR ANYTHING (password/sudo/MFA/passphrase, confirmation, approval, a choice, or interactive input) and when a long task ends or fails. Blocking asks: level=warn or error, duration_seconds=0 (sticky), the affected session_id. Once you have asked, WAIT: never poll, guess or fake an answer. delivered=0 means no Web UI page was open.",
 }
@@ -113,6 +114,7 @@ var deferredTools = map[string]bool{
 	// Introspection and configuration.
 	"message":    true,
 	"ssh_config": true,
+	"extension":  true,
 }
 
 // These fields are either identifiers, paths, coordinates, or self-evident

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/auth"
 	"github.com/open-mcp-ai/termcp/internal/config"
 	"github.com/open-mcp-ai/termcp/internal/daemon"
+	"github.com/open-mcp-ai/termcp/internal/extensions"
 	"github.com/open-mcp-ai/termcp/internal/forward"
 	"github.com/open-mcp-ai/termcp/internal/logansi"
 	mcpmod "github.com/open-mcp-ai/termcp/internal/mcp"
@@ -350,6 +352,19 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 
 	forwardMgr := forward.NewForwardManager()
 
+	// The extension reconciler keeps every enabled extension's session warm and
+	// reports its state. It owns its loop's context — Stop cancels it — and the
+	// shutdown path stops it before the sessions are marked dead, so an in-flight
+	// probe cannot spawn a connection the process is about to leave.
+	extReconciler := extensions.NewReconciler(
+		extensions.NewStore(cfg.DataDir), sessMgr, msgMgr, sshStore, forwardMgr,
+	)
+	extReconciler.NoInternal = cfg.NoInternal
+	if err := extReconciler.Start(context.Background()); err != nil {
+		slog.Error("failed to start extension reconciler", "err", err)
+		os.Exit(1)
+	}
+
 	mcpOpts := []mcpmod.Option{mcpmod.WithHTTPServer(mainSrv)}
 	// defer_loading level: the graded flag wins; the legacy bool maps to the
 	// partial level. Off by default because clients that drop the marker (any
@@ -378,7 +393,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	mux.Handle("GET /sse", mcpSrv.SSEHandler())
 	mux.Handle("POST /message", mcpSrv.MessageHandler())
 	mux.Handle("/stream", mcpSrv.StreamableHTTPHandler())
-	webuiH := &webui.Handler{Sessions: sessMgr, MsgMgr: msgMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339)}
+	webuiH := &webui.Handler{Sessions: sessMgr, MsgMgr: msgMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), Extensions: extReconciler, NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339)}
 	// The effective countdown is published at GET /api/daemon so the stdio
 	// bridge can ping faster than it (see daemon.InstanceInfo.IdleTimeoutMS).
 	if isDaemonChild {
@@ -395,6 +410,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	webuiH.ExecuteOperation = mcpSrv.ExecuteApprovedOperation
 	webuiH.Register(mux)
 	// Bridge the MCP notify_user tool to the browser UI (toast/highlight push).
+	mcpSrv.SetExtensionReconciler(extReconciler)
 	mcpSrv.SetUINotifier(webuiH.BroadcastUINotify)
 
 	// An approval decision must also wake an agent parked on shell_notify, so it
@@ -427,6 +443,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 		shutdownOnce.Do(func() {
 			shuttingDown.Store(true)
 			slog.Info("shutting down", "reason", reason)
+			extReconciler.Stop()
 			// Disconnect ≠ delete: DEAD all running sessions (retain history) instead
 			// of killing/clearing every shell.
 			sessMgr.MarkAllDead()

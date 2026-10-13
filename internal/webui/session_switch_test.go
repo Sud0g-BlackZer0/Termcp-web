@@ -506,22 +506,61 @@ func TestNetHubIsAResponsiveResourceSidebar(t *testing.T) {
 	for _, want := range []string{
 		".workspace-frame.nethub-collapsed { --nethub-w: 56px; }",
 		"@media (max-width: 799px)",
-		"#sec-entries-body.drawer-open { transform: translateX(0); }",
+		`#sec-entries-body.drawer-open {
+    transform: translateX(0); visibility: visible;`,
 		".drawer-scrim { display: block; }",
 	} {
 		if !strings.Contains(css, want) {
 			t.Errorf("responsive NetHub layout must contain %q", want)
 		}
 	}
+	// The closed drawer is taken out of the page by visibility, not by trusting
+	// its transform to land: a transition whose end state is off-screen can be
+	// left at its start, which would park the drawer over the page it left.
+	// visibility must therefore ride on the closed rule, and must not itself be
+	// transitioned — a delayed flip stalls the same way and holds the pane
+	// visible for the slide it was meant to end.
+	if !strings.Contains(css, "transform: translateX(-100%); visibility: hidden;") ||
+		strings.Contains(css, "transition: transform .22s ease, visibility") {
+		t.Error("the closed drawer must be visibility:hidden with no transition on visibility, or a stalled slide leaves it over the page")
+	}
 	if !strings.Contains(dialogs, "localStorage.getItem(NETHUB_STATE_KEY)") ||
 		!strings.Contains(dialogs, "localStorage.setItem(NETHUB_STATE_KEY") {
 		t.Error("manual NetHub state should persist through the existing localStorage mechanism")
+	}
+	// The drawer scope must not write that preference: below the breakpoint the
+	// panel is an overlay, and closing an overlay is not a decision about how the
+	// desktop sidebar sits. Writing it there rails the column a wide screen later
+	// arrives at — the sidebar collapses for a choice made about a different
+	// shape of the same page.
+	if !strings.Contains(dialogs, "if (persist && !drawer)") {
+		t.Error("the NetHub preference must only be written above the drawer breakpoint")
+	}
+	// Crossing back out of the drawer scope keeps a drawer the user had open as
+	// the expanded column it becomes, so a rotation into a width whose default
+	// is the rail does not put away a panel the user was reading.
+	if !strings.Contains(dialogs, "var wasOpen = wasDrawer && body && body.classList.contains('drawer-open')") {
+		t.Error("crossing out of the drawer scope must keep an open drawer open as a column")
 	}
 	if !strings.Contains(forms, "toggleNetHub()") || !strings.Contains(forms, "window.termcpToggleEntriesDrawer") {
 		t.Error("the trigger and terminal header should use the shared NetHub state")
 	}
 	if strings.Contains(forms, "transform: translateX") || strings.Contains(forms, "document.body.style.overflow = open") {
 		t.Error("conn-form.js must not own a desktop drawer implementation")
+	}
+}
+
+// The extension panel answers the same collapse question NetHub does, and the
+// drawer scope must not reach into the desktop preference from this side
+// either: closing the overlay on a narrow screen would otherwise rail the
+// column a wide screen later arrives at.
+func TestExtensionPanelKeepsTheDrawerScopeOutOfThePreference(t *testing.T) {
+	ext := readAssetLF(t, "static/js/extensions.js")
+	if !strings.Contains(ext, "if (persist && !drawer)") {
+		t.Error("the extension preference must only be written above the drawer breakpoint")
+	}
+	if !strings.Contains(ext, "var wasOpen = wasDrawer && panel && panel.classList.contains('drawer-open')") {
+		t.Error("crossing out of the drawer scope must keep an open drawer open as a column")
 	}
 }
 
@@ -569,12 +608,23 @@ func TestNetHubRegressionFixes(t *testing.T) {
 		!strings.Contains(dialogs, "class=\"nethub-rail-status is-") {
 		t.Error("the collapsed rail must still render node items and their status lamps")
 	}
-	if !strings.Contains(css, ".nethub { position: relative; top: auto; z-index: auto; margin-bottom: 10px; }") {
+	// The margin the base rule gives .nethub on desktop is deliberately not part
+	// of what is pinned: on the narrow layout the two keys share one row, so a
+	// bottom margin on only one of them would push the workspace down alone. What
+	// has to survive is the stacking-context reset.
+	if !strings.Contains(css, ".nethub { position: relative; top: auto; z-index: auto;") {
 		t.Error("the narrow breakpoint must remove .nethub's stacking context so the drawer can outrank the scrim")
 	}
 	if !strings.Contains(css, "#sec-entries-body {\n    position: fixed") ||
-		!strings.Contains(css, "z-index: 24000") || !strings.Contains(css, "#sec-entries-body.drawer-open { transform: translateX(0); }") {
+		!strings.Contains(css, "z-index: 24000") || !strings.Contains(css, `#sec-entries-body.drawer-open {
+    transform: translateX(0); visibility: visible;`) {
 		t.Error("the narrow drawer must be fixed, high in the root stack, and open through its transform")
+	}
+	// Same guard as the base theme: the closed rack is gone by visibility, and
+	// visibility is not transitioned, so a slide that never advances cannot leave
+	// the rack sitting over the terminal.
+	if !strings.Contains(css, "transform: translateX(-100%); visibility: hidden;") {
+		t.Error("the closed rack must be visibility:hidden, or a stalled transition leaves it over the page")
 	}
 	// A node card is a host card with a status readout on it, not a different plate:
 	// it takes the state rail, the lit left gradient and the notched corner from the
@@ -651,6 +701,8 @@ func TestNetHubSidebarKeepsThePageFromScrolling(t *testing.T) {
 	for _, m := range []struct{ name, rule string }{
 		{"the panel", body},
 		{"the collapsed rail", between(t, css, ".workspace-frame.nethub-collapsed .nethub-rail {", "}")},
+		{"the extension column's plate", between(t, css, ".extpanel-body {", "}")},
+		{"the extension column's collapsed rail", between(t, css, ".workspace-frame.ext-collapsed .extpanel-rail {", "}")},
 	} {
 		want := fmt.Sprintf("calc(100dvh - %dpx)", chrome)
 		if !strings.Contains(m.rule, want) {
@@ -659,9 +711,12 @@ func TestNetHubSidebarKeepsThePageFromScrolling(t *testing.T) {
 		}
 	}
 
-	// One constant, two consumers. A second literal is how 134 and 147 coexisted.
-	if n := strings.Count(css, fmt.Sprintf("calc(100dvh - %dpx)", chrome)); n != 2 {
-		t.Errorf("expected the panel and the rail to share ONE chrome constant; found %d uses", n)
+	// One constant, four consumers. A second literal is how 134 and 147 coexisted;
+	// the extension column is a third column of the same frame and pays the same
+	// chrome, so both of its states take the literal rather than numbers of their
+	// own.
+	if n := strings.Count(css, fmt.Sprintf("calc(100dvh - %dpx)", chrome)); n != 4 {
+		t.Errorf("expected the panel, both rails and the extension column to share ONE chrome constant; found %d uses", n)
 	}
 	if strings.Contains(css, "100dvh - 134px") {
 		t.Error("134px is the old hand-count; the chrome is 147px (header 57 + dock padding 32 + gap 8 + trigger 50)")

@@ -167,6 +167,13 @@ func (c *uiWS) enqueueSessions() {
 			payload["connections"] = conns
 		}
 	}
+	if c.h.Extensions != nil {
+		// The right panel renders from the same frame, so a status transition is
+		// one round trip: the signal arrives, the tab re-reads this payload.
+		if rows := summarizeExtensions(c.h.Extensions); rows != nil {
+			payload["extensions"] = rows
+		}
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return

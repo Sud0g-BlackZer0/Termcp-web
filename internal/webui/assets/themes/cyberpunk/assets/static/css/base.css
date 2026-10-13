@@ -56,6 +56,14 @@
      must not drop the raise while the other is still open. */
   body.header-lang-open .app-header,
   body.header-theme-open .app-header { z-index: 22000; }
+  /* A full-screen window IS the screen, so the page header is not there while one
+     is up. display:none rather than another z-index rung: the header sits behind
+     the terminal at its own 200 anyway, and removing it outright is what keeps an
+     open language/theme menu from reappearing over the terminal as a floating bar
+     the user can neither use nor dismiss. The class is only ever set on touch,
+     where every open window is full-screen, so on desktop the header behaves as
+     it always did. */
+  body.has-fullscreen-window .app-header { display: none; }
   /* The nav wraps instead of squeezing: with the language switch in it, a phone
      width cannot hold the control and the API link side by side, and without
      this the browser breaks the link's label across two lines inside its

@@ -649,8 +649,11 @@ function renderConnGrid(connections, bannerMsg) {
  * A manual toggle is stored under one key and wins over the default at every
  * width above the drawer breakpoint — the same localStorage mechanism the
  * section collapse and the language switch already use, so no new state layer.
- * The stored value is read at load, before the first paint of the frame, which
- * is why it lives here rather than in a DOMContentLoaded handler.
+ * Only a toggle above the drawer breakpoint writes it: below it the panel is an
+ * overlay, and the overlay's open and close are the page's business rather than
+ * the sidebar's preference. The stored value is read at load, before the first
+ * paint of the frame, which is why it lives here rather than in a
+ * DOMContentLoaded handler.
  */
 var NETHUB_STATE_KEY = 'termcp.nethub';
 var NETHUB_WIDE = 1200;
@@ -675,6 +678,29 @@ function netHubDefaultCollapsed() {
   return (window.innerWidth || 0) < NETHUB_WIDE;
 }
 
+/* The scrim and the page lock belong to the page, not to whichever drawer last
+   wrote them: both drawers share one of each, so they must be open when EITHER
+   drawer is open. Each writer used to set them from its own state alone, and on
+   a narrow load that raced — dialogs.js applied a stored "expanded" preference
+   and opened this drawer, then extensions.js applied its own stored "collapsed"
+   and cleared the scrim this drawer was still using, leaving the drawer over a
+   page it could not lock or dismiss. Reading both bodies makes the shared
+   surfaces a function of the pair, so a drawer closing never takes them away
+   from a drawer that is still open. */
+function paintDrawerScrim() {
+  var anyOpen = !!(document.querySelector('#sec-entries-body.drawer-open') ||
+                   document.querySelector('#extpanel-body.drawer-open'));
+  var scrim = document.querySelector('.drawer-scrim');
+  if (scrim) scrim.classList.toggle('drawer-open', anyOpen);
+  document.body.style.overflow = anyOpen ? 'hidden' : '';
+}
+
+/* A breakpoint crossing is a change of geometry, not of state, and the drawers'
+   slide belongs to the gesture that opens them. The closed pane is nevertheless
+   off-screen whether or not its transition finishes: visibility is what carries
+   it out of the page (see the drawer rules in workspace.css), so nothing here
+   has to win a race with the compositor. */
+
 function setNetHubCollapsed(collapsed, persist) {
   var frame = document.querySelector('.workspace-frame');
   var body = document.getElementById('sec-entries-body');
@@ -682,17 +708,30 @@ function setNetHubCollapsed(collapsed, persist) {
   if (!frame || !body) return;
   collapsed = !!collapsed;
   var drawer = netHubIsDrawer();
+  /* The extension drawer shares this scrim and this page; opening this one puts
+     it away. extensions.js loads after this file, so the guard is a typeof
+     rather than a call — at load time the function is not there yet, and the
+     cross-call only matters once a click can happen. The pair cannot recurse:
+     only an opening state calls across, and closing never does. */
+  if (drawer && !collapsed && typeof extensionsCollapsed === 'function' && !extensionsCollapsed()) {
+    setExtensionsCollapsed(true, false);
+  }
   /* In the drawer scope the body is shown or hidden; above it the frame keeps
      the rail. Both are one boolean, so the sidebar and the overlay cannot
      disagree about being open — and the scrim follows the overlay only. */
   frame.classList.toggle('nethub-collapsed', collapsed && !drawer);
   body.classList.toggle('drawer-open', drawer && !collapsed);
-  var scrim = document.querySelector('.drawer-scrim');
-  if (scrim) scrim.classList.toggle('drawer-open', drawer && !collapsed);
-  /* The overlay blocks the page behind it; a sidebar does not. */
-  document.body.style.overflow = drawer && !collapsed ? 'hidden' : '';
+  /* The scrim and the page lock follow BOTH drawers (paintDrawerScrim), so
+     closing this one leaves them to the extension drawer if it is open. */
+  paintDrawerScrim();
   if (trigger) trigger.setAttribute('aria-expanded', String(!collapsed));
-  if (persist) {
+  /* The drawer scope never writes the preference: below the breakpoint the
+     panel is an overlay, and dismissing an overlay is not a statement about how
+     the desktop sidebar should sit. Writing it here would rail a column the
+     wide screen later arrives at — the sidebar found collapsed for a decision
+     made about a different shape of the same page. The overlay's state lives in
+     the page, and the sidebar keeps its own. */
+  if (persist && !drawer) {
     try { localStorage.setItem(NETHUB_STATE_KEY, collapsed ? 'collapsed' : 'expanded'); } catch (e) {}
   }
 }
@@ -714,20 +753,46 @@ function currentNetHubCollapsed() {
   return stored === null ? netHubDefaultCollapsed() : stored;
 }
 
-/* A viewport change can move the page across a breakpoint in either direction:
-   resizing a desktop window narrow must not leave a fixed panel "open" over the
-   page, and growing back must restore the sidebar the user chose. The stored
-   preference is re-applied, never rewritten — a resize is not a decision. */
+/* A drawer is an overlay, and an overlay does not open itself: "expanded" was
+   stored on a wide screen where it means the sidebar is out, and carried below
+   the breakpoint it means a drawer over a page that cannot scroll behind it.
+   The stored value still decides the desktop sidebar — this is the state the
+   sidebar arrives in, not a rewrite of the preference. */
+function initialNetHubCollapsed() {
+  return netHubIsDrawer() ? true : currentNetHubCollapsed();
+}
+
+/* A viewport change can move the page across a breakpoint in either direction.
+   Only a crossing is acted on: a resize that stays on one side of the
+   breakpoint changes the sidebar's geometry but not its state, and re-applying
+   would close a drawer the user is in the middle of using. Crossing into drawer
+   mode closes the panel rather than carrying an expanded sidebar over the page;
+   crossing back out keeps a drawer the user had open as the expanded column it
+   becomes, rather than re-deriving it from storage — a rotation into a width
+   whose default is the rail would otherwise put away a panel the user was
+   reading. The stored preference is re-applied, never rewritten — a resize is
+   not a decision. */
+var _netHubWasDrawer = netHubIsDrawer();
 var _netHubResizeTimer = 0;
 window.addEventListener('resize', function () {
   if (_netHubResizeTimer) clearTimeout(_netHubResizeTimer);
   _netHubResizeTimer = setTimeout(function () {
     _netHubResizeTimer = 0;
-    setNetHubCollapsed(currentNetHubCollapsed(), false);
+    var drawer = netHubIsDrawer();
+    if (drawer === _netHubWasDrawer) return;
+    var wasDrawer = _netHubWasDrawer;
+    _netHubWasDrawer = drawer;
+    if (drawer) {
+      setNetHubCollapsed(initialNetHubCollapsed(), false);
+      return;
+    }
+    var body = document.getElementById('sec-entries-body');
+    var wasOpen = wasDrawer && body && body.classList.contains('drawer-open');
+    setNetHubCollapsed(wasOpen ? false : currentNetHubCollapsed(), false);
   }, 120);
 });
 
-setNetHubCollapsed(currentNetHubCollapsed(), false);
+setNetHubCollapsed(initialNetHubCollapsed(), false);
 
 
 function loadForwards() {

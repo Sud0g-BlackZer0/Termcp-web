@@ -59,6 +59,16 @@ function refreshSessionTabbar() {
      settle. Guarded: this runs once at load, before ui-socket.js is evaluated. */
   if (typeof paintSessionTileWindowMarkers === 'function') paintSessionTileWindowMarkers();
   if (typeof blackwallPaint === 'function') blackwallPaint();
+  /* A full-screen window covers the header anyway; the class tells the header to
+     step out of the way entirely (base.css) instead of floating over it when one
+     of its own menus is open. A window only counts while it is actually on
+     screen — a minimised or hidden one leaves the header reachable. */
+  var fs = wins.some(function (w) {
+    return w.classList.contains('win-fullscreen') &&
+      !w.classList.contains('win-minimized') &&
+      !w.classList.contains('win-hidden');
+  });
+  document.body.classList.toggle('has-fullscreen-window', fs);
   var scroll = document.getElementById('session-tabs-scroll');
   if (!scroll) return;
   var byId = {};
@@ -529,6 +539,17 @@ function restoreSessionTabbarPos(bar) {
     // pane is unaffected, so closed non-active panes would leave stale tabs.
     refreshSessionTabbar();
   }).observe(g, { childList: true });
+})();
+
+/* closeShellWindow is reached from a dozen paths (session tiles, the archive,
+   reconnect, the window's own buttons), so the header's has-fullscreen-window
+   flag cannot rely on each of them refreshing the tab bar. The container is the
+   one thing every removal goes through, and refreshSessionTabbar recomputes the
+   flag from the windows that remain. */
+(function () {
+  var c = shellWindowsEl();
+  if (!c || typeof MutationObserver === 'undefined') return;
+  new MutationObserver(function () { refreshSessionTabbar(); }).observe(c, { childList: true });
 })();
 
 // Restore last mode preference on load; keep the toggle button and tab bar in

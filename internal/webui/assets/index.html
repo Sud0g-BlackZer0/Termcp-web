@@ -22,7 +22,7 @@
            (same border, radius and blue label) and shows the language in use;
            the menu below it marks that same choice. -->
       <details class="theme-switch" id="theme-switch">
-        <summary class="theme-btn" data-i18n-title="theme.label" title="Theme"><span aria-hidden="true">◐</span> <span data-i18n="theme.label">Theme</span><span id="theme-current"></span></summary>
+        <summary class="theme-btn" data-i18n-title="theme.label" title="Theme"><span aria-hidden="true">◐</span> <span class="theme-label" data-i18n="theme.label">Theme</span><span class="theme-current" id="theme-current"></span></summary>
         <div class="theme-menu"><div id="theme-options" class="theme-options"></div><p id="theme-status" class="theme-status" role="status"></p></div>
       </details>
       <span class="lang-switch">
@@ -64,7 +64,7 @@
          layout frame rather than a child of it — a fixed element inside a
          grid/backdrop context would resolve against that ancestor instead of the
          viewport. -->
-    <div class="workspace-frame">
+    <div class="workspace-frame ext-on">
       <!-- NetHub is the page's control layer: the access nodes Termcp can dial
            are a persistent left column, not a drawer. Collapsing it leaves a rail
            of status dots rather than nothing, so "which machines can I reach" is
@@ -194,7 +194,34 @@
         </div>
       </div>
       </div>
-    </div>
+      <!-- The extension column: the connections panel's other side, holding the
+           trimmed sessions Termcp keeps warm instead of the machines it dials.
+           It starts hidden and the frame's .ext-on class is what gives it a
+           grid track, so a Termcp with no extensions configured has the same
+           layout it had before this panel existed. The column collapses to a
+           rail of status lamps like NetHub does, and below 800px the same
+           element is the drawer the trigger opens. The cards are built by
+           extensions.js from the socket frame; nothing here is static but the
+           trigger's own label, and the column carries its own toolbar because
+           the panel reports AND authors: the New key and each card's edit and
+           delete write the same store the extension tool writes to. -->
+      <aside class="extpanel" id="extpanel">
+        <button type="button" class="extpanel-btn" id="extpanel-toggle" title="Extensions" data-i18n-title="nav.extensions" aria-label="Extensions" data-i18n-aria="nav.extensions" aria-controls="extpanel-body" aria-expanded="true" onclick="event.stopPropagation()">
+          <span class="extpanel-glyph" aria-hidden="true"><svg viewBox="0 0 16 16" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="1.5" width="8" height="8" rx="1.5"/><rect x="6.5" y="6.5" width="8" height="8" rx="1.5"/><path d="M4 14.5v1.5M14.5 4H16"/></svg></span>
+          <span class="extpanel-label" data-i18n="nav.extensions">Extensions</span>
+          <span class="extpanel-caret" aria-hidden="true"><svg viewBox="0 0 12 8" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 2l5 4 5-4"/></svg></span>
+        </button>
+        <div class="extpanel-rail" id="extpanel-rail" role="list" aria-label="Extensions" data-i18n-aria="nav.extensions"></div>
+        <div class="extpanel-body" id="extpanel-body">
+          <button type="button" class="drawer-close" title="Close" data-i18n-title="common.close" aria-label="Close extensions drawer" data-i18n-aria="common.close" onclick="event.stopPropagation(); window.termcpToggleExtensions && window.termcpToggleExtensions(false)">
+            <svg viewBox="0 0 12 12" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M2 2l8 8M10 2L2 10"/></svg>
+          </button>
+          <div class="drawer-toolbar">
+            <button type="button" class="ext-add-btn" id="ext-add" title="New extension" data-i18n-title="ext.add.title" aria-label="New extension" data-i18n-aria="ext.add.title">+ <span data-i18n="ext.add.label">New</span></button>
+          </div>
+          <div id="ext-grid" class="conn-grid"></div>
+        </div>
+      </aside>
     </div>
 
 
@@ -399,6 +426,56 @@
     </div>
   </div>
 
+  <!-- The extension editor. The same fields the extension MCP tool authors a
+       template with, so a browser-saved template and an agent-saved one are the
+       same file on disk. Kind picks a preset that fills the conventional fields;
+       every field below it is an override an author can leave at its default. -->
+  <div id="modal-ext" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-h">
+        <h2 id="modal-ext-title" data-i18n="ext.modal.title">New extension</h2>
+        <button type="button" id="modal-ext-close" class="modal-x" title="Close" data-i18n-title="common.close"><svg viewBox="0 0 12 12" width="12" height="12"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M2 2l8 8M10 2L2 10"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p id="modal-ext-err" class="err" style="display:none"></p>
+        <label for="ext-f-name" data-i18n="ext.modal.name">Name</label>
+        <input id="ext-f-name" type="text" autocomplete="off" spellcheck="false" placeholder="my-tool">
+        <label for="ext-f-kind" data-i18n="ext.modal.kind">Kind</label>
+        <select id="ext-f-kind">
+          <option value="mcp" data-i18n="ext.kind.mcp">MCP server</option>
+          <option value="skill" data-i18n="ext.kind.skill">Skill (read-only files)</option>
+          <option value="prompt" data-i18n="ext.kind.prompt">Prompt (interactive terminal)</option>
+          <option value="custom" data-i18n="ext.kind.custom">Custom</option>
+        </select>
+        <label for="ext-f-target" data-i18n="ext.modal.target">Target profile</label>
+        <select id="ext-f-target"></select>
+        <label for="ext-f-desc" data-i18n="ext.modal.description">Description</label>
+        <input id="ext-f-desc" type="text" autocomplete="off" spellcheck="false">
+        <label for="ext-f-command" data-i18n="ext.modal.command">Command</label>
+        <input id="ext-f-command" type="text" autocomplete="off" spellcheck="false" placeholder="npx">
+        <label for="ext-f-args" data-i18n="ext.modal.args">Arguments (one per line)</label>
+        <textarea id="ext-f-args" rows="2" autocomplete="off" spellcheck="false"></textarea>
+        <label for="ext-f-mode" data-i18n="ext.modal.mode">Shell mode</label>
+        <select id="ext-f-mode">
+          <option value="" data-i18n="ext.modal.modeNone">No shell</option>
+          <option value="pty" data-i18n="ext.modal.modePty">Interactive (PTY)</option>
+          <option value="pipe" data-i18n="ext.modal.modePipe">Pipe (needs a command)</option>
+        </select>
+        <label for="ext-f-allow" data-i18n="ext.modal.allow">Allowed tools (whitelist, one per line)</label>
+        <textarea id="ext-f-allow" rows="3" autocomplete="off" spellcheck="false"></textarea>
+        <label for="ext-f-paths" data-i18n="ext.modal.paths">Allowed paths (whitelist, one per line)</label>
+        <textarea id="ext-f-paths" rows="3" autocomplete="off" spellcheck="false"></textarea>
+        <label for="ext-f-notes" data-i18n="ext.modal.notes">Notes for the agent (operating instructions)</label>
+        <textarea id="ext-f-notes" rows="4" autocomplete="off" spellcheck="false"></textarea>
+        <label class="ext-check-row"><input type="checkbox" id="ext-f-enabled" checked><span data-i18n="ext.modal.enabled">Enabled</span></label>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="modal-ext-cancel" data-i18n="common.cancel">Cancel</button>
+          <button type="button" class="btn btn-primary" id="modal-ext-save" data-i18n="common.save">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="static/xterm/xterm.js"></script>
   <script src="static/js/i18n-catalog.js"></script>
   <script src="static/js/i18n.js"></script>
@@ -417,5 +494,6 @@
   <script src="static/js/terminal-switcher.js"></script>
   <script src="static/js/dialogs.js"></script>
   <script src="static/js/conn-form.js"></script>
+  <script src="static/js/extensions.js"></script>
 </body>
 </html>
