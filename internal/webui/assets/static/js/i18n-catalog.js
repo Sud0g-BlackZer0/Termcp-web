@@ -132,6 +132,7 @@ var I18N_CATALOG = {
     'theme.dark': 'Dark',
     'theme.auto': 'Auto',
     'theme.cyberpunk': 'Cyberpunk',
+    'theme.matrix': 'Matrix',
 
 
     /* --- entry (connection) cards --- */
@@ -519,6 +520,7 @@ var I18N_CATALOG = {
     'theme.dark': '深色',
     'theme.auto': '自动',
     'theme.cyberpunk': '赛博朋克',
+    'theme.matrix': 'Matrix · 像素绿',
 
 
     /* --- entry (connection) cards --- */
@@ -906,6 +908,7 @@ var I18N_CATALOG = {
     'theme.dark': '深色',
     'theme.auto': '自動',
     'theme.cyberpunk': '賽博龐克',
+    'theme.matrix': 'Matrix · 像素綠',
 
 
     /* --- entry (connection) cards --- */
