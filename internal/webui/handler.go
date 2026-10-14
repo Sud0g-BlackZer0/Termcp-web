@@ -150,9 +150,13 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// Extensions (the right panel): templates for pinned, capability-trimmed
 	// sessions with the reconciler's live status on each. The authoring routes
 	// write through the same store the MCP `extension` tool uses, so a template
-	// saved from the browser and one saved by an agent are indistinguishable.
+	// saved from the browser and one saved by an agent are indistinguishable, and
+	// the batch pair is the panel's export and import — one document holding many
+	// templates, the same shape in both directions.
 	mux.HandleFunc("GET /api/extensions", h.handleListExtensions)
 	mux.HandleFunc("POST /api/extensions", h.handleCreateExtension)
+	mux.HandleFunc("GET /api/extensions/batch", h.handleExportExtensions)
+	mux.HandleFunc("POST /api/extensions/batch", h.handleImportExtensions)
 	mux.HandleFunc("GET /api/extensions/{name}", h.handleGetExtension)
 	mux.HandleFunc("PUT /api/extensions/{name}", h.handleUpdateExtension)
 	mux.HandleFunc("DELETE /api/extensions/{name}", h.handleDeleteExtension)

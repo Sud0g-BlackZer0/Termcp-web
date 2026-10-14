@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -52,7 +53,11 @@ func summarizeExtension(ext *extensions.Extension, st extensions.Status) extensi
 		Forwards:    st.Forwards,
 		NextRetryMs: st.NextRetry,
 	}
-	if n := len(st.Failures); n > 0 {
+	// The failure is reported only while the extension is not up: it is the reason
+	// the reader is looking at a down card, and one that outlived its repair puts
+	// an old exit code under a running extension's name. The history stays in the
+	// detail read, which is where the status page gets it.
+	if n := len(st.Failures); n > 0 && out.Status != extensions.StatusAvailable {
 		out.Failure = &st.Failures[n-1]
 	}
 	if out.Status == "" {
@@ -110,6 +115,21 @@ func (h *Handler) handleGetExtension(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
+	// The editor has two views of one template: the form (the JSON below, keyed the
+	// way the extension tool's own arguments are) and the file itself. The TOML view
+	// asks for the file, so what the author edits is byte for byte what the store
+	// holds — and what an export hands them.
+	if r.URL.Query().Get("format") == "toml" {
+		raw, err := h.Extensions.Store().ReadRaw(name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/toml; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+		return
+	}
 	ext, err := h.Extensions.Store().Load(name)
 	if err != nil {
 		http.NotFound(w, r)
@@ -204,9 +224,59 @@ func bodyKind(args map[string]any) string {
 	return extensions.KindCustom
 }
 
+// isTOMLRequest reports whether a write carries the file view of a template
+// rather than the form's fields. The editor's two views are two content types on
+// one route, so the same URL serves both and neither needs its own endpoint.
+func isTOMLRequest(r *http.Request) bool {
+	ct := strings.ToLower(r.Header.Get("Content-Type"))
+	return strings.HasPrefix(ct, "application/toml") || strings.HasPrefix(ct, "text/plain")
+}
+
+// readTemplateTOML reads the file view: the TOML a config.toml holds, named by the
+// caller. Nothing is defaulted — a hand-written document is taken literally, which
+// is what makes the file view honest: the panel's form fills preset values because
+// it starts from one, and a file you wrote does not silently gain fields.
+func readTemplateTOML(w http.ResponseWriter, r *http.Request, name string) (*extensions.Extension, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, extensions.MaxConfigSize+1))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	if len(body) > extensions.MaxConfigSize {
+		http.Error(w, "extension template too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	ext, err := extensions.ParseTemplate(body, name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	return ext, true
+}
+
 func (h *Handler) handleCreateExtension(w http.ResponseWriter, r *http.Request) {
 	if h.Extensions == nil {
 		http.Error(w, "extensions are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if isTOMLRequest(r) {
+		// A document has no place to put the storage name (the file is named by its
+		// directory), so a create carries it in the query — the editor's name field
+		// is what fills it.
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		ext, ok := readTemplateTOML(w, r, name)
+		if !ok {
+			return
+		}
+		if _, err := h.Extensions.Store().Load(name); err == nil {
+			http.Error(w, "extension "+name+" already exists; use PUT to change it", http.StatusConflict)
+			return
+		}
+		h.saveExtensionTemplate(w, r, ext, http.StatusCreated)
 		return
 	}
 	args, ok := readExtensionBody(w, r)
@@ -229,12 +299,20 @@ func (h *Handler) handleCreateExtension(w http.ResponseWriter, r *http.Request) 
 	ext := extensions.Preset(bodyKind(args))
 	ext.Name = name
 	extensions.ApplyArgs(&ext, args, false)
-	if err := extensions.SaveTemplate(h.Extensions.Store(), &ext); err != nil {
+	h.saveExtensionTemplate(w, r, &ext, http.StatusCreated)
+}
+
+// saveExtensionTemplate persists one template and answers with the same summary a
+// read would produce. Both views of the editor land here, so a template saved from
+// the form and one saved from the file go through identical validation and land as
+// the same bytes on disk.
+func (h *Handler) saveExtensionTemplate(w http.ResponseWriter, r *http.Request, ext *extensions.Extension, status int) {
+	if err := extensions.SaveTemplate(h.Extensions.Store(), ext); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	st, _ := h.Extensions.Status(name)
-	writeJSON(w, http.StatusCreated, map[string]any{"extension": summarizeExtension(&ext, st)})
+	st, _ := h.Extensions.Status(ext.Name)
+	writeJSON(w, status, map[string]any{"extension": summarizeExtension(ext, st)})
 }
 
 func (h *Handler) handleUpdateExtension(w http.ResponseWriter, r *http.Request) {
@@ -252,17 +330,20 @@ func (h *Handler) handleUpdateExtension(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
+	if isTOMLRequest(r) {
+		edited, ok := readTemplateTOML(w, r, name)
+		if !ok {
+			return
+		}
+		h.saveExtensionTemplate(w, r, edited, http.StatusOK)
+		return
+	}
 	args, ok := readExtensionBody(w, r)
 	if !ok {
 		return
 	}
 	extensions.ApplyArgs(ext, args, true)
-	if err := extensions.SaveTemplate(h.Extensions.Store(), ext); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	st, _ := h.Extensions.Status(name)
-	writeJSON(w, http.StatusOK, map[string]any{"extension": summarizeExtension(ext, st)})
+	h.saveExtensionTemplate(w, r, ext, http.StatusOK)
 }
 
 func (h *Handler) handleDeleteExtension(w http.ResponseWriter, r *http.Request) {
@@ -275,11 +356,101 @@ func (h *Handler) handleDeleteExtension(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	// Comma-separated batch (a,b,c), the shape the session and profile routes use:
+	// every name is deleted independently, the answer is 200 with per-name results
+	// instead of 204, and one bad entry does not stop the rest. A single name is
+	// unchanged. Names cannot contain a comma (the store validates them), which is
+	// what makes the split safe.
+	if strings.Contains(name, ",") {
+		results := make([]map[string]any, 0)
+		for _, part := range strings.Split(name, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			code, err := deleteOneExtension(h.Extensions.Store(), part)
+			if err != nil {
+				results = append(results, map[string]any{"id": part, "ok": false, "code": code, "error": err.Error()})
+				continue
+			}
+			results = append(results, map[string]any{"id": part, "ok": true})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"results": results})
+		return
+	}
 	if err := h.Extensions.Store().Delete(name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteOneExtension removes one template for the batch path, classifying the
+// outcome so a name that is already gone counts as cleared (another tab got there
+// first) rather than as a failure of this one.
+func deleteOneExtension(store *extensions.Store, name string) (string, error) {
+	if _, err := store.Load(name); err != nil {
+		if errors.Is(err, extensions.ErrNotFound) {
+			return "extension_not_found", err
+		}
+		return "operation_failed", err
+	}
+	if err := store.Delete(name); err != nil {
+		return "operation_failed", err
+	}
+	return "", nil
+}
+
+// handleExportExtensions serves the panel's export: a TOML document holding the
+// named templates, or every stored one when no names are given. A name that no
+// longer resolves is skipped rather than failing the file, so a selection captured
+// in a stale tab still downloads.
+func (h *Handler) handleExportExtensions(w http.ResponseWriter, r *http.Request) {
+	if h.Extensions == nil {
+		http.Error(w, "extensions are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var only []string
+	if raw := r.URL.Query().Get("names"); raw != "" {
+		for _, n := range strings.Split(raw, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				only = append(only, n)
+			}
+		}
+	}
+	data, err := h.Extensions.Store().ExportDocument(only)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/toml; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="termcp-extensions.toml"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// handleImportExtensions stores a whole document at once. Nothing is overwritten:
+// a name that is taken comes back in `renamed` under the name it was given
+// instead, and the panel tells the author which ones moved.
+func (h *Handler) handleImportExtensions(w http.ResponseWriter, r *http.Request) {
+	if h.Extensions == nil {
+		http.Error(w, "extensions are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// The limit is the document cap itself: a body that reaches it is refused by
+	// the store rather than truncated here, so an author never imports a file that
+	// was cut short mid-document.
+	body, err := io.ReadAll(io.LimitReader(r.Body, extensions.MaxDocumentSize+1))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := h.Extensions.Store().ImportDocument(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
 }
 
 // handleRetryExtension is the human's nudge. It is the same call the agent's

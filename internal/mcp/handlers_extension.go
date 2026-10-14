@@ -282,12 +282,17 @@ func extensionRuntimeFields(entry map[string]any, st extensions.Status, withHist
 		entry["forwards"] = st.Forwards
 	}
 	if n := len(st.Failures); n > 0 {
-		if withHistory {
+		switch {
+		case withHistory:
 			entry["failures"] = st.Failures
-		} else {
+			entry["next_retry"] = retryIn(st.NextRetry)
+		case st.Status != extensions.StatusAvailable:
+			// The list carries the reason an extension is down, not a repair it has
+			// already made: an old exit code beside an available status reads as a
+			// current fault. The history is one action=get away.
 			entry["last_failure"] = st.Failures[n-1]
+			entry["next_retry"] = retryIn(st.NextRetry)
 		}
-		entry["next_retry"] = retryIn(st.NextRetry)
 	}
 }
 

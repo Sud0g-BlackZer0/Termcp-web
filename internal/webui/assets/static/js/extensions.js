@@ -13,10 +13,18 @@
  * and a panel that vanishes when it is empty is a panel the author cannot open
  * to author with.
  *
+ * Its chrome is the connections panel's, twice over: the same batch row on top
+ * (select, invert, open, export, delete) and the same pair of bottom keys
+ * (author one, import a set). Where NetHub's controls dial and delete hosts,
+ * these open the terminal an extension is served by and delete templates.
+ *
  * Authoring goes through the same store the extension MCP tool writes to — the
  * REST routes are that store's other caller — so a template saved here and one
  * saved by an agent are indistinguishable, and the two surfaces cannot drift
- * apart on what a valid template is.
+ * apart on what a valid template is. The dialog has two pages: Status is what a
+ * card click opens (the verdict, the handles, the failure history, and the
+ * actions that follow from them), Edit is the template itself, as fields or as
+ * the TOML file the store holds.
  *
  * Loaded as a plain synchronous <script> like every other module: the
  * declarations land in the shared global scope, and the socket's frame handler
@@ -40,14 +48,9 @@ var EXT_LAMP_CLASSES = {
   disabled: 'is-disabled'
 };
 
-// A clockwise arrow, read as "try again": the only per-card action.
+// A clockwise arrow, read as "try again": the one per-card key, for the
+// repair an author is most often looking at a down extension to make.
 var SVG_EXT_RETRY = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 8a6 6 0 11-1.9-4.4"/><path d="M14 1.6V4.6H11"/></svg>';
-
-// A pencil, read as "edit the template".
-var SVG_EXT_EDIT = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L6 12H4v-2z"/><path d="M9.5 4.5l2 2"/></svg>';
-
-// A trash can, read as "delete the template".
-var SVG_EXT_DELETE = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10"/><path d="M6.5 4.5V3h3v1.5"/><path d="M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>';
 
 function extLampClass(status) {
   return EXT_LAMP_CLASSES[status] || 'is-offline';
@@ -97,6 +100,21 @@ function extRowOrder(a, b) {
   return String(a.name || '').localeCompare(String(b.name || ''));
 }
 
+/** Every extension the panel lists, in the order it lists them: the set the
+ *  batch keys act on, read from the last frame rather than from the DOM. */
+function selectableExtensionNames() {
+  return (_extRows || []).slice().sort(extRowOrder).map(function (e) { return e.name; })
+    .filter(function (n) { return !!n; });
+}
+
+function extRowByName(name) {
+  var rows = _extRows || [];
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i] && rows[i].name === name) return rows[i];
+  }
+  return null;
+}
+
 function renderExtensionGrid(rows) {
   _extRows = rows || [];
   var panel = document.getElementById('extpanel');
@@ -126,37 +144,42 @@ function renderExtensionGrid(rows) {
       rail.appendChild(renderExtensionRailItem(ext));
     });
   }
+  /* Selection is derived from the set, never read back from the DOM, and it is
+     pruned against what is still listed: a template that disappeared while the
+     batch was being picked must not stay ticked, or the count lies and a delete
+     is sent for something already gone. */
+  var present = {};
+  list.forEach(function (ext) { present[ext.name] = true; });
+  _extSelIds.forEach(function (name) { if (!present[name]) _extSelIds.delete(name); });
+  syncExtCardSelection();
+  updateExtBatchBar();
   /* A repaint preserves the state the page is in rather than re-deriving it:
      the stored preference says what the desktop sidebar should be, and reading
      it here would reopen a drawer that arrived closed below the breakpoint. */
   setExtensionsCollapsed(extensionsCollapsed(), false);
+  /* The status page is live: a frame that arrives while it is open is what it
+     was opened to watch, so it repaints from the row that just changed. */
+  if (_extDialogName) renderExtensionStatus(_extDialogName);
 }
 
-/* The empty state is the panel's reason to exist when nothing is configured:
-   it tells the author what an extension is and hands them the tool to make
-   one. A socket frame that arrives before the first paint renders it too, so
-   the column is never a blank track. */
+/* The empty state is the panel's reason to exist when nothing is configured: it
+   says what an extension is, so an empty column is not a blank track. It carries
+   no key of its own — the column closes with New and Import, and a third
+   "create one" in the middle would be the same action twice. A socket frame that
+   arrives before the first paint renders it too. */
 function renderExtensionEmpty() {
   var row = document.createElement('div');
   row.className = 'ext-empty';
-  row.innerHTML =
-    '<p class="ext-empty-text">' + escapeHtml(t('ext.empty.text')) + '</p>' +
-    '<button type="button" class="ext-empty-btn" id="ext-empty-add">' +
-    escapeHtml(t('ext.empty.button')) + '</button>';
-  var btn = row.querySelector('#ext-empty-add');
-  if (btn) btn.addEventListener('click', function () { openExtensionEditor(null); });
+  row.innerHTML = '<p class="ext-empty-text">' + escapeHtml(t('ext.empty.text')) + '</p>';
   return row;
 }
 
 function renderExtensionCard(ext) {
   var tile = document.createElement('div');
   var lamp = extLampClass(ext.status);
-  // An available extension with a session is the only row that opens anything.
-  // One with no shell (a skill preset, driven over SFTP) has no terminal to
-  // raise, so it stays a report rather than becoming a dead affordance.
-  var openable = ext.status === 'available' && !!ext.session_id && !!ext.shell_id;
   var retryable = ext.status === 'unavailable' || ext.status === 'probing';
-  tile.className = 'conn-tile entry-card ext-card' + (openable ? ' ext-openable' : '');
+  var selected = _extSelectMode && _extSelIds.has(ext.name);
+  tile.className = 'conn-tile entry-card ext-card' + (selected ? ' batch-selected' : '');
   tile.setAttribute('data-ext-name', ext.name || '');
   tile.setAttribute('data-ext-status', ext.status || '');
   var name = ext.name || '';
@@ -164,13 +187,11 @@ function renderExtensionCard(ext) {
     ? '<button type="button" class="ext-retry-btn" title="' + escapeHtml(t('ext.retry.title')) +
       '" aria-label="' + escapeHtml(t('ext.retry.title')) + '">' + SVG_EXT_RETRY + '</button>'
     : '';
-  // The row's authoring actions. Every card carries them, so an extension is
-  // fixed where it is reported — a down extension with a bad template is one
-  // click from the edit that would correct it.
-  var editBtn = '<button type="button" class="ext-edit-btn" title="' + escapeHtml(t('ext.edit.title')) +
-    '" aria-label="' + escapeHtml(t('ext.edit.title')) + '">' + SVG_EXT_EDIT + '</button>';
-  var delBtn = '<button type="button" class="ext-del-btn" title="' + escapeHtml(t('ext.delete.title')) +
-    '" aria-label="' + escapeHtml(t('ext.delete.title')) + '">' + SVG_EXT_DELETE + '</button>';
+  /* The gear opens the configuration, the way the host cards' own gear does: the
+     card is the readout, and the one thing a human reaches for by hand is filed
+     behind the key that means "settings". */
+  var gearBtn = '<button type="button" class="conn-edit-btn" title="' + escapeHtml(t('conn.aria.editProfile')) +
+    '" aria-label="' + escapeHtml(t('conn.aria.editProfile')) + '">' + SVG_CONN_EDIT + '</button>';
   var meta =
     '<span class="ext-kind">' + escapeHtml(extKindLabel(ext.kind)) + '</span>' +
     '<span class="node-sep" aria-hidden="true">·</span>' +
@@ -183,7 +204,7 @@ function renderExtensionCard(ext) {
       escapeHtml(f.listen_addr) + '</div>';
   });
   // One line, not the history: the verdict is what the panel is for, and the
-  // detail endpoint serves the rest.
+  // status page serves the rest.
   var fail = '';
   if (ext.failure && ext.failure.reason) {
     fail = '<div class="ext-fail" title="' + escapeHtml(t('ext.fail.title', { stage: ext.failure.stage || '' })) + '">' +
@@ -198,8 +219,7 @@ function renderExtensionCard(ext) {
     '<span class="conn-nm">' + escapeHtml(name) + '</span>' +
     '</span>' +
     retryBtn +
-    editBtn +
-    delBtn +
+    gearBtn +
     '</div>' +
     '<div class="node-meta">' + meta + '</div>' +
     target +
@@ -209,16 +229,14 @@ function renderExtensionCard(ext) {
     '</div>';
   var inner = tile.querySelector('.entry-card-inner');
   if (inner) {
-    inner.title = openable
-      ? t('ext.tip.open')
-      : (ext.status === 'available' ? t('ext.tip.driven') : extStatusLabel(ext.status));
+    inner.title = _extSelectMode ? t('nethub.batch.selectOne', { name: name }) : t('ext.tip.status');
     inner.addEventListener('click', function (e) {
-      if (e.target.closest('.ext-retry-btn, .ext-edit-btn, .ext-del-btn')) return;
-      if (!openable) return;
-      /* The session may be serving several extensions — one connection per host —
-         so the channel is named too and the window lands on this extension's
-         terminal rather than on whichever channel was last used. */
-      focusSessionWindow(name, ext.session_id, windowPositionFromClick(e), { shell: ext.shell_id });
+      if (e.target.closest('.ext-retry-btn, .conn-edit-btn')) return;
+      /* In select mode a click ticks the card, the way the host cards behave:
+         clicking through to a dialog while the row is being picked for a batch
+         would lose the batch. */
+      if (_extSelectMode) { toggleExtSelection(name, tile); return; }
+      openExtensionDialog(name, 'status');
     });
   }
   var btn = tile.querySelector('.ext-retry-btn');
@@ -228,18 +246,11 @@ function renderExtensionCard(ext) {
       retryExtension(name, btn);
     });
   }
-  var editEl = tile.querySelector('.ext-edit-btn');
-  if (editEl) {
-    editEl.addEventListener('click', function (e) {
+  var gear = tile.querySelector('.conn-edit-btn');
+  if (gear) {
+    gear.addEventListener('click', function (e) {
       e.stopPropagation();
-      openExtensionEditor(name);
-    });
-  }
-  var delEl = tile.querySelector('.ext-del-btn');
-  if (delEl) {
-    delEl.addEventListener('click', function (e) {
-      e.stopPropagation();
-      deleteExtension(name, delEl);
+      openExtensionDialog(name, 'config');
     });
   }
   return tile;
@@ -262,7 +273,7 @@ function retryExtension(name, btn) {
     })
     .catch(function (err) {
       if (btn) btn.disabled = false;
-      console.error('extension retry failed: ' + ((err && err.message) || err));
+      showCopyToast(t('ext.toast.retryFailed', { msg: String((err && err.message) || err) }));
     });
 }
 
@@ -284,6 +295,180 @@ function renderExtensionRailItem(ext) {
     setExtensionsCollapsed(false, true);
   });
   return btn;
+}
+
+/* ---- Batch selection --------------------------------------------------------
+ * The same shape the host list uses, and for the same reason: one set of ticked
+ * ids, one mode flag, and a repaint that derives every card's state from them
+ * rather than reading the DOM back. The keys are the connections panel's own
+ * (built in index.html, dressed in workspace.css); what differs is the ancestor
+ * class — .ext-selecting here — so entering select mode in one column never
+ * lights up the other column's toolbar. */
+var _extSelIds = new Set();
+var _extSelectMode = false;
+
+function extSelectModeOn() { return _extSelectMode; }
+
+function setExtSelectMode(on) {
+  _extSelectMode = !!on;
+  if (!_extSelectMode) _extSelIds.clear();
+  var body = document.getElementById('extpanel-body');
+  if (body) body.classList.toggle('ext-selecting', _extSelectMode);
+  var toggle = document.getElementById('ext-select-toggle');
+  if (toggle) toggle.setAttribute('aria-pressed', String(_extSelectMode));
+  if (!_extSelectMode) closeExtOpenMenu();
+  syncExtCardSelection();
+  refreshExtCardTitles();
+  updateExtBatchBar();
+}
+
+function syncExtCardSelection() {
+  var grid = document.getElementById('ext-grid');
+  if (!grid) return;
+  grid.querySelectorAll('.conn-tile[data-ext-name]').forEach(function (tile) {
+    var name = tile.getAttribute('data-ext-name');
+    tile.classList.toggle('batch-selected', _extSelectMode && _extSelIds.has(name));
+  });
+}
+
+function refreshExtCardTitles() {
+  var grid = document.getElementById('ext-grid');
+  if (!grid) return;
+  grid.querySelectorAll('.conn-tile[data-ext-name]').forEach(function (tile) {
+    var inner = tile.querySelector('.entry-card-inner');
+    if (!inner) return;
+    inner.title = _extSelectMode
+      ? t('nethub.batch.selectOne', { name: tile.getAttribute('data-ext-name') })
+      : (_extSelectMode ? '' : t('ext.tip.status'));
+  });
+}
+
+function toggleExtSelection(name, tile) {
+  if (!name) return;
+  var on = !_extSelIds.has(name);
+  if (on) _extSelIds.add(name);
+  else _extSelIds.delete(name);
+  if (tile) tile.classList.toggle('batch-selected', on);
+  updateExtBatchBar();
+}
+
+/* The count, the invert key's state, and what the batch keys may do. Driven
+   from the set every time it changes, so the bar can never disagree with the
+   cards about what is ticked. */
+function updateExtBatchBar() {
+  var names = selectableExtensionNames();
+  var count = 0;
+  for (var i = 0; i < names.length; i++) { if (_extSelIds.has(names[i])) count++; }
+  var counter = document.getElementById('ext-toggle-count');
+  if (counter) {
+    counter.hidden = count === 0;
+    counter.textContent = String(count);
+  }
+  var toggle = document.getElementById('ext-select-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-label', _extSelectMode
+      ? t('section.batch.clearSelection') + (count ? ' (' + count + ')' : '')
+      : t('nethub.batch.select'));
+  }
+  var invert = document.getElementById('ext-sel-invert');
+  if (invert) {
+    var allSelected = names.length > 0 && names.every(function (n) { return _extSelIds.has(n); });
+    invert.classList.toggle('all-checked', allSelected);
+    invert.disabled = names.length === 0;
+  }
+  var body = document.getElementById('extpanel-body');
+  if (body) body.classList.toggle('has-selection', count > 0);
+  var split = document.getElementById('ext-open-split');
+  if (split) split.classList.toggle('is-disabled', count === 0);
+  ['ext-menu-export', 'ext-menu-delete'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.disabled = count === 0;
+  });
+}
+
+function selectedExtensionNames() {
+  if (!extSelectModeOn()) return [];
+  var names = selectableExtensionNames().filter(function (n) { return _extSelIds.has(n); });
+  // Name order, which is the order the grid shows them in.
+  names.sort(function (a, b) { return a.localeCompare(b); });
+  return names;
+}
+
+/* The play split-key's dropdown, as plain functions: the panel wiring's Escape
+   handler folds it before it folds the selection mode, so the state has to be
+   reachable from there. */
+function extOpenMenuIsOpen() {
+  var menu = document.getElementById('ext-open-menu');
+  return !!(menu && !menu.hidden);
+}
+
+function closeExtOpenMenu() {
+  var wasOpen = extOpenMenuIsOpen();
+  var menu = document.getElementById('ext-open-menu');
+  var caret = document.getElementById('ext-open-caret');
+  if (menu) menu.hidden = true;
+  if (caret) caret.setAttribute('aria-expanded', 'false');
+  return wasOpen;
+}
+
+function toggleExtOpenMenu() {
+  var menu = document.getElementById('ext-open-menu');
+  if (!menu) return;
+  menu.hidden = !menu.hidden;
+  var caret = document.getElementById('ext-open-caret');
+  if (caret) caret.setAttribute('aria-expanded', String(!menu.hidden));
+}
+
+/* Delete the ticked templates. Deleting a template closes the connection kept
+   warm for it once nothing else is served by that connection, which is what the
+   dialog says: the author is removing both the recipe and what is running from
+   it. */
+function deleteSelectedExtensions() {
+  var names = selectedExtensionNames();
+  if (!names.length) return;
+  var message = tCount('ext.batch.deleteMsg.one', 'ext.batch.deleteMsg.other', { count: names.length });
+  confirmDialog({
+    title: t('ext.batch.deleteTitle'),
+    message: message,
+    okText: t('batch.del.ok', { count: names.length }),
+    danger: true
+  }).then(function (ok) {
+    if (!ok) return;
+    /* One request for every name (comma-separated path, like the session and
+       profile routes): the server reports per-name outcomes and a name that is
+       already gone counts as cleared here. */
+    deleteResourcesBatch('extensions', names).then(function (results) {
+      var failed = [];
+      (results || []).forEach(function (r) {
+        if (r.ok || r.code === 'extension_not_found') {
+          _extSelIds.delete(r.id);
+        } else {
+          failed.push(r.id + ': ' + (r.error || r.code || 'failed'));
+        }
+      });
+      if (failed.length) showCopyToast(t('toast.delete.failed', { msg: failed.join('; ') }));
+      if (_extDialogName && names.indexOf(_extDialogName) >= 0) closeExtensionDialog();
+    }).catch(function (err) {
+      showCopyToast(t('toast.delete.failed', { msg: String((err && err.message) || err) }));
+    });
+  });
+}
+
+/* The TOML download. The backend composes the document — the selection, or every
+   stored template when the export-all key is used — so the browser stays a pipe
+   for bytes. */
+function downloadExtensionsToml(names) {
+  var path = apiPath('/api/extensions/batch');
+  if (names && names.length) path += '?names=' + names.map(encodeURIComponent).join(',');
+  return downloadTOML(path, 'termcp-extensions.toml');
+}
+
+function exportSelectedExtensions() {
+  var names = selectedExtensionNames();
+  if (!names.length) return;
+  downloadExtensionsToml(names).catch(function (e) {
+    showCopyToast(t('conn.batch.exportFailed', { msg: String((e && e.message) || e) }));
+  });
 }
 
 /* ---- Collapse state -------------------------------------------------------
@@ -462,158 +647,79 @@ function loadExtensionsOnce() {
 
 onLangChange(function () {
   if (_extRows) renderExtensionGrid(_extRows);
+  if (_extDialogName) renderExtensionStatus(_extDialogName);
 });
 
-/* ---- Authoring -------------------------------------------------------------
- * The panel's other half. These write the same store the extension MCP tool
- * writes to, through the REST routes that store's reconciler serves, so a
- * template authored here and one authored by an agent are one file on disk and
- * one row in this panel.
+/* ---- The dialog -------------------------------------------------------------
+ * Two things a human can want from a card, and one page for each:
  *
- * The form mirrors the authoring layer's semantics: every field sends its value
- * on save, and an emptied field sends an empty array or string, which the
- * layer reads as "clear" rather than "leave alone". */
-var _extEditing = null;
+ *   the card itself   the status page — the reconciler's verdict, the handles an
+ *                     agent is driving it through, the tunnels it bound, its
+ *                     failure history, and the three actions that follow from
+ *                     them (retry, park, delete)
+ *   the card's gear   the configuration, as the TOML file the store holds: the
+ *                     same text an export hands out, and the only editor there
+ *                     is. A field form would be a second description of a
+ *                     template to keep in step with this one, and this panel is
+ *                     not where its readers live.
+ *
+ * Creating is the same page with an editable name and the textarea seeded from a
+ * documented default, so a new extension starts from something that validates —
+ * and from something a person who has never written one can read.
+ */
+var _extDialogName = null;   // extension the dialog is showing; null = a new one
+var _extDialogDetail = null; // the detail read, for the failure history
 
 function extModalEl(id) { return document.getElementById(id); }
 
-/* Lines to a whitelist and back: the field is a textarea because a whitelist is
- * a list, and one entry per line is the shape an author can scan and edit. An
- * empty textarea is an empty array, which is the "clear it" intent. */
-function extLinesToText(list) {
-  return (list || []).join('\n');
-}
-
-function extTextToLines(text) {
-  return text.split('\n').map(function (s) { return s.trim(); })
-    .filter(function (s) { return s.length > 0; });
-}
-
-/* The target list is the same set of profiles the connection drawer offers,
- * because an extension's template dials one of them. "internal" is the loopback
- * the skill and prompt presets reach through. */
-function extFillTargetSelect(selected) {
-  var sel = extModalEl('ext-f-target');
-  if (!sel) return;
-  var keep = selected;
-  fetch(apiPath('/api/connections')).then(function (r) { return r.json(); }).then(function (j) {
-    var names = (j.connections || []).map(function (c) { return c.name; })
-      .filter(function (n) { return !!n; });
-    if (names.indexOf('internal') < 0) names.unshift('internal');
-    sel.innerHTML = names.map(function (n) {
-      return '<option value="' + escapeHtml(n) + '"' + (n === keep ? ' selected' : '') + '>' +
-        escapeHtml(n) + '</option>';
-    }).join('');
-  }).catch(function () {});
-}
-
-/* openExtensionEditor loads a template into the form. A null name is a create:
- * the form starts from the mcp preset, the conventional first choice, and the
- * name field is editable because the file does not exist yet. Editing an
- * existing template locks the name — it is the directory the file lives in,
- * and renaming is a move the authoring layer does not offer either caller. */
-function openExtensionEditor(name) {
+/* openExtensionDialog shows one extension, on the page asked for: the status page
+ * for a card click, the configuration for its gear. The status page paints from
+ * the row the panel already has, so a click never waits on a request; the detail
+ * read only adds the failure history the rows do not carry. */
+function openExtensionDialog(name, page) {
   var modal = extModalEl('modal-ext');
   if (!modal) return;
-  _extEditing = name || null;
+  _extDialogName = name || null;
+  _extDialogDetail = null;
+  showExtError('');
   var title = extModalEl('modal-ext-title');
-  var err = extModalEl('modal-ext-err');
-  if (err) { err.style.display = 'none'; err.textContent = ''; }
-  if (name) {
-    if (title) title.textContent = t('ext.modal.edit', { name: name });
-    fetch(apiPath('/api/extensions/') + encodeURIComponent(name))
-      .then(function (r) { return r.json(); })
-      .then(function (j) {
-        /* The detail endpoint splits the template: the fields the reconciler
-         * reports on (name, kind, target, description, enabled) ride under
-         * "extension" with the live status, and the session shape (command,
-         * args, mode, allow, paths, notes) sits at the top. Both are read, so a
-         * template saved by the agent and one saved here open to the same form. */
-        var live = j.extension || {};
-        extPaintForm({
-          name: name,
-          kind: live.kind || j.kind,
-          target: live.target || j.target,
-          description: live.description || j.description || '',
-          command: j.command || '',
-          args: j.args || [],
-          mode: j.mode || '',
-          allow: j.allow || [],
-          paths: j.paths || [],
-          notes: j.notes || '',
-          enabled: live.enabled !== false
-        });
-      })
-      .catch(function () {
-        showExtError(t('ext.modal.loadFailed'));
-      });
-  } else {
-    if (title) title.textContent = t('ext.modal.title');
-    var preset = extPresetFor('mcp');
-    preset.name = '';
-    extPaintForm(preset);
-  }
+  if (title) title.textContent = name || t('ext.modal.title');
+  /* The name is the file's directory: shown above the document it names, editable
+     only while there is no directory yet. */
   var nameEl = extModalEl('ext-f-name');
-  if (nameEl) nameEl.readOnly = !!name;
-  extFillTargetSelect(name ? null : 'internal');
+  if (nameEl) {
+    nameEl.readOnly = !!name;
+    nameEl.value = name || '';
+  }
+  extShowPage(name ? (page || 'status') : 'config');
   modal.classList.remove('hidden');
-  if (nameEl && !name) nameEl.focus();
-}
-
-function extPaintForm(ext) {
-  var set = function (id, v) {
-    var el = extModalEl(id);
-    if (!el) return;
-    if (el.type === 'checkbox') el.checked = !!v;
-    else el.value = v == null ? '' : String(v);
-  };
-  set('ext-f-name', ext.name || '');
-  set('ext-f-kind', ext.kind || 'custom');
-  set('ext-f-desc', ext.description || '');
-  set('ext-f-command', ext.command || '');
-  set('ext-f-args', extLinesToText(ext.args));
-  set('ext-f-mode', ext.mode || '');
-  set('ext-f-allow', extLinesToText(ext.allow));
-  set('ext-f-paths', extLinesToText(ext.paths));
-  set('ext-f-notes', ext.notes || '');
-  set('ext-f-enabled', ext.enabled !== false);
-}
-
-/* The preset the form starts a create from, chosen by the kind field. The
- * server's authoring layer applies the same presets; this mirrors them only so
- * the form can show the author what they are about to get before they save. */
-function extPresetFor(kind) {
-  switch (kind) {
-    case 'mcp':
-      return { kind: 'mcp', mode: 'pipe', command: 'npx', args: ['-y', 'example-mcp-server'],
-               allow: ['shell_input', 'shell_output'], paths: [], notes: '', enabled: true };
-    case 'skill':
-      return { kind: 'skill', mode: '', command: '', args: [],
-               allow: ['file_read', 'file_stat'], paths: [], notes: '', enabled: true };
-    case 'prompt':
-      return { kind: 'prompt', mode: 'pty', command: '', args: [],
-               allow: [], paths: [], notes: '', enabled: true };
-    default:
-      return { kind: 'custom', mode: '', command: '', args: [],
-               allow: [], paths: [], notes: '', enabled: true };
+  if (name) {
+    if (page === 'config') loadExtensionToml(name);
+    else loadExtensionDetail(name);
+  } else {
+    var area = extModalEl('ext-f-toml');
+    if (area) area.value = extTomlSeed();
+    if (nameEl) nameEl.focus();
   }
 }
 
-/* Changing the kind re-seeds the conventional fields the way the authoring
- * layer's preset does. Anything the author already filled in is kept: a reseed
- * is a head start, not an overwrite. */
-function extSeedFromKind(kind) {
-  var preset = extPresetFor(kind);
-  var take = function (id, v) {
-    var el = extModalEl(id);
-    if (el && !el.value.trim()) el.value = v == null ? '' : String(v);
-  };
-  take('ext-f-mode', preset.mode);
-  take('ext-f-command', preset.command);
-  var argsEl = extModalEl('ext-f-args');
-  if (argsEl && !argsEl.value.trim()) argsEl.value = extLinesToText(preset.args);
-  var allowEl = extModalEl('ext-f-allow');
-  if (allowEl && !allowEl.value.trim()) allowEl.value = extLinesToText(preset.allow);
+function closeExtensionDialog() {
+  var modal = extModalEl('modal-ext');
+  if (modal) modal.classList.add('hidden');
+  _extDialogName = null;
+  _extDialogDetail = null;
+  showExtError('');
+}
+
+/* extShowPage swaps which page of the dialog is on screen. One modal, two
+ * contents, no tabs: each is reached from the thing it belongs to. */
+function extShowPage(page) {
+  var status = extModalEl('ext-page-status');
+  var config = extModalEl('ext-page-config');
+  if (!status || !config) return;
+  var live = page !== 'config';
+  status.style.display = live ? '' : 'none';
+  config.style.display = live ? 'none' : '';
 }
 
 function showExtError(msg) {
@@ -623,47 +729,214 @@ function showExtError(msg) {
   err.style.display = msg ? 'block' : 'none';
 }
 
-/* Collect the form into the authoring layer's shape. On create the name goes
- * with everything else; on update the name comes from the path. Every field is
- * sent, and an emptied whitelist is an empty array — the layer reads that as
- * "clear", which is exactly what the author meant by emptying the box. */
-function extCollectForm(includeName) {
-  var val = function (id) { var el = extModalEl(id); return el ? el.value : ''; };
-  var lines = function (id) { return extTextToLines(val(id)); };
-  var out = {
-    kind: val('ext-f-kind'),
-    target: val('ext-f-target'),
-    description: val('ext-f-desc'),
-    command: val('ext-f-command'),
-    args: lines('ext-f-args'),
-    mode: val('ext-f-mode'),
-    allow: lines('ext-f-allow'),
-    paths: lines('ext-f-paths'),
-    notes: val('ext-f-notes')
-  };
-  var enEl = extModalEl('ext-f-enabled');
-  out.enabled = enEl ? !!enEl.checked : true;
-  if (includeName) out.name = val('ext-f-name').trim();
-  return out;
+/* loadExtensionDetail reads the failure history and repaints the status page from
+ * it. The page is already up — the row it was opened from is the verdict — so a
+ * failed read costs the history, not the dialog. */
+function loadExtensionDetail(name) {
+  fetch(apiPath('/api/extensions/') + encodeURIComponent(name))
+    .then(function (r) {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    })
+    .then(function (j) {
+      if (_extDialogName !== name) return;
+      _extDialogDetail = j;
+      renderExtensionStatus(name);
+    })
+    .catch(function () {
+      showExtError(t('ext.modal.loadFailed'));
+    });
 }
 
-function extSaveTemplate() {
-  var name = _extEditing;
-  var forCreate = !name;
-  var body = extCollectForm(forCreate);
-  if (forCreate && !body.name) {
-    showExtError(t('ext.modal.nameRequired'));
+/* ---- The status page ------------------------------------------------------- */
+
+/* A labelled row of the status grid. The value is monospace because most of
+   them are identifiers an author copies into a tool call. */
+function extStatusRow(label, value, copyable) {
+  if (!value) return '';
+  var copy = copyable
+    ? '<button type="button" class="ext-copy-btn" data-copy="' + escapeHtml(value) + '" title="' +
+      escapeHtml(t('ext.status.copy')) + '" aria-label="' + escapeHtml(t('ext.status.copy')) + '">' + SVG_COPY_12 + '</button>'
+    : '';
+  return '<div class="ext-status-row"><span class="ext-status-label">' + escapeHtml(label) + '</span>' +
+    '<span class="ext-status-value">' + escapeHtml(value) + '</span>' + copy + '</div>';
+}
+
+/* Other extensions served by the same connection. The session is shared per host,
+   and saying so is what explains why an agent's shell_id is not the session the
+   listing names. */
+function extSharingNote(row) {
+  if (!row.session_id) return '';
+  var names = (_extRows || []).filter(function (e) {
+    return e && e.session_id === row.session_id && e.name !== row.name;
+  }).map(function (e) { return e.name; });
+  if (!names.length) return '';
+  return t('ext.status.shared', { names: names.join(', ') });
+}
+
+function renderExtensionStatus(name) {
+  var row = extRowByName(name);
+  var page = extModalEl('ext-page-status');
+  if (!page) return;
+  if (!row) {
+    page.innerHTML = '<p class="ext-empty-text">' + escapeHtml(t('ext.status.gone')) + '</p>';
     return;
+  }
+  var lamp = extLampClass(row.status);
+  var lampEl = extModalEl('ext-status-lamp');
+  if (lampEl) lampEl.className = 'node-lamp ' + lamp;
+  var word = extModalEl('ext-status-word');
+  if (word) word.textContent = extStatusLabel(row.status);
+  var meta = extModalEl('ext-status-meta');
+  if (meta) {
+    meta.textContent = [extKindLabel(row.kind), row.target, row.enabled ? '' : t('ext.status.parked')]
+      .filter(function (s) { return !!s; }).join(' · ');
+  }
+
+  var grid = extModalEl('ext-status-grid');
+  if (grid) {
+    var rows = '';
+    if (row.description) rows += extStatusRow(t('ext.modal.description'), row.description, false);
+    rows += extStatusRow(t('ext.status.session'), row.session_id, true);
+    rows += extStatusRow(t('ext.status.shell'), row.shell_id, true);
+    (row.forwards || []).forEach(function (f) {
+      rows += extStatusRow(extForwardLabel(f.kind),
+        [f.listen_addr, f.target_addr].filter(function (s) { return !!s; }).join(' → '), false);
+    });
+    if (row.next_retry_ms) {
+      var secs = Math.max(0, Math.round((row.next_retry_ms - Date.now()) / 1000));
+      rows += extStatusRow(t('ext.status.nextRetry'), t('ext.status.inSeconds', { count: secs }), false);
+    }
+    var shared = extSharingNote(row);
+    if (shared) rows = '<p class="conn-check-hint">' + escapeHtml(shared) + '</p>' + rows;
+    grid.innerHTML = rows;
+    grid.querySelectorAll('.ext-copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        copyTextToClipboard(btn.getAttribute('data-copy')).then(function () {
+          showCopyToast();
+        }).catch(function () {
+          showCopyToast(t('toast.copy.failed'));
+        });
+      });
+    });
+  }
+
+  var fails = extModalEl('ext-status-fails');
+  if (fails) {
+    var history = (_extDialogDetail && _extDialogDetail.failures) || [];
+    if (!history.length) {
+      fails.innerHTML = '';
+    } else {
+      fails.innerHTML = '<div class="ext-status-sub">' + escapeHtml(t('ext.status.failures')) + '</div>' +
+        history.slice().reverse().map(function (f) {
+          return '<div class="ext-fail-item"><span class="ext-fail-stage">' + escapeHtml(f.stage || '') + '</span>' +
+            '<span class="ext-fail-time">' + escapeHtml(fmtTime(f.at)) + '</span>' +
+            '<span class="ext-fail-reason">' + escapeHtml(f.reason || '') + '</span></div>';
+        }).join('');
+    }
+  }
+
+  /* The three actions a verdict asks for: retry what is down, park or wake what
+     is up, remove what is not wanted. The configuration has its own key on the
+     card, and nothing here raises a terminal — an agent drives the extension, a
+     human reads it. */
+  var retryBtn = extModalEl('ext-status-retry');
+  if (retryBtn) {
+    var retryable = row.status === 'unavailable' || row.status === 'probing';
+    retryBtn.disabled = !retryable;
+    retryBtn.onclick = function () { retryExtension(row.name, retryBtn); };
+  }
+  var toggleBtn = extModalEl('ext-status-toggle');
+  if (toggleBtn) {
+    toggleBtn.textContent = row.enabled ? t('ext.status.disable') : t('ext.status.enable');
+    toggleBtn.onclick = function () { setExtensionEnabled(row.name, !row.enabled, toggleBtn); };
+  }
+  var deleteBtn = extModalEl('ext-status-delete');
+  if (deleteBtn) {
+    deleteBtn.onclick = function () { deleteOneExtension(row.name); };
+  }
+}
+
+/* ---- The configuration page ------------------------------------------------- */
+
+/* loadExtensionToml reads the file the store holds, byte for byte: what the author
+ * edits here is what an export hands out and what a colleague's file would
+ * contain. */
+function loadExtensionToml(name) {
+  var area = extModalEl('ext-f-toml');
+  if (area) area.value = '';
+  fetch(apiPath('/api/extensions/') + encodeURIComponent(name) + '?format=toml')
+    .then(function (r) {
+      if (!r.ok) throw new Error(r.status);
+      return r.text();
+    })
+    .then(function (text) {
+      if (_extDialogName === name && area) area.value = text;
+    })
+    .catch(function () {
+      showExtError(t('ext.modal.loadFailed'));
+    });
+}
+
+/* The document a create starts from: the two fields a template cannot do without,
+ * the conventional stdio server, and a line of comment per field — a person who
+ * has never written one of these should be able to read what to change, which is
+ * the whole reason this is a document and not a form. */
+function extTomlSeed() {
+  return [
+    '# A termcp extension. kind + target is enough; every other field is an override.',
+    'kind = "mcp"',
+    '# target: an ssh_config profile name (ssh_config action=list), or "internal"',
+    'target = "internal"',
+    '',
+    '# What it runs. A pipe channel starts this command and speaks line-delimited',
+    '# JSON-RPC to it; pty is an interactive terminal instead; empty is no shell at',
+    '# all (SFTP and forwards only).',
+    'mode = "pipe"',
+    'command = "npx"',
+    'args = ["-y", "example-mcp-server"]',
+    '',
+    '# What the agent driving it may call (a whitelist; empty = the full surface).',
+    'allow = ["shell_input", "shell_key", "shell_output"]',
+    '',
+    '# Read by the agent before it uses this extension: the part that is not obvious',
+    '# from the fields above.',
+    '# notes = "..."',
+    ''
+  ].join('\n');
+}
+
+/* extSaveTemplate saves what the textarea holds. The name is the directory the
+ * template lives in, so it rides in the query on a create and in the path on an
+ * update — the file itself has no place for it. */
+function extSaveTemplate() {
+  var name = _extDialogName;
+  var forCreate = !name;
+  var area = extModalEl('ext-f-toml');
+  var body = area ? area.value : '';
+  if (!body.trim()) {
+    showExtError(t('ext.modal.tomlEmpty'));
+    return;
+  }
+  var query = '';
+  if (forCreate) {
+    var nameEl = extModalEl('ext-f-name');
+    var newName = nameEl ? nameEl.value.trim() : '';
+    if (!newName) {
+      showExtError(t('ext.modal.nameRequired'));
+      return;
+    }
+    query = '?name=' + encodeURIComponent(newName);
   }
   var saveBtn = extModalEl('modal-ext-save');
   if (saveBtn) saveBtn.disabled = true;
   var url = forCreate
-    ? apiPath('/api/extensions')
+    ? apiPath('/api/extensions') + query
     : apiPath('/api/extensions/') + encodeURIComponent(name);
   fetch(url, {
     method: forCreate ? 'POST' : 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    headers: { 'Content-Type': 'application/toml; charset=utf-8' },
+    body: body
   }).then(function (r) {
     if (saveBtn) saveBtn.disabled = false;
     if (!r.ok) {
@@ -671,69 +944,187 @@ function extSaveTemplate() {
         throw new Error(txt || r.status);
       });
     }
-    // The store's change subscription makes the reconciler broadcast, and the
-    // socket frame repainting the grid is the receipt — no refetch here.
-    closeExtensionEditor();
+    /* The dialog closes either way: the next frame repaints the card, and the
+       card is where the result of an edit is read. */
+    closeExtensionDialog();
   }).catch(function (err) {
     if (saveBtn) saveBtn.disabled = false;
     showExtError(t('ext.modal.saveFailed') + ' ' + ((err && err.message) || err));
   });
 }
 
-function closeExtensionEditor() {
-  var modal = extModalEl('modal-ext');
-  if (modal) modal.classList.add('hidden');
-  _extEditing = null;
-  showExtError('');
+/* Park or wake a template. The reconciler does the rest: a parked extension's
+ * channel and tunnels are closed, an enabled one is brought up again. */
+function setExtensionEnabled(name, enabled, btn) {
+  if (!name) return;
+  if (btn) btn.disabled = true;
+  fetch(apiPath('/api/extensions/') + encodeURIComponent(name), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: enabled })
+  }).then(function (r) {
+    if (btn) btn.disabled = false;
+    if (!r.ok) return r.text().then(function (txt) { throw new Error(txt || r.status); });
+  }).catch(function (err) {
+    if (btn) btn.disabled = false;
+    showCopyToast(t('ext.toast.saveFailed', { msg: String((err && err.message) || err) }));
+  });
 }
 
 /* Delete is a confirm, because the template is a file but the extension is a
  * connection the reconciler was holding warm — the author is removing both. */
-function deleteExtension(name, btn) {
+function deleteOneExtension(name) {
   if (!name) return;
   confirmDialog({
     title: t('ext.delete.title'),
     message: t('ext.delete.confirm', { name: name })
   }).then(function (ok) {
     if (!ok) return;
-    if (btn) btn.disabled = true;
     fetch(apiPath('/api/extensions/') + encodeURIComponent(name), { method: 'DELETE' })
       .then(function (r) {
-        if (btn) btn.disabled = false;
-        if (!r.ok) {
-          return r.text().then(function (txt) {
-            throw new Error(txt || r.status);
-          });
+        if (!r.ok && r.status !== 204) {
+          return r.text().then(function (txt) { throw new Error(txt || r.status); });
         }
+        closeExtensionDialog();
       })
       .catch(function (err) {
-        if (btn) btn.disabled = false;
-        console.error('extension delete failed: ' + ((err && err.message) || err));
+        showCopyToast(t('toast.delete.failed', { msg: String((err && err.message) || err) }));
       });
   });
 }
 
+/* ---- Import ----------------------------------------------------------------
+ * The dialog and the readout are the connection import's, over the extension
+ * document: one file, no overwrites, and the names that had to move are listed
+ * because that is the only thing the author has to be told about. */
+(function () {
+  var open = document.getElementById('ext-import-open');
+  if (!open) return;
+  open.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var btn = document.getElementById('ext-import-run');
+    if (btn) btn.disabled = false;
+    var file = document.getElementById('ext-import-file');
+    if (file) file.value = '';
+    var err = document.getElementById('ext-import-err');
+    if (err) { err.style.display = 'none'; err.textContent = ''; }
+    var out = document.getElementById('ext-import-result');
+    if (out) { out.style.display = 'none'; out.textContent = ''; }
+    showModal('modal-ext-import');
+  });
+  var close = document.getElementById('ext-import-close');
+  if (close) close.addEventListener('click', function () { hideModal('modal-ext-import'); });
+  var run = document.getElementById('ext-import-run');
+  if (run) run.addEventListener('click', function () {
+    var input = document.getElementById('ext-import-file');
+    var err = document.getElementById('ext-import-err');
+    var out = document.getElementById('ext-import-result');
+    if (err) err.style.display = 'none';
+    if (out) out.style.display = 'none';
+    var file = input && input.files && input.files[0];
+    if (!file) {
+      if (err) { err.textContent = t('conn.batch.selectFile'); err.style.display = 'block'; }
+      return;
+    }
+    var btn = this;
+    btn.disabled = true;
+    // The file is opaque to the UI; the backend parses and validates its TOML.
+    fetch(apiPath('/api/extensions/batch'), {
+      method: 'POST', headers: { 'Content-Type': 'application/toml' }, body: file
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (message) { throw new Error(message || String(r.status)); });
+      return r.json();
+    }).then(function (result) {
+      if (result.renamed && result.renamed.length) {
+        var lines = [t('ext.batch.imported', { count: result.imported })];
+        result.renamed.forEach(function (entry) {
+          lines.push(t('conn.batch.renamed', { from: entry.from, to: entry.to }));
+        });
+        if (out) {
+          out.textContent = lines.join('\n');
+          out.style.display = 'block';
+        }
+        if (input) input.value = '';
+      } else {
+        hideModal('modal-ext-import');
+        showCopyToast(t('ext.batch.imported', { count: result.imported }));
+      }
+    }).catch(function (e) {
+      if (err) { err.textContent = String((e && e.message) || e); err.style.display = 'block'; }
+    }).finally(function () { btn.disabled = false; });
+  });
+})();
+
+/* ---- Panel wiring ---------------------------------------------------------- */
 (function () {
   var add = document.getElementById('ext-add');
-  if (add) add.addEventListener('click', function () { openExtensionEditor(null); });
+  if (add) {
+    add.addEventListener('click', function () { openExtensionDialog(null, 'edit'); });
+    add.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      openExtensionDialog(null, 'edit');
+    });
+  }
+
+  var toggle = document.getElementById('ext-select-toggle');
+  if (toggle) toggle.addEventListener('click', function (e) {
+    e.stopPropagation();
+    setExtSelectMode(!extSelectModeOn());
+  });
+
+  var invert = document.getElementById('ext-sel-invert');
+  if (invert) invert.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var names = selectableExtensionNames();
+    var allSelected = names.length > 0 && names.every(function (n) { return _extSelIds.has(n); });
+    names.forEach(function (n) {
+      if (allSelected) _extSelIds.delete(n);
+      else _extSelIds.add(n);
+    });
+    syncExtCardSelection();
+    updateExtBatchBar();
+  });
+
+  var caret = document.getElementById('ext-open-caret');
+  if (caret) caret.addEventListener('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleExtOpenMenu();
+  });
+  document.addEventListener('click', function (e) {
+    if (!extOpenMenuIsOpen()) return;
+    if (e.target.closest('#ext-open-menu') || e.target.closest('#ext-open-caret')) return;
+    closeExtOpenMenu();
+  });
+  var menu = document.getElementById('ext-open-menu');
+  if (menu) menu.addEventListener('click', function (e) { e.stopPropagation(); });
+  var exportKey = document.getElementById('ext-menu-export');
+  if (exportKey) exportKey.addEventListener('click', function () {
+    closeExtOpenMenu();
+    exportSelectedExtensions();
+  });
+  var deleteKey = document.getElementById('ext-menu-delete');
+  if (deleteKey) deleteKey.addEventListener('click', function () {
+    closeExtOpenMenu();
+    deleteSelectedExtensions();
+  });
 
   var modal = extModalEl('modal-ext');
   if (!modal) return;
-  extModalEl('modal-ext-close').addEventListener('click', closeExtensionEditor);
-  extModalEl('modal-ext-cancel').addEventListener('click', closeExtensionEditor);
+  extModalEl('modal-ext-close').addEventListener('click', closeExtensionDialog);
+  extModalEl('modal-ext-cancel').addEventListener('click', closeExtensionDialog);
   extModalEl('modal-ext-save').addEventListener('click', extSaveTemplate);
-  var kindSel = extModalEl('ext-f-kind');
-  if (kindSel) {
-    kindSel.addEventListener('change', function () { extSeedFromKind(kindSel.value); });
-  }
+  var statusClose = extModalEl('ext-status-close');
+  if (statusClose) statusClose.addEventListener('click', closeExtensionDialog);
   modal.addEventListener('click', function (e) {
-    if (e.target === modal) closeExtensionEditor();
+    if (e.target === modal) closeExtensionDialog();
   });
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
     if (!modal.classList.contains('hidden')) {
       e.stopImmediatePropagation();
-      closeExtensionEditor();
+      closeExtensionDialog();
     }
   }, true);
 })();

@@ -501,9 +501,11 @@ func TestExtensionDelete(t *testing.T) {
 	saveTestExtension(t, h, &ext)
 
 	rr := httptest.NewRecorder()
+	// A single name answers 204 with no body, the same shape the profile route
+	// uses; the batch form above is the one that reports per-name outcomes.
 	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/api/extensions/docs", nil))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("DELETE /api/extensions/docs = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("DELETE /api/extensions/docs = %d, want 204 (%s)", rr.Code, rr.Body.String())
 	}
 	if rows := getExtensions(t, h); findExtension(rows, "docs") != nil {
 		t.Errorf("deleted extension still listed: %+v", rows)
@@ -514,8 +516,8 @@ func TestExtensionDelete(t *testing.T) {
 	// does not report a failure for work that is already done.
 	rr = httptest.NewRecorder()
 	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/api/extensions/docs", nil))
-	if rr.Code != http.StatusOK {
-		t.Errorf("delete a missing extension = %d, want 200 (idempotent)", rr.Code)
+	if rr.Code != http.StatusNoContent {
+		t.Errorf("delete a missing extension = %d, want 204 (idempotent)", rr.Code)
 	}
 	if err := h.Extensions.Store().Delete("docs"); err != nil {
 		t.Errorf("store delete should also be idempotent: %v", err)
@@ -548,5 +550,219 @@ func TestExtensionAuthoringWithoutReconciler(t *testing.T) {
 		if rr.Code != http.StatusServiceUnavailable {
 			t.Errorf("%s %s without a reconciler = %d, want 503", tc.method, tc.target, rr.Code)
 		}
+	}
+}
+
+// TestExtensionsExportImportRoutes pins the panel's download and upload
+// end to end: the file an export produces is the file an import accepts, and a
+// name that is already taken comes back renamed rather than overwriting what is
+// there.
+func TestExtensionsExportImportRoutes(t *testing.T) {
+	h := extensionTestHandler(t)
+	ext := extensions.Preset(extensions.KindSkill)
+	ext.Name = "docs"
+	ext.Target = "internal"
+	ext.Paths = []string{"/srv/docs/"}
+	saveTestExtension(t, h, &ext)
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	// Export the selection. The response is the download itself, so the browser
+	// can hand it straight to a file.
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/extensions/batch?names=docs", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("export = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/toml") {
+		t.Errorf("export content type = %q, want application/toml", ct)
+	}
+	document := rr.Body.String()
+	if !strings.Contains(document, "name = 'docs'") && !strings.Contains(document, `name = "docs"`) {
+		t.Fatalf("export should name the template it holds:\n%s", document)
+	}
+
+	// Import the same document back into the store that produced it: nothing is
+	// overwritten, so the entry arrives under a free name and the answer says so.
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/extensions/batch", strings.NewReader(document))
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("import = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	var result extensions.BatchImportResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode import result: %v (%s)", err, rr.Body.String())
+	}
+	if result.Imported != 1 || len(result.Renamed) != 1 {
+		t.Fatalf("re-importing a stored template should rename it, got %+v", result)
+	}
+	if _, err := h.Extensions.Store().Load(result.Renamed[0].To); err != nil {
+		t.Errorf("the renamed template should be stored: %v", err)
+	}
+	if got, err := h.Extensions.Store().Load("docs"); err != nil || got.Paths[0] != "/srv/docs/" {
+		t.Errorf("the original template should be untouched, got %+v (%v)", got, err)
+	}
+}
+
+// TestExtensionsImportRouteRefusesBrokenDocument pins that a bad upload is a 400
+// with the store's own explanation, not a half-imported file.
+func TestExtensionsImportRouteRefusesBrokenDocument(t *testing.T) {
+	h := extensionTestHandler(t)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/extensions/batch", strings.NewReader("[[hosts]]\nname = \"x\"\n"))
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("import of a foreign document = %d, want 400 (%s)", rr.Code, rr.Body.String())
+	}
+	if list, _ := h.Extensions.Store().List(); len(list) != 0 {
+		t.Errorf("a refused import must store nothing, got %v", list)
+	}
+}
+
+// TestExtensionsBatchDeleteRoute pins the batch contract the panel shares with the
+// session and profile routes: a comma-separated name list answers 200 with per-name
+// results, one bad entry does not stop the rest, and a single name still answers
+// 204.
+func TestExtensionsBatchDeleteRoute(t *testing.T) {
+	h := extensionTestHandler(t)
+	for _, name := range []string{"one", "two"} {
+		ext := extensions.Preset(extensions.KindSkill)
+		ext.Name = name
+		ext.Target = "internal"
+		ext.Paths = []string{"/srv/"}
+		saveTestExtension(t, h, &ext)
+	}
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/api/extensions/one,two,gone", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("batch delete = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Results []struct {
+			ID   string `json:"id"`
+			OK   bool   `json:"ok"`
+			Code string `json:"code"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode batch results: %v (%s)", err, rr.Body.String())
+	}
+	if len(body.Results) != 3 {
+		t.Fatalf("want one result per name, got %+v", body.Results)
+	}
+	byID := map[string]string{}
+	for _, r := range body.Results {
+		if r.OK {
+			byID[r.ID] = "ok"
+			continue
+		}
+		byID[r.ID] = r.Code
+	}
+	if byID["one"] != "ok" || byID["two"] != "ok" {
+		t.Errorf("both stored templates should have been deleted, got %+v", byID)
+	}
+	if byID["gone"] != "extension_not_found" {
+		t.Errorf("a name that is already gone should say so, got %+v", byID)
+	}
+	if list, _ := h.Extensions.Store().List(); len(list) != 0 {
+		t.Errorf("store should be empty after the batch, got %v", list)
+	}
+
+	// A single name keeps the original contract.
+	ext := extensions.Preset(extensions.KindSkill)
+	ext.Name = "solo"
+	ext.Target = "internal"
+	ext.Paths = []string{"/srv/"}
+	saveTestExtension(t, h, &ext)
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/api/extensions/solo", nil))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("single delete = %d, want 204 (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestExtensionsTOMLViewRoutes pins the editor's file view: the text the TOML view
+// reads is the file the store holds, and saving that text back writes the same
+// template — including a create, whose name comes from the query because the file
+// itself is named by its directory.
+func TestExtensionsTOMLViewRoutes(t *testing.T) {
+	h := extensionTestHandler(t)
+	ext := extensions.Preset(extensions.KindSkill)
+	ext.Name = "docs"
+	ext.Target = "internal"
+	ext.Paths = []string{"/srv/docs/"}
+	saveTestExtension(t, h, &ext)
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/extensions/docs?format=toml", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("toml view = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/toml") {
+		t.Errorf("toml view content type = %q", ct)
+	}
+	document := rr.Body.String()
+	if !strings.Contains(document, `kind = "skill"`) || !strings.Contains(document, "paths = [") {
+		t.Fatalf("the file view should be the template's own TOML:\n%s", document)
+	}
+	if strings.Contains(document, "name =") {
+		t.Errorf("a stored template has no name key (the directory is the name):\n%s", document)
+	}
+
+	// Saving the text it just handed over is a no-op the reconciler still hears:
+	// the template stays, and the answer is the usual summary.
+	edited := strings.Replace(document, `/srv/docs/`, `/srv/window/`, 1)
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/extensions/docs", strings.NewReader(edited))
+	req.Header.Set("Content-Type", "application/toml")
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("toml save = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	got, err := h.Extensions.Store().Load("docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Paths[0] != "/srv/window/" {
+		t.Errorf("paths = %v, want the edited window", got.Paths)
+	}
+
+	// A document that names something else is refused: the name is the directory.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/extensions/docs", strings.NewReader("name = \"other\"\nkind = \"skill\"\ntarget = \"internal\"\npaths = [\"/srv/\"]\n"))
+	req.Header.Set("Content-Type", "application/toml")
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("a mismatched name = %d, want 400 (%s)", rr.Code, rr.Body.String())
+	}
+
+	// A create from the file view: the name rides in the query, and a taken name is
+	// a conflict rather than an overwrite.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/extensions?name=notes", strings.NewReader("kind = \"skill\"\ntarget = \"internal\"\npaths = [\"/srv/notes/\"]\n"))
+	req.Header.Set("Content-Type", "application/toml")
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("toml create = %d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	if _, err := h.Extensions.Store().Load("notes"); err != nil {
+		t.Errorf("the created template should be stored: %v", err)
+	}
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/extensions?name=notes", strings.NewReader("kind = \"skill\"\ntarget = \"internal\"\npaths = [\"/srv/\"]\n"))
+	req.Header.Set("Content-Type", "application/toml")
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Errorf("creating over a stored name = %d, want 409 (%s)", rr.Code, rr.Body.String())
 	}
 }

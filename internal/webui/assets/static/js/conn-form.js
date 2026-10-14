@@ -673,25 +673,13 @@ document.getElementById('conn-import-run').onclick = function () {
     err.style.display = 'block';
   }).finally(function () { btn.disabled = false; });
 };
-/* The TOML download shared by the batch bar's export. The backend composes the
-   document either way (names filter or all), so the browser stays a pipe for
-   opaque bytes. */
+/* The connections export, over the shared TOML download: the backend composes
+   the document either way (names filter or all), so the browser stays a pipe
+   for opaque bytes. */
 function downloadConnectionsToml(names) {
   var path = apiPath('/api/connections/batch');
   if (names && names.length) path += '?names=' + names.map(encodeURIComponent).join(',');
-  return fetch(path).then(function (r) {
-    if (!r.ok) return r.text().then(function (message) { throw new Error(message || String(r.status)); });
-    return r.blob();
-  }).then(function (blob) {
-    var url = URL.createObjectURL(blob);
-    var link = document.createElement('a');
-    link.href = url;
-    link.download = 'termcp-connections.toml';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-  });
+  return downloadTOML(path, 'termcp-connections.toml');
 }
 
 /* ---- NetHub selection actions ---------------------------------------------

@@ -146,6 +146,17 @@ func (s *Store) Save(e *Extension) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.saveLocked(e); err != nil {
+		return err
+	}
+	s.notifyChange()
+	return nil
+}
+
+// saveLocked writes one validated template. The caller holds s.mu and owns the
+// change notification, which is what lets an import write a whole document under
+// one lock and announce it once rather than once per template.
+func (s *Store) saveLocked(e *Extension) error {
 	p, err := s.configPath(e.Name)
 	if err != nil {
 		return err
@@ -157,11 +168,7 @@ func (s *Store) Save(e *Extension) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(p, data); err != nil {
-		return err
-	}
-	s.notifyChange()
-	return nil
+	return writeFileAtomic(p, data)
 }
 
 // Delete removes an extension and its directory. A missing one is not an error:
@@ -173,13 +180,22 @@ func (s *Store) Delete(name string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.removeLocked(p); err != nil {
+		return err
+	}
+	s.notifyChange()
+	return nil
+}
+
+// removeLocked deletes one template's file and the directory that held it. The
+// caller holds s.mu and owns the change notification.
+func (s *Store) removeLocked(p string) error {
 	if err := retryFS(func() error { return os.Remove(p) }); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	// Best effort: leftover empty dirs are harmless, but a directory holding an
 	// unrelated file must not be swept away by a delete.
 	_ = os.Remove(filepath.Dir(p))
-	s.notifyChange()
 	return nil
 }
 

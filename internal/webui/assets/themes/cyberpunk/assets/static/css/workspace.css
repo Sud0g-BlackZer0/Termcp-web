@@ -149,7 +149,8 @@
 /* Selection mode leaves the cards alone: no markers, no quieted buttons — the
    row looks exactly as it does while connecting. The one thing selection may
    paint is a card the user actually ticked, and only while it stays ticked. */
-.nethub-selecting .conn-tile.node-card.batch-selected {
+.nethub-selecting .conn-tile.node-card.batch-selected,
+.ext-selecting .conn-tile.ext-card.batch-selected {
   border-color: var(--accent);
   /* background-color, never the shorthand: the plate's corner strokes are
      background-image layers declared at the end of the cascade, and a
@@ -158,7 +159,8 @@
   background-color: var(--accent-surface-soft);
   box-shadow: inset 3px 0 0 var(--accent), 0 0 16px var(--accent-ring);
 }
-.nethub-selecting .conn-tile.node-card.batch-selected .conn-nm { color: var(--accent); }
+.nethub-selecting .conn-tile.node-card.batch-selected .conn-nm,
+.ext-selecting .conn-tile.ext-card.batch-selected .conn-nm { color: var(--accent); }
 
 /* ---- Workspace layout: the cyberware column -----------------------------
    NetHub's mirror. Where that column lists the access nodes Termcp can dial,
@@ -305,32 +307,56 @@
    pulsing is the cheap confirmation that the nudge was accepted. */
 .ext-retry-btn:disabled { pointer-events: none; color: var(--accent); animation: nethubStatusPulse 1.2s ease-in-out infinite; }
 .ext-retry-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* The slot's other two keys share the retry key's hit area and quiet treatment
-   so the three read as one affordance set. Uninstall parts with the fault colour
-   only when aimed at, the same way a fault line does. */
-.ext-edit-btn, .ext-del-btn {
-  flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: none; border-radius: 0;
-  background: transparent; color: var(--text-secondary); cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-}
-.ext-edit-btn svg, .ext-del-btn svg { display: block; }
-.ext-edit-btn:hover { color: var(--accent); background: var(--accent-surface); }
-.ext-del-btn:hover { color: var(--danger); background: var(--accent-surface); }
-.ext-edit-btn:focus-visible, .ext-del-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.ext-edit-btn:disabled, .ext-del-btn:disabled { pointer-events: none; opacity: .5; }
+/* ---- The batch row ---------------------------------------------------------
+   The keys are the connections panel's own (see .nethub-select-toggle above):
+   one component with two hosts, and each panel's body carries its own ancestor
+   class while selecting — .ext-selecting here, .nethub-selecting there — so a
+   column entering select mode never lights up the other's row. Cards tick the
+   same way the host cards do. */
+.ext-selecting .conn-tile.ext-card .entry-card-inner { cursor: pointer; }
 
-/* The toolbar's Install key: the plate the rack's keys wear. */
-.ext-add-btn {
-  flex: 1 1 auto; height: 34px; padding: 0 12px;
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  border: 1px solid var(--border-strong); border-radius: 0;
-  background-color: var(--bg-elevated); color: var(--text-secondary);
-  font: inherit; font-family: var(--font-mono); font-size: .72rem;
-  font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
-  cursor: pointer; transition: color .14s ease, border-color .14s ease, background .14s ease;
+/* ---- The dialog's two pages ------------------------------------------------
+   Status is a readout — a lamp, a word, and rows of whatever there is to say —
+   so it is laid out as one: a grid of label/value pairs whose values are
+   monospace, because most of them are identifiers an author copies into a tool
+   call, and a failure list that reads oldest-first from the top. The
+   configuration page is a textarea and the name it is filed under. */
+.ext-status-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.ext-status-word { font: 700 .78rem var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.ext-status-meta { margin-left: auto; color: var(--text-muted); font: 400 .7rem var(--font-mono); overflow-wrap: anywhere; }
+.ext-status-grid { display: flex; flex-direction: column; gap: 4px; }
+.ext-status-row { display: flex; align-items: baseline; gap: 8px; font: 400 .72rem/1.4 var(--font-mono); }
+.ext-status-label {
+  flex: 0 0 96px; color: var(--text-muted);
+  font-size: .62rem; letter-spacing: .06em; text-transform: uppercase;
 }
-.ext-add-btn:hover { color: var(--accent); border-color: var(--accent-border); background: var(--accent-surface); }
-.ext-add-btn:focus-visible { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-ring); }
+.ext-status-value { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; color: var(--text-secondary); }
+.ext-copy-btn {
+  flex: 0 0 auto; width: 20px; height: 20px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: transparent; color: var(--text-faint); cursor: pointer;
+}
+.ext-copy-btn:hover { color: var(--accent); }
+.ext-copy-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ext-status-fails { margin-top: 12px; }
+.ext-status-sub {
+  margin-bottom: 4px; color: var(--text-muted);
+  font: 600 .62rem var(--font-mono); letter-spacing: .08em; text-transform: uppercase;
+}
+.ext-fail-item {
+  display: flex; align-items: baseline; gap: 8px; padding: 4px 0;
+  border-top: 1px dashed var(--border-subtle); font: 400 .68rem/1.4 var(--font-mono);
+}
+.ext-fail-stage { flex: 0 0 auto; color: var(--danger); letter-spacing: .04em; }
+.ext-fail-time { flex: 0 0 auto; color: var(--text-faint); }
+.ext-fail-reason { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; color: var(--text-secondary); }
+#ext-f-toml { width: 100%; min-height: 240px; font: 400 .74rem/1.45 var(--font-mono); }
+/* Narrow screens: the labels stop claiming a fixed column and hand the room to
+   the values, which are the identifiers an author reads on a phone. */
+@media (max-width: 480px) {
+  .ext-status-label { flex: 0 0 68px; font-size: .56rem; }
+  .ext-status-meta { margin-left: 0; flex-basis: 100%; }
+}
 
 /* The empty rack: a line of chrome and the one key that acts on it. Nothing
    else is in the column, so both sit on its own axis. */
@@ -343,16 +369,6 @@
   margin: 0; max-width: 34ch;
   font: 400 .72rem/1.5 var(--font-sans); color: var(--text-muted);
 }
-.ext-empty-btn {
-  flex: 0 0 auto; padding: 8px 16px;
-  border: 1px solid var(--accent-border); border-radius: 0;
-  background: var(--accent-surface); color: var(--accent);
-  font: inherit; font-family: var(--font-mono); font-size: .72rem;
-  font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
-  cursor: pointer; transition: color .14s ease, border-color .14s ease, background .14s ease;
-}
-.ext-empty-btn:hover { color: var(--accent-hover); border-color: var(--accent); background: var(--bg-card-hover); }
-.ext-empty-btn:focus-visible { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-ring); }
 
 /* The equipped toggle: the modal's other labels are stacked inputs and this one
    keeps its label beside it, so the form does not read as a second column. */
@@ -502,7 +518,8 @@
   transition: color .14s ease, flex-basis .2s ease, width .2s ease,
               margin-left .2s ease, opacity .2s ease, visibility 0s linear .2s;
 }
-.nethub-selecting .nethub-batch-icon {
+.nethub-selecting .nethub-batch-icon,
+.ext-selecting .nethub-batch-icon {
   flex: 0 0 34px; width: 34px; margin-left: 6px;
   opacity: 1; visibility: visible; pointer-events: auto;
   transition: color .14s ease, flex-basis .2s ease, width .2s ease,
@@ -514,13 +531,22 @@
    wearing a .45 ghost. Scoping it under the pressed state keeps the dimming
    where the key is visible and lets the collapsed state own its own opacity. */
 .nethub-batch-icon:disabled { pointer-events: none; }
-.nethub-selecting .nethub-batch-icon:disabled { opacity: .45; }
+.nethub-selecting .nethub-batch-icon:disabled,
+.ext-selecting .nethub-batch-icon:disabled { opacity: .45; }
 .nethub-batch-icon:hover { color: var(--accent-hover); }
 .nethub-batch-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .nethub-batch-icon svg { display: block; }
-#nethub-sel-invert .ic-solid { display: none; }
-#nethub-sel-invert.all-checked .ic-hollow { display: none; }
-#nethub-sel-invert.all-checked .ic-solid { display: block; color: var(--accent); }
+/* One icon per state: hollow while nothing is ticked, solid once something
+   is. Scoped to the key's class rather than the host panel's id, so every
+   panel wearing this chrome gets the same one-tick button. */
+.nethub-batch-icon .ic-solid { display: none; }
+.nethub-batch-icon.all-checked .ic-hollow { display: none; }
+.nethub-batch-icon.all-checked .ic-solid { display: block; color: var(--accent); }
+/* This panel's split holds one key — the caret that unfolds export and delete —
+   where the host list's holds two halves. The divider between halves would land on
+   its outer edge here, and the container does not need to claim the row. */
+.extpanel-body .nethub-open-split { flex: 0 0 auto; }
+.extpanel-body .batch-open-caret { flex: 0 0 34px; border-left: none; }
 /* The play split-key: the wide half opens every ticked host, the narrow half
    unfolds export and delete. A hairline divides the halves; hover is a colour
    change, for the key has no fill to light up. The SPLIT is only the row slot
@@ -536,7 +562,8 @@
   transition: flex-basis .2s ease, flex-grow .2s ease, margin-left .2s ease,
               opacity .2s ease, visibility 0s linear .2s;
 }
-.nethub-selecting .nethub-open-split {
+.nethub-selecting .nethub-open-split,
+.ext-selecting .nethub-open-split {
   flex: 1 1 0%; margin-left: 6px;
   opacity: 1; visibility: visible; pointer-events: auto;
   transition: flex-basis .2s ease, flex-grow .2s ease, margin-left .2s ease,
@@ -564,8 +591,8 @@
   transition: color .14s ease;
 }
 .nethub-open-plate button:hover { color: var(--accent-hover); }
-#nethub-batch-open { flex: 1 1 auto; min-width: 0; padding: 0 10px; gap: 8px; }
-#nethub-open-caret { flex: 0 0 22px; border-left: 1px solid var(--border-subtle); }
+.batch-open-main { flex: 1 1 auto; min-width: 0; padding: 0 10px; gap: 8px; }
+.batch-open-caret { flex: 0 0 22px; border-left: 1px solid var(--border-subtle); }
 .nethub-open-plate button:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 /* There is deliberately no nethubKeyIn keyframe here. The companions fade in as
    the switch shuts and fade out as it opens again, but that motion is a

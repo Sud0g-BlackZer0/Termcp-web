@@ -1552,6 +1552,10 @@ to drive it through), `forwards` with the address each declared tunnel bound, an
 One template in full: the shape (`kind`, `target`, `mode`, `command`, `args`), the
 whitelist (`allow`, `paths`), the `notes`, and the failure history.
 
+With `?format=toml` the answer is the file itself (`application/toml`): the text
+`<data>/extensions/<name>/config.toml` holds, so the Web UI's file view edits
+exactly what the store would read back.
+
 ### `POST /api/extensions`
 
 Creates a template. `name` and `target` are required; `kind` picks the preset that
@@ -1563,12 +1567,48 @@ when the name is taken.
 Patches a stored template: an **omitted** field keeps its value, an **empty array**
 clears it. `PATCH`-style semantics on `PUT`, matching what the MCP tool does.
 
+A body sent as `application/toml` (or `text/plain`) is the file view instead: the
+document replaces the template as written, and nothing is defaulted — what the
+file says is what the template is. A document carrying a `name` key that is not the
+name in the path is refused (`400`), because the name is the directory.
+
 ### `DELETE /api/extensions/{name}`
 
-Removes the template. The session kept warm for it is closed once no other
+Removes the template (`204`). The session kept warm for it is closed once no other
 extension is served by it.
+
+`{name}` may be a comma-separated batch (`a,b,c`) like the session and profile
+routes: every name is removed independently, the answer is `200` with a per-name
+`results` array instead of `204`, and one bad entry does not stop the rest —
+`extension_not_found` counts as cleared, since another client got there first.
 
 ### `POST /api/extensions/{name}/retry`
 
 Reconnects an unavailable extension now instead of waiting out its backoff.
 Answers 200 with `{ "ok": true }` or `{ "ok": false, "error": ... }`.
+
+### `GET /api/extensions/batch`
+
+The export: one TOML document holding the named extensions (`?names=a,b`), or
+every stored one when no names are given. A name that no longer resolves is
+skipped rather than failing the download, so a selection captured in a stale tab
+still exports what remains.
+
+```toml
+[[extensions]]
+name = "docs"
+kind = "skill"
+target = "internal"
+paths = ["~/skills/docs/"]
+```
+
+### `POST /api/extensions/batch`
+
+The import: a document in exactly the shape the export produces. Every entry is
+validated before anything is written, so an invalid file imports nothing. Names
+already in use are renamed rather than overwritten — up to the first free
+`-N` suffix — and the response lists them:
+
+```
+Response 201: { "imported": 2, "renamed": [ { "from": "docs", "to": "docs-2" } ] }
+```
