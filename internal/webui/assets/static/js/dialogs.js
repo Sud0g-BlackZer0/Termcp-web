@@ -4,9 +4,15 @@ function hideModal(id) { document.getElementById(id).classList.add('hidden'); }
 /**
  * Only guard page leave when terminal windows are actually open.
  * Sessions keep running on the server even when windows are closed.
+ *
+ * "Actually open" means a window with a session or a dial behind it: the guard's
+ * claim is about sessions surviving on the server, and an extension's status card
+ * (no _parentSid, no _placeholder) has neither a terminal nor anything that keeps
+ * running — counting it would warn about a session the reader never started.
  */
 function pageHasLiveState() {
-  var openWins = (typeof allShellWins === 'function' ? allShellWins() : []).length;
+  var openWins = (typeof allShellWins === 'function' ? allShellWins() : [])
+    .filter(function (w) { return !!(w._parentSid || w._placeholder); }).length;
   if (openWins > 0) return tCount('msg.leave.windows.one', 'msg.leave.windows.other', { count: openWins });
   return '';
 }
@@ -299,143 +305,47 @@ function focusNodeCard(name) {
   setTimeout(function () { card.classList.remove('node-focus'); }, 1600);
 }
 
-/* ---- Node selection mode --------------------------------------------------
- * One switch re-aims the cards: off, a card is a connect button; on, it is a
- * checkbox and the toolbar's batch actions act on the selection. The set holds
- * profile names rather than DOM state, because the grid rebuilds on every
- * session frame — the checkbox is re-derived from here at each render, the way
- * the session plates derive theirs (sessions.js). */
-
-var _nodeSelectMode = false;
-var _nodeSelIds = new Set();
-
-function nodeSelectModeOn() { return _nodeSelectMode; }
-
-/** Profile names that may carry a selection: every node in the list, the
- *  built-in profile included. Excluding it would make a whole card dead under
- *  the pointer with no word why; the actions themselves carry the exceptions —
- *  open works for it, export skips it server-side, delete reports the refusal
- *  per name. */
-function selectableNodeNames() {
-  var list = window._lastConnections || [];
-  var out = [];
-  for (var i = 0; i < list.length; i++) {
-    if (list[i] && list[i].name) out.push(list[i].name);
-  }
-  return out;
-}
-
-function setNodeSelectMode(on) {
-  on = !!on;
-  if (_nodeSelectMode === on) return;
-  _nodeSelectMode = on;
-  if (!on) _nodeSelIds.clear();
-  var body = document.getElementById('sec-entries-body');
-  if (body) body.classList.toggle('nethub-selecting', on);
-  var toggle = document.getElementById('nethub-select-toggle');
-  if (toggle) toggle.setAttribute('aria-pressed', String(on));
-  // The dropdown belongs to the pressed state; either flip folds it.
-  var menu = document.getElementById('nethub-open-menu');
-  if (menu) menu.hidden = true;
-  var caret = document.getElementById('nethub-open-caret');
-  if (caret) caret.setAttribute('aria-expanded', 'false');
-  /* The cards do not rebuild on a toggle: selection mode is one class on the
-     column (the CSS carries the markers, the quiet buttons, the ticked looks),
-     so a flip only retitles them and syncs the toolbar. */
-  refreshNodeCardTitles();
-  syncNodeCardSelection();
-  updateNodeBatchBar();
-}
-
-/** Re-apply the ticked look from the selection set. The Set is the source of
- *  truth, so this both paints the ticked cards and — the reason it exists —
- *  strips the class from every card the set no longer holds. Leaving the mode
- *  clears the set; without this the cards keep `.batch-selected`, which is
- *  invisible only while `.nethub-selecting` is off. Toggle back on and those
- *  cards light up again as if ticked, with the count reading 0. */
-function syncNodeCardSelection() {
-  var grid = document.getElementById('conn-grid');
-  if (!grid) return;
-  grid.querySelectorAll('.conn-tile[data-conn-name]').forEach(function (tile) {
-    var name = tile.getAttribute('data-conn-name');
-    tile.classList.toggle('batch-selected', _nodeSelectMode && _nodeSelIds.has(name));
-  });
-}
-
-/** Retitle the visible cards without rebuilding them: the tooltip is the one
- *  per-card bit that follows the mode ("connect" vs "tick this one"). */
-function refreshNodeCardTitles() {
-  var grid = document.getElementById('conn-grid');
-  if (!grid) return;
-  var byName = {};
-  (window._lastConnections || []).forEach(function (c) { if (c && c.name) byName[c.name] = c; });
-  grid.querySelectorAll('.conn-tile[data-conn-name]').forEach(function (tile) {
-    var inner = tile.querySelector('.entry-card-inner');
-    var c = byName[tile.getAttribute('data-conn-name')];
-    if (!inner || !c) return;
-    if (_nodeSelectMode) {
-      inner.title = t('nethub.batch.selectOne', { name: c.name });
-      return;
-    }
+/* ---- Host card selection ---
+ * One instance of the shared component (batch-bar.js): this column's ids, its
+ * list, its verb (dial the selection) and its two menu actions. What used to be
+ * a set of helpers here and a copy in the extension column now has one home —
+ * the copy had already drifted once. */
+var _nodeBatch = createBatchBar({
+  bodyId: 'sec-entries-body',
+  toggleId: 'nethub-select-toggle',
+  countId: 'nethub-toggle-count',
+  invertId: 'nethub-sel-invert',
+  splitId: 'nethub-open-split',
+  mainId: 'nethub-batch-open',
+  caretId: 'nethub-open-caret',
+  menuId: 'nethub-open-menu',
+  exportId: 'nethub-menu-export',
+  deleteId: 'nethub-menu-delete',
+  actionIds: ['nethub-menu-export', 'nethub-menu-delete'],
+  gridId: 'conn-grid',
+  cardSelector: '.conn-tile[data-conn-name]',
+  nameAttr: 'data-conn-name',
+  selectingClass: 'nethub-selecting',
+  selectKey: 'nethub.batch.select',
+  names: function () {
+    return (window._lastConnections || []).map(function (c) { return c && c.name; });
+  },
+  render: function () { renderConnGrid(window._lastConnections || [], connBannerText()); },
+  /* The card's own tooltip, away from selection mode: what this column is for. */
+  tipFor: function (name) {
+    var byName = {};
+    (window._lastConnections || []).forEach(function (c) { if (c && c.name) byName[c.name] = c; });
+    var c = byName[name];
+    if (!c) return '';
     var tipConnect = t('conn.tip.connect');
-    if (c.kind === 'internal') inner.title = tipConnect + ' · ' + t('conn.tip.internal');
-    else {
-      var addr = nodeAddress(c);
-      inner.title = addr ? (tipConnect + ' — ' + addr) : tipConnect;
-    }
-  });
-}
-
-/** Sync the toolbar to the current selection: the switch's face becomes the
- *  ticked count (the list icon returns when the selection is spent), the play
- *  split answers disabled while nothing is ticked (its dropdown items with it),
- *  and the select-all key reports whether the entire list is ticked. */
-function updateNodeBatchBar() {
-  var names = selectableNodeNames();
-  var count = 0;
-  for (var i = 0; i < names.length; i++) { if (_nodeSelIds.has(names[i])) count++; }
-  var showCount = _nodeSelectMode && count > 0;
-  var toggle = document.getElementById('nethub-select-toggle');
-  if (toggle) {
-    var icon = toggle.querySelector('svg');
-    if (icon) icon.style.display = showCount ? 'none' : 'block';
-    // The label belongs to the toggle, not to the count: they are separate
-    // elements, and a surface that carries one without the other would
-    // otherwise dereference a null here.
-    toggle.setAttribute('aria-label', showCount ? t('batch.count.selected', { count: count }) : t('nethub.batch.select'));
-  }
-  var countEl = document.getElementById('nethub-toggle-count');
-  if (countEl) {
-    countEl.hidden = !showCount;
-    countEl.textContent = String(count);
-  }
-  // Keep the control's legacy DOM id for external styles.
-  var selAll = document.getElementById('nethub-sel-invert');
-  var allSelected = names.length > 0 && count === names.length;
-  if (selAll) {
-    selAll.disabled = names.length === 0;
-    selAll.classList.toggle('all-checked', allSelected);
-    var label = allSelected ? t('section.batch.clearSelection') : t('section.batch.selectAll');
-    selAll.title = label;
-    selAll.setAttribute('aria-label', label);
-  }
-  var body = document.getElementById('sec-entries-body');
-  if (body) body.classList.toggle('has-selection', count > 0);
-  var split = document.getElementById('nethub-open-split');
-  if (split) split.classList.toggle('is-disabled', count === 0);
-  ['nethub-menu-export', 'nethub-menu-delete'].forEach(function (id) {
-    var item = document.getElementById(id);
-    if (item) item.disabled = count === 0;
-  });
-}
-
-function toggleNodeSelection(name, tile) {
-  var on = !_nodeSelIds.has(name);
-  if (on) _nodeSelIds.add(name);
-  else _nodeSelIds.delete(name);
-  if (tile) tile.classList.toggle('batch-selected', on);
-  updateNodeBatchBar();
-}
+    if (c.kind === 'internal') return tipConnect + ' · ' + t('conn.tip.internal');
+    var addr = nodeAddress(c);
+    return addr ? (tipConnect + ' — ' + addr) : tipConnect;
+  },
+  onOpen: function (names) { openSelectedNodes(names); },
+  onExport: function (names) { exportSelectedNodes(names); },
+  onDelete: function (names) { deleteSelectedNodes(names); }
+});
 
 function renderConnGrid(connections, bannerMsg) {
   var grid = document.getElementById('conn-grid');
@@ -451,7 +361,7 @@ function renderConnGrid(connections, bannerMsg) {
     var tile = document.createElement('div');
     var info = nodeSessionInfo(c.name);
     var isInternal = c.kind === 'internal';
-    var selected = _nodeSelectMode && _nodeSelIds.has(c.name);
+    var selected = _nodeBatch.has(c.name);
     tile.className = 'conn-tile entry-card node-card' + (info.focused ? ' node-focus' : '') + (selected ? ' batch-selected' : '');
     tile.setAttribute('data-conn-name', c.name);
     // The internal profile is editable too: its settings (review default, shell)
@@ -509,8 +419,8 @@ function renderConnGrid(connections, bannerMsg) {
     // selection mode re-aims the card, where a click IS the tick and the
     // connect path stays out of the way entirely.
     inner.addEventListener('click', function (e) {
-      if (_nodeSelectMode) {
-        toggleNodeSelection(c.name, tile);
+      if (_nodeBatch.isOn()) {
+        _nodeBatch.toggleSelection(c.name, tile);
         return;
       }
       if (e.target.closest('.conn-edit-btn') || e.target.closest('.sess-copy-btn') || e.target.closest('.conn-quick-btn')) return;
@@ -576,13 +486,11 @@ function renderConnGrid(connections, bannerMsg) {
   // Fill the data-i18n* markers baked into the cards above.
   applyI18n(grid);
   /* Names that left the list (deleted here, renamed in another tab) must not
-     linger in the selection: the set only holds what the grid can still show. */
-  if (window._lastConnections) {
-    var present = {};
-    (connections || []).forEach(function (c) { if (c && c.name) present[c.name] = true; });
-    _nodeSelIds.forEach(function (n) { if (!present[n]) _nodeSelIds.delete(n); });
-  }
-  updateNodeBatchBar();
+     linger in the selection: the set only holds what the grid can still show.
+     The prune rides on the list having arrived — an empty one would drop a tick
+     made against a list the page has not seen yet. */
+  _nodeBatch.syncCards(!!window._lastConnections);
+  _nodeBatch.update();
 }
 
 /*

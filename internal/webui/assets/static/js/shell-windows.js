@@ -92,8 +92,12 @@ function refreshSessionTabbar() {
         '<svg viewBox="0 0 12 12" width="10" height="10"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M2 2l8 8M10 2L2 10"/></svg></span>';
       tab.addEventListener('click', function (e) {
         if (e.target.closest('.session-tab-close')) return;
-        /* A connecting window has no session id yet. Use the window this tab
-           owns so simultaneous dials cannot both resolve to the first null id. */
+        /* The tab owns its window, so no lookup is needed — which is what makes
+           this correct for both of the cases a session lookup would get wrong: a
+           connecting window has no session id yet (simultaneous dials would both
+           resolve to the first null id), and a status card carries the
+           extension's NAME in _sid, so resolving it as a session would dial a
+           terminal for it. Both are raised directly. */
         focusShellWindow(w);
       });
       tab.addEventListener('mousedown', function (e) {
@@ -679,6 +683,43 @@ function applyWindowViewportMode(win) {
   win._maxed = false;
 }
 
+/** Keep a window on the centre lines its placement chose after its content settled
+ *  on a size of its own. Placement centres a box of the session default (640x480,
+ *  clamped to the viewport); a card that measures a fraction of that would hang
+ *  below and right of the middle, so the real box is moved back onto the same two
+ *  centre lines — clamped by the same 8px margin and the same header floor.
+ *
+ *  The shift is always measured from where placement left the window, not from where
+ *  the window is now: a card whose readout arrives late is re-centred from the same
+ *  base, and two shifts never stack. A reader's drag writes geometry of its own, so
+ *  callers stop asking once the window has been taken over.
+ *
+ *  Self-contained on purpose: the placement test runs positionShellWindowFromClick
+ *  on its own, so neither function may depend on a shared constant. */
+function recentreShellWindowForSize(win) {
+  if (!win || isMobileViewport()) return;
+  var realW = win.offsetWidth;
+  var realH = win.offsetHeight;
+  if (!realW || !realH) return;
+  var size = realW + 'x' + realH;
+  if (win._centredSize === size) return;
+  if (!win._placedAt) {
+    win._placedAt = { left: parseFloat(win.style.left), top: parseFloat(win.style.top) };
+  }
+  var base = win._placedAt;
+  if (isNaN(base.left) || isNaN(base.top)) return;
+  var MARGIN = 8;
+  var defW = Math.min(640, window.innerWidth - MARGIN * 2);
+  var defH = Math.min(480, window.innerHeight - MARGIN * 2);
+  if (realW >= defW && realH >= defH) return;
+  var floor = Math.max(MARGIN, appHeaderBottom());
+  win.style.left = Math.max(MARGIN,
+    Math.min(base.left + (defW - realW) / 2, window.innerWidth - realW - MARGIN)) + 'px';
+  win.style.top = Math.max(floor,
+    Math.min(base.top + (defH - realH) / 2, window.innerHeight - realH - MARGIN)) + 'px';
+  win._centredSize = size;
+}
+
 /** Fallback placement for a new .shell-window (caller must have incremented shellWindowCount).
  *
  *  Takes an explicit position — {x, y} in client coordinates, or null for the
@@ -1029,6 +1070,13 @@ function getShellWindowBySid(sessionId) {
   if (!sessionId) return null;
   var wins = allShellWins();
   for (var i = 0; i < wins.length; i++) {
+    /* An extension's status card carries its NAME in _sid so the tab bar can label
+       it, and a name is the author's to choose under the same [A-Za-z0-9_-]{1,64}
+       rule that a 12-hex session id satisfies. This lookup means "the window for
+       this SESSION", so a card (which has no session) is never its answer —
+       without this an extension named after a session id would be raised, notified
+       or fed that session's output instead of the session's own window. */
+    if (wins[i]._extName) continue;
     if (wins[i]._sid === sessionId) return wins[i];
   }
   return null;
@@ -1078,7 +1126,13 @@ function focusSessionWindow(connLabel, sessionId, pos, opts) {
   focusShellWindow(ex, opts);
 }
 
-/** Shared focus behavior for session lookup and window-owned tab clicks. */
+/** Shared focus behavior for session lookup and window-owned tab clicks:
+ *  normalise the window's three states (minimized, collapsed, hidden behind the
+ *  tab bar's global "hide all") and raise it. Callers that own the window call
+ *  this directly — which is what makes the tab bar correct for a pending dial
+ *  (no session id yet) and for a status card (whose _sid is the extension's
+ *  NAME, so resolving it as a session would dial a terminal for it) without a
+ *  lookup at all. */
 function focusShellWindow(ex, opts) {
   if (!ex || !ex.parentNode) return;
   opts = opts || {};
@@ -1087,17 +1141,17 @@ function focusShellWindow(ex, opts) {
   /* Collapsed to its header: a collapsed window cannot show the terminal the
      user just asked for, so expand it. */
   expandShellWindow(ex);
+  if (isTiledWin(ex)) {
+    if (_paneMaxedWin && _paneMaxedWin !== ex) { _paneMaxedWin = null; applyPaneGrid(); }
+    try { ex.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}
+  }
+  bringShellWindowToFront(ex);
   /* A window that is already up switches to the requested channel directly; a
      freshly opened one does it once its tabs have been restored (openShellWindow
      reads the same option). */
   if (opts.shell && ex._channels && ex._channels[opts.shell] && typeof switchChannelTab === 'function') {
     switchChannelTab(ex, opts.shell);
   }
-  if (isTiledWin(ex)) {
-    if (_paneMaxedWin && _paneMaxedWin !== ex) { _paneMaxedWin = null; applyPaneGrid(); }
-    try { ex.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}
-  }
-  bringShellWindowToFront(ex);
   if (opts.readOnly) lockWindowReadonly(ex);
   /* The tab bar's own "hide all" is a global state; showing one window has to
      clear it or the window we just raised stays invisible. */

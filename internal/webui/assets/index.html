@@ -221,12 +221,11 @@
                own ancestor class (.ext-selecting here, .nethub-selecting there) is
                what reveals its keys — so one column entering select mode never
                lights up the other's toolbar. Untoggled, a card click opens the
-               extension's status page; toggled, it ticks and the batch keys
-               appear: export the selection as TOML, delete it in one batch.
-               There is no "open" on this side — a host's ▶ dials the session it
-               names, and an extension's session is already up, kept warm for the
-               agent that drives it. A human opens a card (click) or its
-               configuration (gear). -->
+               extension's status CARD; toggled, it ticks and the batch keys
+               appear: ▶ opens the CARDS of the selection — their status, side by
+               side, which is the one "open" an extension has (a host's ▶ dials the
+               session it names; an extension's session is already up) — then
+               export the selection as TOML, and delete it in one batch. -->
           <div class="drawer-toolbar" role="toolbar">
             <button type="button" class="nethub-select-toggle" id="ext-select-toggle" aria-pressed="false" title="Batch select" data-i18n-title="nethub.batch.selectTitle" aria-label="Batch select" data-i18n-aria="nethub.batch.select" onclick="event.stopPropagation()">
               <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="1.5" width="5" height="5" rx="1"/><path d="M3.1 4.1l1.1 1.1 2.2-2.4"/><path d="M9.5 4h5"/><rect x="1.5" y="9.5" width="5" height="5" rx="1"/><path d="M9.5 12h5"/></svg>
@@ -238,6 +237,9 @@
             </button>
             <div class="nethub-open-split" id="ext-open-split">
               <div class="nethub-open-plate">
+                <button type="button" class="batch-open-main" id="ext-batch-open" title="Open the status of each selected extension" data-i18n-title="ext.batch.openTitle" aria-label="Open selected extensions" data-i18n-aria="ext.batch.openTitle">
+                  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 5.14v13.72c0 .8.88 1.29 1.56.86l10.8-6.86a1.03 1.03 0 000-1.72L9.56 4.28A1.03 1.03 0 008 5.14z" fill="currentColor"/></svg>
+                </button>
                 <button type="button" class="batch-open-caret" id="ext-open-caret" aria-haspopup="menu" aria-expanded="false" title="More actions" data-i18n-title="nethub.batch.more" aria-label="More actions" data-i18n-aria="nethub.batch.more">
                   <svg viewBox="0 0 12 8" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2l5 4 5-4"/></svg>
                 </button>
@@ -473,16 +475,13 @@
     </div>
   </div>
 
-  <!-- The extension dialog: two pages of one modal, and no tabs between them.
-       Status is where a card leads — the reconciler's verdict, the handles an
-       agent is driving the extension through, the tunnels it bound, its failure
-       history, and the three actions that follow from them (retry, park,
-       delete). The configuration is where the card's gear leads: the TOML file
-       the store holds, which is also what an export hands out. There is no field
-       form on purpose — the fields would be a second description of the same
-       template to keep in step with this one, and the people who read this panel
-       are not the ones who live in it. Creating reuses the configuration page
-       with an editable name and a seeded document. -->
+  <!-- The extension configuration: the modal behind a card's gear, and behind New.
+       It edits the TOML file the store holds — the same text an export hands out
+       and a colleague's file would contain. There is no field form on purpose: the
+       fields would be a second description of the template to keep in step with
+       this one, and the people who read this panel are not the ones who live in it.
+       Removal lives here rather than on the card: it is a template-level action,
+       and the batch row carries the bulk form of it. -->
   <div id="modal-ext" class="modal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="modal" style="max-width:560px">
       <div class="modal-h">
@@ -491,33 +490,15 @@
       </div>
       <div class="modal-body">
         <p id="modal-ext-err" class="err" style="display:none"></p>
-
-        <div id="ext-page-status">
-          <div class="ext-status-head">
-            <span class="node-lamp" id="ext-status-lamp" aria-hidden="true"></span>
-            <span class="ext-status-word" id="ext-status-word"></span>
-            <span class="ext-status-meta" id="ext-status-meta"></span>
-          </div>
-          <div class="ext-status-grid" id="ext-status-grid"></div>
-          <div class="ext-status-fails" id="ext-status-fails"></div>
-          <div class="modal-actions">
-            <button type="button" class="btn" id="ext-status-close" data-i18n="common.close">Close</button>
-            <button type="button" class="btn btn-danger" id="ext-status-delete" data-i18n="common.delete">Delete</button>
-            <button type="button" class="btn" id="ext-status-toggle" data-i18n="ext.status.disable">Disable</button>
-            <button type="button" class="btn btn-primary" id="ext-status-retry" data-i18n="ext.retry.title">Retry now</button>
-          </div>
-        </div>
-
-        <div id="ext-page-config" style="display:none">
-          <label for="ext-f-name" data-i18n="ext.modal.name">Name</label>
-          <input id="ext-f-name" type="text" autocomplete="off" spellcheck="false" placeholder="my-tool">
-          <label for="ext-f-toml" data-i18n="ext.modal.toml">config.toml</label>
-          <textarea id="ext-f-toml" spellcheck="false" rows="16"></textarea>
-          <p class="conn-check-hint" data-i18n="ext.modal.tomlHint">The name of an extension is its directory, so the file carries no name key.</p>
-          <div class="modal-actions">
-            <button type="button" class="btn" id="modal-ext-cancel" data-i18n="common.cancel">Cancel</button>
-            <button type="button" class="btn btn-primary" id="modal-ext-save" data-i18n="common.save">Save</button>
-          </div>
+        <label for="ext-f-name" data-i18n="ext.modal.name">Name</label>
+        <input id="ext-f-name" type="text" autocomplete="off" spellcheck="false" placeholder="my-tool">
+        <label for="ext-f-toml" data-i18n="ext.modal.toml">config.toml</label>
+        <textarea id="ext-f-toml" spellcheck="false" rows="16"></textarea>
+        <p class="conn-check-hint" data-i18n="ext.modal.tomlHint">The name of an extension is its directory, so the file carries no name key.</p>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-danger" id="modal-ext-delete" style="display:none" data-i18n="common.delete">Delete</button>
+          <button type="button" class="btn" id="modal-ext-cancel" data-i18n="common.cancel">Cancel</button>
+          <button type="button" class="btn btn-primary" id="modal-ext-save" data-i18n="common.save">Save</button>
         </div>
       </div>
     </div>
@@ -546,6 +527,9 @@
   <script src="static/js/i18n-catalog.js"></script>
   <script src="static/js/i18n.js"></script>
   <script src="static/js/theme.js"></script>
+  <!-- The batch bar both columns wear (see batch-bar.js): it must be defined
+       before the panels that build one, so it loads ahead of dialogs.js. -->
+  <script src="static/js/batch-bar.js"></script>
   <script src="static/js/util.js"></script>
   <script src="static/js/shell-windows.js"></script>
   <script src="static/js/forward-modal.js"></script>

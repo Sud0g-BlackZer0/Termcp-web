@@ -33,7 +33,29 @@
 
   停止键与垃圾桶键一样**只在有选择时出现**。这里踩到一个不显眼的坑：按钮上写了 `hidden` 属性，但 `hidden` 只是 UA 的 `[hidden] { display: none }`，任何匹配类的 `display` 声明都能压过它 —— 而 `.icon-btn` 正是 `display: inline-flex`。垃圾桶键此前被一条**只写了 `.batch-trash`** 的规则救回来，同样的属性配到第二个键上就没人救，于是它在常规状态下一直可见。规则已扩到两个键，并补了测试钉住「带 `hidden` 的键必须有规则能压过 `.icon-btn`」（断言的是规则本身，因为 markup 里那个 `hidden` 恰恰是不起作用的东西）。顺带修掉一个死类名：连接中卡片的 sid 槽继承了真实 id 的 hover 下划线与 `cursor: pointer`，那是在承诺一个它给不出的复制动作，现在只保留在可交互那一支。
 
+### 改进
+
+- **窗口外壳的重复收敛到一处**。上一轮的改动把「每个扩展开一扇窗口」接在会话窗口的外壳上，于是同一段 markup 出现了第三份：窗口头的最大化键与最小化键在 `terminal-window.js` 里本来就各写了两遍（打开路径与恢复路径各一遍），扩展卡片又抄了第三遍。现在两个键是 `SHELL_WINDOW_MAX_HTML` / `SHELL_WINDOW_MIN_HTML` 两个常量（与既有的 `SHELL_REVIEW_LOCK_HTML`、`SHELL_RESIZE_HANDLES_HTML` 同一处、同一写法），三处引用同一份。**最小化键有两份是有意的**：终端的提示是「最小化（会话继续运行）」，而状态卡片背后没有会话，那句承诺它给不出来，所以卡片戴 `SHELL_WINDOW_MIN_HTML_CARD`（提示只说「最小化」，键 `win.minimize.ext`，三语齐全）。两个 `bind*` 助手按类名绑定，所以类名就是这份共享的全部契约。
+
+  窗口的「抬升」也不再有两份：`restoreShellWindow` + `expandShellWindow` + `bringShellWindowToFront` 那三步（外加压过标签栏的「全部隐藏」）在 `focusSessionWindow` 与 `openExtensionWindow` 里各写了一遍，现在都走 `focusShellWindow`。
+
 ### 修复
+
+- **扩展列的状态从弹窗改成一扇窗口后，有四处「没有会话」没被真正照顾到**。这一列现在每个扩展开一扇自己的窗口（可拖动、平铺、最小化，与终端窗口同一套外壳），而窗口外壳全程假设「后面有会话」。四处漏掉的地方是同一个根因的两面：**窗口的身份与几何由会话路径共享，而状态卡片两样都不该按会话的算法走**。
+
+  **①触屏上卡片被压成内容高度**。桌面路径在 `appendChild` 之前无条件写了 `win.style.height = 'auto'`（内容自适应），而 **内联样式压过媒体查询** —— 手机上 `.win-fullscreen` 那条 `height: 100dvh` 因此失效，卡片变成「满屏宽、内容高」的一条。终端样式里那条注释本来就说清了这一点（「该规则之所以有效，正因为元素在手机上不携带内联几何」），现在两个内联写入都在 `if (!isMobileViewport())` 之内。
+
+  **②`getShellWindowBySid` 会把状态卡片当成会话窗口**。卡片把扩展名存进 `_sid`（标签栏用它做标题），而注释里的理由「session id 是 uuid，所以不会撞」**不成立**：session id 是 12 位小写十六进制，扩展名走 `[A-Za-z0-9_-]{1,64}` —— 把一个会话 id 粘过来当扩展名是完全合法的输入，于是所有按 `_sid` 找窗口的会话路径（抬升、通知、投喂输出、关闭）都会找到那扇卡片。修在**共享查找函数**里（一处 guard，所有调用方受益）而不是各调用方：卡片带 `_extName`，会话查找一律跳过它，`extWinFor` 改用 `_extName` 认自己的卡片。
+
+  这条 guard 自己带出一个**同类漏点**：标签栏的点击原本一律走 `focusSessionWindow(w._connName, w._sid)`，而它内部正是用这个查找 —— 于是点一张卡片的标签会**去拨一个以扩展名为名的终端会话**。标签自己握着那扇窗口，所以卡片分支直接抬升它。抬升的三步（还原最小化、展开折叠、压过标签栏的「全部隐藏」）本来在 `focusSessionWindow` 和 `openExtensionWindow` 里各写了一遍，现在收敛成一个 `focusShellWindow`，两个调用方共用；`focusSessionWindow` 在其上补会话特有的部分（落到指定通道、只读锁）。
+
+  **③离开页面的确认把卡片当成终端窗口**。`pageHasLiveState` 原本数所有 `.shell-window`，而那句提示的**内容**是「会话仍在服务器上运行」—— 卡片既没有终端也没有会继续跑的东西，开一张卡片就让浏览器警告一个用户从未启动的会话。现在只数带 `_parentSid`（有会话）或 `_placeholder`（正在拨号）的窗口。
+
+  **④批量删除留下孤窗**。单个删除（`deleteOneExtension(name, win)`）会关掉卡片，批量删除那条路径不会：删 3 个就留下 3 扇写着「该扩展已不存在」的窗口。批量现在与单个一致。
+
+  顺带删掉两处**本来就没人戴的死样式**：`.ext-openable`（它给的 cursor 没有任何元素设置过 —— 这一列的卡片现在一律打开自己的读数）与 `.ext-check-row`（属于 TOML 编辑取代掉的字段表单）。赛博朋克那份完整拷贝里同样两处一并删。另外 `.ext-status-section`（「一个弹窗列多个扩展」那版的分节样式，最终选的是一扩展一窗口）只在这一版草稿里存在过、没有留下，但它和上面两处一起进了 `extensions_panel_test.go` 的「不得复活」名单。
+
+  测试分两层：`TestStatusCardsAreNotSessionWindows` 在 node 里跑**真的** `getShellWindowBySid` 与 `pageHasLiveState`，用一个**名字等于会话 id** 的卡片造出那个碰撞（两条 guard 分别撤销时共 4 条断言失败）；结构性断言另有四条 —— 内联高度必须写在桌面分支**之内**（字符串包含查不出这个顺序错误，所以按位置断言）、批量删除必须关闭被删扩展的卡片、标签栏的卡片分支必须走 `focusShellWindow`（且会话分支必须仍走 `focusSessionWindow`）、`focusSessionWindow` 必须经共享归一化函数（各自撤销时都会失败）。
 
 - **批量选择开关「收起比展开快得多」：不是时长不同，是收起方向 78% 的位移在第一帧就跳完了**。这个工具栏开关两个方向的 `transition` 逐字相同（`flex-basis` / `flex-grow` 0.2s），所以原因不在开关自己身上 —— 这也正是它长期没被发现的原因，单看开关的声明找不出任何毛病。
 

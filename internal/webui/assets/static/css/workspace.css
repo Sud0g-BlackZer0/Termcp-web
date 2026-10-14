@@ -269,10 +269,10 @@
    at the entry card's own 188px minimum. */
 #ext-grid .conn-tile.entry-card { width: 100%; min-width: 0; max-width: none; }
 .conn-tile.ext-card .entry-card-inner { gap: 9px; align-items: flex-start; }
-/* A row that opens nothing is a report, not a button: the pointer says so, and
-   only an available extension with a shell gets the hand back. */
-.conn-tile.ext-card .entry-card-inner { cursor: default; }
-.conn-tile.ext-card.ext-openable .entry-card-inner { cursor: pointer; }
+/* Every card here opens something — its own readout — so the whole card is a
+   button and says so. (The old rule withheld the hand from a card whose shell
+   was not available; a status card is a readout and opens either way.) */
+.conn-tile.ext-card .entry-card-inner { cursor: pointer; }
 .conn-tile.ext-card .conn-nm { font-size: .82rem; word-break: break-word; }
 .node-lamp.is-disabled { background: var(--text-faint); }
 .node-status.is-disabled { color: var(--text-muted); }
@@ -301,6 +301,7 @@
    pulsing is the cheap confirmation that the nudge was accepted. */
 .ext-retry-btn:disabled { pointer-events: none; color: var(--accent); animation: nethubStatusPulse 1.2s ease-in-out infinite; }
 .ext-retry-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
 /* ---- The batch row ---------------------------------------------------------
    The keys are the connections panel's own (see .nethub-select-toggle above):
    one component with two hosts, and each panel's body carries its own ancestor
@@ -345,6 +346,19 @@
 .ext-fail-time { flex: 0 0 auto; color: var(--text-faint); }
 .ext-fail-reason { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; color: var(--text-secondary); }
 #ext-f-toml { width: 100%; min-height: 240px; font: 400 .74rem/1.45 var(--font-mono); }
+/* A card window is as tall as what it says. The session default is a 640x480 box
+   and the floor below is 240px for a terminal's grid — neither belongs to a
+   readout, which would sit in half a window of empty glass. `auto` hands the
+   height to the content, the released floor lets it shrink to that, and the
+   ceiling keeps a long failure history inside the window (the body scrolls).
+   Full-screen touch mode is excluded: its rule owns the geometry there. */
+.shell-window.ext-window:not(.win-fullscreen) {
+  width: max-content; max-width: min(640px, calc(100vw - 16px));
+  height: auto; min-width: 0; min-height: 0; max-height: 70vh;
+}
+.ext-window .ext-win-body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.ext-win-body { padding: 12px 14px; }
+.ext-win-body .modal-actions { margin-top: 14px; }
 /* Narrow screens: the labels stop claiming a fixed column and hand the room to
    the values, which are the identifiers an author reads on a phone. */
 @media (max-width: 480px) {
@@ -364,16 +378,6 @@
   margin: 0; max-width: 34ch;
   font: 400 .72rem/1.5 var(--font-sans); color: var(--text-muted);
 }
-
-/* The enabled checkbox: the modal's labels are stacked inputs, and a checkbox
-   is not, so this one keeps its label beside it on the row the rest drop. */
-.ext-check-row {
-  display: flex; align-items: center; gap: 8px;
-  margin-top: 4px; cursor: pointer;
-  font: 400 .78rem/1.4 var(--font-sans); color: var(--text-secondary);
-}
-.ext-check-row input { flex: 0 0 auto; width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
-.ext-check-row:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .workspace-sessions {
   width: 100%;
@@ -503,11 +507,6 @@
 .nethub-batch-icon .ic-solid { display: none; }
 .nethub-batch-icon.all-checked .ic-hollow { display: none; }
 .nethub-batch-icon.all-checked .ic-solid { display: block; color: var(--accent); }
-/* This panel's split holds one key — the caret that unfolds export and delete —
-   where the host list's holds two halves. The divider between halves would land on
-   its outer edge here, and the container does not need to claim the row. */
-.extpanel-body .nethub-open-split { flex: 0 0 auto; }
-.extpanel-body .batch-open-caret { flex: 0 0 34px; border-left: none; }
 /* The play split-key: the wide half opens every ticked host, the narrow half
    unfolds export and delete. A hairline divides the halves; hover is a colour
    change, for the key has no fill to light up. The SPLIT is only the row slot

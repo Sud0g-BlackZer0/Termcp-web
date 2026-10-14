@@ -56,7 +56,7 @@ func summarizeExtension(ext *extensions.Extension, st extensions.Status) extensi
 	// The failure is reported only while the extension is not up: it is the reason
 	// the reader is looking at a down card, and one that outlived its repair puts
 	// an old exit code under a running extension's name. The history stays in the
-	// detail read, which is where the status page gets it.
+	// detail read, which is where the extension's status card gets it.
 	if n := len(st.Failures); n > 0 && out.Status != extensions.StatusAvailable {
 		out.Failure = &st.Failures[n-1]
 	}

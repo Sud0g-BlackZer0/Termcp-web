@@ -54,6 +54,17 @@ func TestSessionSwitcherUsesOneDataSource(t *testing.T) {
 			t.Errorf("%s should call %s", tc.name, tc.want)
 		}
 	}
+	// …and it must reach that normaliser without a session lookup, because the tab
+	// owns its window. That is the whole reason a status card is safe here: its _sid
+	// is the extension's NAME, so resolving it as a session would dial a terminal
+	// named after the extension (and a pending dial has no id to resolve at all).
+	tabBody := between(t, shellWins, "var order = [];", "order.forEach(function (t) { scroll.appendChild(t); });")
+	if !strings.Contains(tabBody, "focusShellWindow(w);") {
+		t.Error("clicking a tab must raise the window it owns, not resolve a session for it")
+	}
+	if strings.Contains(tabBody, "focusSessionWindow(") {
+		t.Error("the tab bar must not resolve a session: a status card's _sid is a name, and a dial has no id yet")
+	}
 	if strings.Contains(sessions, "openOrFocusShellWindow(") {
 		t.Error("sessions.js should use focusSessionWindow, not the old alias")
 	}
@@ -133,6 +144,44 @@ func TestMinimizeKeepsTheWindowAlive(t *testing.T) {
 	grid := between(t, shellWins, "function applyPaneGrid", "\n  var n = wins.length")
 	if !strings.Contains(grid, "win-minimized") {
 		t.Error("applyPaneGrid should not count minimized panes as grid cells")
+	}
+}
+
+func TestFocusSessionWindowNormalisesState(t *testing.T) {
+	shellWins := readAssetLF(t, "static/js/shell-windows.js")
+	body := between(t, shellWins, "function focusSessionWindow", "\n}\n")
+
+	// Picking a session has to undo whatever state the window was left in, so it
+	// routes through the shared normaliser — the same steps the tab bar needs for a
+	// window it already owns (a pending dial has no session id yet, and a status
+	// card's _sid is the extension's NAME, so neither can go through a session
+	// lookup).
+	if !strings.Contains(body, "focusShellWindow(ex, opts)") {
+		t.Error("focusSessionWindow should normalise and raise through focusShellWindow")
+	}
+	// The normaliser itself owns the steps. Asserting them here rather than in
+	// focusSessionWindow's own body keeps this test about the BEHAVIOUR (a window in
+	// any of those states ends up raised) instead of about which function spells it
+	// out — the split that made this test fail when the steps moved.
+	normalise := between(t, shellWins, "function focusShellWindow", "\n}\n")
+	for _, want := range []string{"restoreShellWindow(ex)", "expandShellWindow(ex)", "bringShellWindowToFront(ex)"} {
+		if !strings.Contains(normalise, want) {
+			t.Errorf("focusShellWindow should call %s", want)
+		}
+	}
+	// A window raised while the tab bar's global "hide all" is on must come back
+	// into view, or the window the user just picked stays invisible.
+	if !strings.Contains(normalise, "showAllWindows()") {
+		t.Error("focusShellWindow should clear the tab bar's hide-all state")
+	}
+	// opts travel with the window: the extension panel asks for one extension's
+	// channel, and dropping them would land on whichever tab was last active.
+	if !strings.Contains(normalise, "opts.shell") || !strings.Contains(normalise, "opts.readOnly") {
+		t.Error("focusShellWindow must honour opts.shell and opts.readOnly")
+	}
+	// An unknown session still opens a window.
+	if !strings.Contains(body, "openShellWindow(") {
+		t.Error("focusSessionWindow should open a window when none exists for that session")
 	}
 }
 
