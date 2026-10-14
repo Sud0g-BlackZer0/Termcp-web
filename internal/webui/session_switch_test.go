@@ -251,9 +251,14 @@ func TestNetHubAttributesHostsByProfileNotDisplayName(t *testing.T) {
 		t.Skip("node not on PATH; cannot exercise the host attribution")
 	}
 	body := readAssetLF(t, "static/js/dialogs.js")
-	// sessionBelongsToNode, runningSessionsForNode and nodeState are contiguous:
-	// the slice runs from the first to the comment that opens the repaint helper.
+	// sessionBelongsToNode and runningSessionsForNode are contiguous: the slice runs
+	// from the first to the comment that opens the repaint helper.
 	state := between(t, body, "function sessionBelongsToNode(", "\n/** Repaint the node cards")
+	// The count checks below depend on skipping a subsystem's own session, and that
+	// rule lives with the plates (sessions.js reads it too): the page's own
+	// predicate comes along rather than a restatement of it.
+	sessions := readAssetLF(t, "static/js/sessions.js")
+	hidden := between(t, sessions, "function isHiddenSession(", "\n")
 
 	script := `
 const fs = require('fs');
@@ -293,48 +298,33 @@ check('a window for another session does not match',
 check('a stamped session ignores a foreign window',
   belongs({ id: 'e', name: 'session-e', ssh_config: 'staging' }, 'prod', [{ _connName: 'prod', _sid: 'e' }]), false);
 
-function stateFor(sessions, wins) {
-  sandbox.conns = [{ name: 'prod' }];
+function runningFor(sessions, wins) {
   sandbox.sessions = sessions;
   sandbox.wins = wins || [];
-  vm.runInContext('window._lastConnections = conns; window._lastSessionsSnapshot = sessions; window.wins = wins;', sandbox);
-  return vm.runInContext('nodeState(\'prod\')', sandbox);
-}
-function prime(connections, sessions) {
-  sandbox.connections = connections; sandbox.sessions = sessions;
-  vm.runInContext('window._lastConnections = connections; window._lastSessionsSnapshot = sessions; window.wins = [];', sandbox);
+  vm.runInContext('window._lastSessionsSnapshot = sessions; window.wins = wins;', sandbox);
+  // A string, because check() compares with ===.
+  return vm.runInContext('runningSessionsForNode("prod").map(function (s) { return s.id; }).join(",")', sandbox);
 }
 
-prime(null, null);
-check('before either list arrives the readout is reading',
-  vm.runInContext('nodeState(\'prod\')', sandbox), 'loading');
-
-// Never dialled: no evidence either way — NOT a claim that the machine is down.
-prime([{ name: 'prod' }], []);
-check('a profile with no session at all is not called offline', stateFor([], []), 'idle');
-
-// A retained DEAD session is evidence Termcp did reach it and no longer does.
-prime([{ name: 'prod' }], [{ id: 'z', name: 'anything', ssh_config: 'prod', status: 'exited' }]);
-check('a host Termcp has connected to before reads disconnected', stateFor([{ id: 'z', name: 'anything', ssh_config: 'prod', status: 'exited' }], []), 'offline');
-
-// Live work, and the dial that precedes it, still win.
-const live = [{ id: 'y', name: 'renamed-live', ssh_config: 'prod', status: 'running' }];
-prime([{ name: 'prod' }], live);
-check('a running session is online', stateFor(live, []), 'online');
-check('an open dial is connecting',
-  stateFor([], [{ _placeholder: true, _pendingConnName: 'prod' }]), 'connecting');
-
-// A session on another host must not colour this card either way.
-prime([{ name: 'prod' }], [{ id: 'w', name: 'prod', ssh_config: 'staging', status: 'exited' }]);
-check('another host\'s history does not make this one disconnected',
-  stateFor([{ id: 'w', name: 'prod', ssh_config: 'staging', status: 'exited' }], []), 'idle');
+// What the card counts: live sessions on THIS profile, and nothing else. A dead
+// session is history (the archive keeps it, the count does not), a session on
+// another host is another host's, and a subsystem's own connection — an
+// extension's session, which carries this profile's name — is not this node's
+// session to report.
+check('a running session is counted', runningFor([{ id: 'y', name: 'x', ssh_config: 'prod', status: 'running' }], []), 'y');
+check('an archived session is not', runningFor([{ id: 'z', name: 'x', ssh_config: 'prod', status: 'exited' }], []), '');
+check('another host is not counted', runningFor([{ id: 'w', name: 'prod', ssh_config: 'staging', status: 'running' }], []), '');
+check('a hidden session is not counted',
+  runningFor([{ id: 'h', name: 'ext:prod', ssh_config: 'prod', status: 'running', namespace: 'ext:prod' }], []), '');
+check('a legacy record falls back to its name',
+  runningFor([{ id: 'l', name: 'prod', status: 'running' }], []), 'l');
 
 console.log(bad === 0 ? 'ATTRIBUTION OK' : bad + ' attribution failure(s)');
 process.exit(bad === 0 ? 0 : 1);
 `
 	tmp := t.TempDir()
 	predicatePath := filepath.Join(tmp, "predicate.js")
-	if err := os.WriteFile(predicatePath, []byte(state), 0o600); err != nil {
+	if err := os.WriteFile(predicatePath, []byte(hidden+"\n"+state), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	scriptPath := filepath.Join(tmp, "predicate_test.js")
@@ -571,16 +561,25 @@ func TestNetHubCardsKeepNodeAndSessionHierarchy(t *testing.T) {
 	css := readAppCSS(t)
 	dialogs := readAssetLF(t, "static/js/dialogs.js")
 	for _, want := range []string{
-		"node-lamp", "node-proto", "node-status", "node-addr", "node-sess",
-		"nethub-rail-status", "nethub-rail-active", "nethub-rail-expand",
+		"node-proto", "node-addr", "node-sess",
+		"nethub-rail-item", "nethub-rail-active", "nethub-rail-expand",
 	} {
 		if !strings.Contains(css, want) || !strings.Contains(dialogs, want) {
 			t.Errorf("NetHub should paint %q in both the resource card and rail", want)
 		}
 	}
+	// The reachability verdict is out of this column: it was derived from the
+	// session list, which keeps archives and holds sessions no card shows, so it
+	// called a host dead for a history someone chose to keep. What a card reports
+	// is what Termcp is configured to do and what is running on it.
+	for _, dead := range []string{"nodeState", "nodeStatusLabel", "nodeStatusHint", "nethub-rail-status", "data-node-state"} {
+		if strings.Contains(dialogs, dead) || strings.Contains(css, dead) {
+			t.Errorf("NetHub still paints %q, the retired reachability readout", dead)
+		}
+	}
 	for _, want := range []string{
 		"runningSessionsForNode", "nodeSessionInfo", "nethub.sessions.one",
-		"nethub.sessions.other", "nodeProtocol(c)", "nodeStatusLabel(state)",
+		"nethub.sessions.other", "nodeProtocol(c)",
 	} {
 		if !strings.Contains(dialogs, want) {
 			t.Errorf("NetHub renderer misses %q", want)
@@ -605,8 +604,8 @@ func TestNetHubRegressionFixes(t *testing.T) {
 		t.Error("the rail must not append a second NetHub cluster glyph; the trigger already owns it")
 	}
 	if !strings.Contains(dialogs, "item.className = 'nethub-rail-item'") ||
-		!strings.Contains(dialogs, "class=\"nethub-rail-status is-") {
-		t.Error("the collapsed rail must still render node items and their status lamps")
+		strings.Contains(dialogs, "nethub-rail-status") {
+		t.Error("the collapsed rail renders node items by name; it carries no reachability lamp")
 	}
 	// The margin the base rule gives .nethub on desktop is deliberately not part
 	// of what is pinned: on the narrow layout the two keys share one row, so a

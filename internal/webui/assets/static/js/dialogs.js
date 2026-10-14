@@ -180,38 +180,12 @@ function runningSessionsForNode(name) {
   return out;
 }
 
-function nodeState(name) {
-  /* Both lists feed this readout — the connection list says the node exists, the
-     session snapshot says whether anything is live or has ever been held on it.
-     The latter gates the word "offline": the connection list resolves first, and
-     painting offline on that alone labelled every fresh host dead before the
-     socket's first frame. */
-  if (!window._lastConnections || !window._lastSessionsSnapshot) return 'loading';
-  var wins = (typeof allShellWins === 'function') ? allShellWins() : [];
-  for (var i = 0; i < wins.length; i++) {
-    if (wins[i] && wins[i]._placeholder && wins[i]._pendingConnName === name) return 'connecting';
-  }
-  // One pass over the snapshot: whether any record is ours, and whether one of
-  // them is live. A running session outranks a retained one whatever the order.
-  var held = false;
-  var sessions = window._lastSessionsSnapshot || [];
-  for (var j = 0; j < sessions.length; j++) {
-    var s = sessions[j];
-    if (!s || !sessionBelongsToNode(s, name, wins)) continue;
-    if (s.status === 'running') return 'online';
-    held = true;
-  }
-  return held ? 'offline' : 'idle';
-}
-
 /** Repaint the node cards from what the page already holds.
  *
- *  "connecting" is the one state that exists only in a window: a placeholder
- *  window for this profile means a dial is open, and it stops being one when the
- *  session arrives or the dial fails. Nothing else changes on those two events
- *  (a successful dial also brings a session frame; a FAILED one brings nothing),
- *  so the transition has to be painted from the window itself or the card keeps
- *  claiming whatever it said before the click.
+ *  A dial in flight lives only in its placeholder window, and a session arriving
+ *  or a window opening is not always a socket frame, so the session count is
+ *  painted from the windows themselves — otherwise a card keeps claiming what it
+ *  said before the click.
  *
  *  Coalesced through a timer: a batch of window closes — select-all then delete —
  *  fires this once per closed window, and rebuilding the whole card list once per
@@ -252,33 +226,15 @@ function nodeAddress(c) {
   return (user ? user + '@' : '') + host + port;
 }
 
-function nodeStatusLabel(state) {
-  if (state === 'online') return t('nethub.state.online');
-  if (state === 'connecting') return t('nethub.state.connecting');
-  if (state === 'offline') return t('nethub.state.offline');
-  if (state === 'loading') return t('nethub.state.loading');
-  return t('nethub.state.idle');
-}
-
-/** What the state means when the word alone could still be read as a claim about
- *  the machine. "Not connected" and "disconnected" are different facts — one is
- *  the absence of evidence, the other a connection Termcp held and lost — and the
- *  hint is where that distinction is spelled out, since the node row itself is
- *  small and uppercased. */
-function nodeStatusHint(state) {
-  if (state === 'idle') return t('nethub.hint.idle');
-  if (state === 'offline') return t('nethub.hint.offline');
-  return '';
-}
-
-/** The rail: the expand key, then one lamp per access node.
+/** The rail: the expand key, then one key per access node.
  *
- *  A collapsed sidebar still has to answer "which machines can I reach", so the
- *  lamps stay and each one carries the same state the full card shows. No cluster
- *  glyph is rendered here: the trigger directly above already carries it and stays
- *  visible while collapsed, so a second one read as two NetHubs stacked. The count
- *  is capped because the rail is a status strip, not a second list: past the cap
- *  the overflow is one more row with the remainder in its tooltip. */
+ *  A collapsed sidebar still has to answer "which machines can I reach", so each
+ *  node keeps a key here, carrying its name and, in the tooltip, how Termcp
+ *  reaches it and how many sessions are running on it. No cluster glyph is
+ *  rendered here: the trigger directly above already carries it and stays visible
+ *  while collapsed, so a second one read as two NetHubs stacked. The count is
+ *  capped because the rail is a strip, not a second list: past the cap the
+ *  overflow is one more row with the remainder in its tooltip. */
 function renderNodeRail(connections) {
   var rail = document.getElementById('nethub-rail');
   if (!rail) return;
@@ -297,23 +253,19 @@ function renderNodeRail(connections) {
 
   var list = (connections || []).slice(0, 12);
   list.forEach(function (c) {
-    var state = nodeState(c.name);
     var info = nodeSessionInfo(c.name);
-    var hint = nodeStatusHint(state);
     var item = document.createElement('button');
     item.type = 'button';
     item.className = 'nethub-rail-item';
     item.setAttribute('data-conn-name', c.name);
-    item.title = c.name + ' · ' + nodeProtocol(c) + ' · ' + nodeStatusLabel(state)
-      + (hint ? ' · ' + hint : '')
+    item.title = c.name + ' · ' + nodeProtocol(c)
       + (info.count ? ' · ' + tCount('nethub.sessions.one', 'nethub.sessions.other', { count: info.count }) : '');
     item.setAttribute('aria-label', item.title);
     item.innerHTML =
-      '<span class="nethub-rail-status is-' + state + '" aria-hidden="true"></span>' +
       '<span aria-hidden="true">' + escapeHtml(c.name.slice(0, 2).toUpperCase()) + '</span>' +
       (info.focused ? '<span class="nethub-rail-active" aria-hidden="true"></span>' : '');
-    /* A lamp names its node and takes you to it: expanding first, so the click
-       lands on the card it is about rather than on a rail that cannot show it. */
+    /* The initials name their node and take you to it: expanding first, so the
+       click lands on the card it is about rather than on a rail that cannot show it. */
     item.addEventListener('click', function (e) {
       e.stopPropagation();
       setNetHubCollapsed(false, true);
@@ -497,13 +449,11 @@ function renderConnGrid(connections, bannerMsg) {
     return (a.name || '').localeCompare(b.name || '');
   }).forEach(function (c) {
     var tile = document.createElement('div');
-    var state = nodeState(c.name);
     var info = nodeSessionInfo(c.name);
     var isInternal = c.kind === 'internal';
     var selected = _nodeSelectMode && _nodeSelIds.has(c.name);
     tile.className = 'conn-tile entry-card node-card' + (info.focused ? ' node-focus' : '') + (selected ? ' batch-selected' : '');
     tile.setAttribute('data-conn-name', c.name);
-    tile.setAttribute('data-node-state', state);
     // The internal profile is editable too: its settings (review default, shell)
     // are stored as an override. There is nothing to rename or delete, but there
     // is a setting to change, so the button belongs here as well.
@@ -520,13 +470,14 @@ function renderConnGrid(connections, bannerMsg) {
       ? '<span class="conn-temporary-mark" data-i18n-title="conn.temporary.hint" title="Temporary host" data-i18n="conn.temporary.mark">TEMP</span>'
       : '';
     var addr = nodeAddress(c);
-    /* The node's readout, in the order the column is meant to be read: what it
-       is (name), how Termcp reaches it (protocol + state), at which address, and
-       whether anything is currently running on it. */
-    var statusText = nodeStatusLabel(state);
+    /* The node's readout, in the order the column is meant to be read: what it is
+       (name), how Termcp reaches it (protocol), at which address, and whether
+       anything is running on it. Deliberately no reachability verdict: that would
+       be derived from the session list, which keeps archives and holds sessions no
+       card shows, so it would call a host dead for a history someone chose to keep
+       — and "is this machine up" is not what this column is asked. */
     tile.innerHTML =
       '<div class="entry-card-inner">' +
-      '<span class="node-lamp is-' + state + '" aria-hidden="true"></span>' +
       '<div class="entry-card-main">' +
       '<div class="conn-nm-row">' +
       '<span class="conn-nm-cluster">' +
@@ -540,8 +491,6 @@ function renderConnGrid(connections, bannerMsg) {
       '</div>' +
       '<div class="node-meta">' +
       '<span class="node-proto">' + escapeHtml(nodeProtocol(c)) + '</span>' +
-      '<span class="node-sep" aria-hidden="true">·</span>' +
-      '<span class="node-status is-' + state + '">' + escapeHtml(statusText) + '</span>' +
       '</div>' +
       (addr ? '<div class="node-addr">' + escapeHtml(addr) + '</div>' : '') +
       '<div class="node-sess">' + escapeHtml(info.count
@@ -556,13 +505,6 @@ function renderConnGrid(connections, bannerMsg) {
     } else {
       inner.title = addr ? (tipConnect + ' — ' + addr) : tipConnect;
     }
-    /* The two states that describe the absence of a connection say so on the
-       card itself, under the status word: the row is uppercased and small, and
-       "offline" read on its own is a claim about a machine this page never
-       dialled. "idle" in particular is not a fault state — see nodeState. */
-    var statusEl = tile.querySelector('.node-status');
-    var stateHint = nodeStatusHint(state);
-    if (statusEl && stateHint) statusEl.title = stateHint;
     // Clicking the card body connects directly (most frequent action) — unless
     // selection mode re-aims the card, where a click IS the tick and the
     // connect path stays out of the way entirely.

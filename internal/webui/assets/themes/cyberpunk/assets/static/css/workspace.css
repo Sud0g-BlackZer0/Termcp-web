@@ -109,13 +109,6 @@
 }
 .nethub-rail-expand:focus-visible, .nethub-rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .nethub-rail-expand svg { display: block; }
-.nethub-rail-status {
-  position: absolute; left: 6px; top: 6px; width: 6px; height: 6px;
-  border-radius: 50%; background: var(--text-faint); box-shadow: 0 0 0 1px var(--bg-subtle);
-}
-.nethub-rail-status.is-online { background: var(--success-dark); box-shadow: 0 0 7px var(--live-glow); }
-.nethub-rail-status.is-connecting { background: var(--warning); animation: nethubStatusPulse 1.5s ease-in-out infinite; }
-.nethub-rail-status.is-offline { background: var(--danger); }
 .nethub-rail-active {
   position: absolute; right: 6px; bottom: 6px; width: 5px; height: 5px;
   border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--live-glow);

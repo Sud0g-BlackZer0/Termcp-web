@@ -27,9 +27,9 @@ func TestHiddenSessionsStayOffThePlates(t *testing.T) {
 	hidden := between(t, sess, "/** Sessions a subsystem keeps for itself", "\n/* ---- sessions still being dialled")
 	pending := between(t, sess, "/** The list every plate reads", "\n/** Stop a dial in progress")
 	dialogs := readAssetLF(t, "static/js/dialogs.js")
-	// sessionBelongsToNode and runningSessionsForNode are contiguous; nodeState
-	// follows and needs the card layer, so the slice stops before it.
-	nodeFn := between(t, dialogs, "function sessionBelongsToNode(", "\nfunction nodeState(")
+	// sessionBelongsToNode and runningSessionsForNode are contiguous; the repaint
+	// helper follows and needs the card layer, so the slice stops before it.
+	nodeFn := between(t, dialogs, "function sessionBelongsToNode(", "\n/** Repaint the node cards")
 
 	script := `
 const fs = require('fs');
