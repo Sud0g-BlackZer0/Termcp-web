@@ -235,11 +235,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		mux.Handle("/", embeddedStaticServer())
 	} else {
 		// Pure-API build (go build -tags no_webui): the browser UI is neither
-		// embedded nor routed. The two agent documents stay, each on its own
-		// path; everything else under / is a 404.
+		// embedded nor routed. The three agent documents stay, each on its own
+		// path; everything else under / is a 404. The extension guide is one of
+		// them because the extension tool is always registered — a build that
+		// hands out the tool but not its guide is telling an agent to read a
+		// document it cannot fetch.
 		docs := embeddedStaticServer()
 		mux.Handle("/api.md", docs)
 		mux.Handle("/skills.md", docs)
+		mux.Handle("/extensions.md", docs)
 	}
 }
 

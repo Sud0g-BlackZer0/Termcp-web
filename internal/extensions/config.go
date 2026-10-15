@@ -71,10 +71,18 @@ type Extension struct {
 	// Session template — the fields of session.Config the author controls.
 	// Mode is the primary shell's mode: "pty", "pipe", or "" for no shell at
 	// all (a connection that exists to carry SFTP and forwards).
+	//
+	// There is deliberately no on_exit here. A session's OnExit closes the
+	// container when its last shell ends by itself, which is the right answer for a
+	// session someone started by hand and the wrong one for an extension: the
+	// container is shared by every extension on the host, so one member's channel
+	// exiting must not take the connection out from under the others. The
+	// reconciler owns an extension session's lifecycle — it reopens a channel whose
+	// process died and tears the connection down when the group empties — so the
+	// field was accepted, stored, and ignored, which is worse than absent.
 	Mode    string   `toml:"mode,omitempty"`
 	Command string   `toml:"command,omitempty"`
 	Args    []string `toml:"args,omitempty"`
-	OnExit  string   `toml:"on_exit,omitempty"`
 	Rows    int      `toml:"rows,omitempty"`
 	Cols    int      `toml:"cols,omitempty"`
 
@@ -126,7 +134,6 @@ func (e *Extension) Normalize() {
 	e.Kind = strings.TrimSpace(e.Kind)
 	e.Mode = strings.TrimSpace(e.Mode)
 	e.Command = strings.TrimSpace(e.Command)
-	e.OnExit = strings.TrimSpace(strings.ToLower(e.OnExit))
 	if e.Kind == "" {
 		e.Kind = KindCustom
 	}
@@ -175,11 +182,6 @@ func (e *Extension) Validate() error {
 	// start a channel that can do nothing — refuse it here rather than at dial.
 	if e.Mode == "pipe" && e.Command == "" {
 		return fmt.Errorf("mode=pipe requires a command (a pipe channel has no fallback shell)")
-	}
-	switch e.OnExit {
-	case "", string(session.OnExitKeep), string(session.OnExitClose):
-	default:
-		return fmt.Errorf("on_exit must be keep or close, got %q", e.OnExit)
 	}
 	for _, b := range [2]int{e.Rows, e.Cols} {
 		if b < 0 || b > 1000 {

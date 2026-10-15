@@ -85,9 +85,13 @@ func summarizeExtensions(r *extensions.Reconciler) []extensionSummary {
 		st, _ := r.Status(name)
 		ext, err := r.Store().Load(name)
 		if err != nil {
+			// A file that no longer parses has no template to read, so only the name
+			// and the reconciler's verdict are known. Enabled is reported as false
+			// rather than true: the panel's toggle reads it, and a card that claims a
+			// broken template is enabled invites a click that cannot do anything.
 			rows = append(rows, extensionSummary{
 				Name:    name,
-				Enabled: true,
+				Enabled: false,
 				Status:  firstNonEmpty(st.Status, extensions.StatusUnavailable),
 			})
 			continue
@@ -144,7 +148,6 @@ func (h *Handler) handleGetExtension(w http.ResponseWriter, r *http.Request) {
 		"mode":          ext.Mode,
 		"command":       ext.Command,
 		"args":          ext.Args,
-		"on_exit":       ext.OnExit,
 		"allow":         ext.Allow,
 		"paths":         ext.Paths,
 		"notes":         ext.Notes,
@@ -272,7 +275,7 @@ func (h *Handler) handleCreateExtension(w http.ResponseWriter, r *http.Request) 
 		if !ok {
 			return
 		}
-		if _, err := h.Extensions.Store().Load(name); err == nil {
+		if taken, loadable := h.Extensions.Store().NameState(name); taken && loadable {
 			http.Error(w, "extension "+name+" already exists; use PUT to change it", http.StatusConflict)
 			return
 		}
@@ -292,13 +295,16 @@ func (h *Handler) handleCreateExtension(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
-	if _, err := h.Extensions.Store().Load(name); err == nil {
+	if taken, loadable := h.Extensions.Store().NameState(name); taken && loadable {
 		http.Error(w, "extension "+name+" already exists; use PUT to change it", http.StatusConflict)
 		return
 	}
 	ext := extensions.Preset(bodyKind(args))
 	ext.Name = name
-	extensions.ApplyArgs(&ext, args, false)
+	if err := extensions.ApplyArgs(&ext, args, false); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	h.saveExtensionTemplate(w, r, &ext, http.StatusCreated)
 }
 
@@ -342,7 +348,10 @@ func (h *Handler) handleUpdateExtension(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	extensions.ApplyArgs(ext, args, true)
+	if err := extensions.ApplyArgs(ext, args, true); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	h.saveExtensionTemplate(w, r, ext, http.StatusOK)
 }
 

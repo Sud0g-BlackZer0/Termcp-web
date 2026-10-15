@@ -22,14 +22,14 @@ func newTestStore(t *testing.T) *Store {
 func TestStoreSaveLoadRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	ext := &Extension{
-		Name:   "fs-mac",
-		Kind:   KindMCP,
-		Target: "mac",
-		Mode:   "pipe",
+		Name:    "fs-mac",
+		Kind:    KindMCP,
+		Target:  "mac",
+		Mode:    "pipe",
 		Command: "npx",
-		Args:   []string{"-y", "example-mcp-server"},
-		Allow:  []string{"shell_input", "shell_output"},
-		Notes:  "drive it",
+		Args:    []string{"-y", "example-mcp-server"},
+		Allow:   []string{"shell_input", "shell_output"},
+		Notes:   "drive it",
 	}
 	ext.SetEnabled(false)
 	if err := s.Save(ext); err != nil {
@@ -92,7 +92,6 @@ func TestStoreForwardNormalization(t *testing.T) {
 		Kind:     KindCustom,
 		Target:   "mac",
 		Mode:     "",
-		OnExit:   "keep",
 		Forwards: []ForwardDecl{{Kind: ForwardLocal, RemotePort: 9222}, {Kind: ForwardRemote, LocalPort: 8080, RemoteHost: "h", RemotePort: 80}},
 	}
 	if err := s.Save(ext); err != nil {

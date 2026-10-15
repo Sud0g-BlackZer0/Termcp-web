@@ -96,6 +96,40 @@ func (s *Store) Load(name string) (*Extension, error) {
 	return e, nil
 }
 
+// NameState reports whether a name is already stored and whether what is stored
+// still loads. It is the one answer to "may this create proceed", and both
+// authoring surfaces (the MCP extension tool and the WebUI's routes) ask it, so
+// the two cannot drift into one of them overwriting what the other protects.
+//
+//	taken=false            the name is free — or unusable, which the save reports
+//	taken=true, loadable=true   a live template holds it: a create is a conflict
+//	taken=true, loadable=false  a stale file holds it: a create REPAIRS it
+//
+// The third case is the one worth naming. A config.toml that no longer parses or
+// validates makes Load fail, and the update path (which loads, then patches) cannot
+// reach it either. If create refused it too, a broken template would be fixable
+// only by someone with shell access to the data directory. Overwriting it is
+// therefore not an accident to prevent — it is the documented way out.
+func (s *Store) NameState(name string) (taken, loadable bool) {
+	if s.configPathErr(name) != nil {
+		return false, false
+	}
+	if _, err := s.ReadRaw(name); err != nil {
+		return false, false
+	}
+	_, err := s.Load(name)
+	return true, err == nil
+}
+
+// configPathErr reports whether a name can be addressed at all. An unusable name
+// is not "taken": the reader would reject it before touching the filesystem, and
+// answering "already exists" for it sends the caller looking for a template to
+// delete instead of fixing their name. Those names fall through to Validate.
+func (s *Store) configPathErr(name string) error {
+	_, err := s.configPath(name)
+	return err
+}
+
 // ReadRaw returns the file bytes for an editor round trip.
 func (s *Store) ReadRaw(name string) ([]byte, error) {
 	p, err := s.configPath(name)

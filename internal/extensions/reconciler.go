@@ -54,7 +54,8 @@ type Reconciler struct {
 
 	// mu guards the two maps; a group's own session and an extension's own
 	// attachment are behind their own locks, because a probe goroutine writes them
-	// while the walk reads them.
+	// while the walk reads them. It also guards cancel, so Start and Stop can be
+	// called from different goroutines.
 	mu       sync.Mutex
 	states   map[string]*extState
 	groups   map[string]*extGroup
@@ -258,12 +259,18 @@ func (r *Reconciler) notifyChange() {
 // only for a store that cannot be walked: one broken extension is reported in
 // its own status, not as a failure to start the reconciler.
 func (r *Reconciler) Start(ctx context.Context) error {
+	r.mu.Lock()
 	if r.cancel != nil {
+		r.mu.Unlock()
 		return nil
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel
+	r.mu.Unlock()
 	if _, err := r.store.List(); err != nil {
+		r.mu.Lock()
+		r.cancel = nil
+		r.mu.Unlock()
 		cancel()
 		return err
 	}
@@ -281,7 +288,7 @@ func (r *Reconciler) sweepRestored() {
 		return
 	}
 	for _, s := range r.sessMgr.ListAll() {
-		if ns.Hidden(s.Namespace) {
+		if ns.IsExtensions(s.Namespace) {
 			slog.Debug("dropping restored extension session", "session_id", s.ID, "namespace", s.Namespace)
 			_ = r.sessMgr.Delete(s.ID)
 		}
@@ -293,13 +300,16 @@ func (r *Reconciler) sweepRestored() {
 // ordinary sessions, and their own teardown follows process exit or the caller's
 // shutdown.
 func (r *Reconciler) Stop() {
-	if r.cancel == nil {
+	r.mu.Lock()
+	cancel := r.cancel
+	r.cancel = nil
+	r.mu.Unlock()
+	if cancel == nil {
 		return
 	}
-	r.cancel()
+	cancel()
 	<-r.done
 	r.probes.Wait()
-	r.cancel = nil
 }
 
 // Trigger asks the reconciler to re-walk the store as soon as it can. It never
@@ -377,7 +387,15 @@ func (r *Reconciler) reconcileAll(ctx context.Context) error {
 			continue
 		}
 		key := groupKey(ext)
-		if st.setGroup(key) || st.changed(ext) {
+		// Both readings happen unconditionally, and the result is combined after:
+		// setGroup answers "did the connection move" and changed answers "is this a
+		// different template", and they are independent. Chaining them with || was
+		// the bug — a template that moved groups short-circuited the fingerprint
+		// update, so the next walk saw the stale fingerprint, called it a change,
+		// and tore down the channel and tunnels it had just built.
+		moved := st.setGroup(key)
+		differed := st.changed(ext)
+		if moved || differed {
 			// The template changed: it now dials another connection (or asks for
 			// another capability set), or what it describes is different. Either way
 			// the extension is rebuilt from it — its channel and its tunnels are
@@ -474,7 +492,7 @@ func (r *Reconciler) reconcileAll(ctx context.Context) error {
 				st.resetRetryBudget()
 				r.notifyChange()
 			}
-			if st.readyAt.After(time.Now()) {
+			if st.readyAtLocked().After(time.Now()) {
 				continue // backoff window not elapsed
 			}
 		}
@@ -1056,7 +1074,7 @@ func (st *extState) changed(ext *Extension) bool {
 // the same edit.
 func fingerprint(ext *Extension) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s|%s|%s|%q|%q|", ext.Kind, ext.Target, ext.Mode, ext.Command, ext.OnExit)
+	fmt.Fprintf(&b, "%s|%s|%s|%q|", ext.Kind, ext.Target, ext.Mode, ext.Command)
 	for _, a := range ext.Args {
 		fmt.Fprintf(&b, "%q,", a)
 	}
@@ -1170,6 +1188,18 @@ func (st *extState) flags() (status string, autoRetry bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.status, st.autoRetry
+}
+
+// readyAtLocked reports the instant the backoff window elapses. It is the third
+// read the walk makes, and it must be taken under the same lock as the others:
+// resetRetryBudget clears readyAt to the zero time from the retry path (an MCP
+// call or the panel's key) while the walk is reading it, and the zero time is
+// exactly the value the walk reads as "no window, probe now" — so an unsynchronised
+// read is not only a race the detector sees but a decision made on a torn view.
+func (st *extState) readyAtLocked() time.Time {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.readyAt
 }
 
 // scheduleBackoff sets the earliest retry from the consecutive-failure count.
@@ -1303,6 +1333,13 @@ func (r *Reconciler) ensureForwards(ext *Extension, st *extState) error {
 	sshCli := sess.SSHClient()
 
 	built := make([]ForwardStatus, len(ext.Forwards))
+	// A forward's position in the declaration is what makes it the same forward
+	// across walks, so the slice is laid out by index and a missing entry is an empty
+	// one. Keeping what already worked when a later entry fails is what makes the
+	// retry target only the one that did not: recording nothing until the whole list
+	// succeeded left the earlier listeners live but unrecorded, so the next attempt
+	// rebuilt them onto a port it already held and the extension could never come
+	// back up.
 	for i, f := range ext.Forwards {
 		if i < len(existing) && live[existing[i].ForwardID] {
 			built[i] = existing[i]
@@ -1310,6 +1347,11 @@ func (r *Reconciler) ensureForwards(ext *Extension, st *extState) error {
 		}
 		fw, err := r.createForward(f, sess, sshCli, info)
 		if err != nil {
+			// Record what this attempt did establish before reporting the failure:
+			// the walk reads these entries to decide what is already listening.
+			st.mu.Lock()
+			st.forwards = append([]ForwardStatus(nil), built...)
+			st.mu.Unlock()
 			return fmt.Errorf("%s forward on %s: %w", f.Kind, listenSpec(f), err)
 		}
 		// Tear down with the session rather than outliving it as a dangling

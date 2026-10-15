@@ -103,10 +103,26 @@ preset:
   channel has no login shell to fall back to, so `mode=pipe` requires a command.
 - `allow`: the tool whitelist (e.g. `shell_input`, `shell_output`, `file_read`).
   Empty means unrestricted; anything listed is the complete set the session
-  accepts.
-- `paths`: the remote paths the file tools may touch. Each entry is a **rule**,
-  not just a prefix: a plain prefix (`/srv/app/`), a glob (`/srv/**/*.md`), or a
-  regex (`re:^/srv/(app|logs)/`). `kind=skill` requires at least one.
+  accepts. It is enforced on **every** surface a caller can reach the session
+  through — the MCP tools, the REST API, and the browser terminal's WebSocket —
+  and on both spellings of every target: a raw id, the other one of
+  session/shell, and a `termcp://` locator all resolve to the same decision. So
+  neither respelling an id (`termcp://#<sid>`) nor picking another transport (a
+  `curl` to `/api/shells/{id}/input` instead of `shell_input`) gets around it. The
+  REST twins of a gated tool are gated with it: `/output-range`, `/lines`,
+  `/marks` and `/rail` answer as `shell_output` and `message`, and
+  `DELETE /api/shells/{id}` as `shell_close`. The routes that name a resource
+  rather than a session (`DELETE /api/forwards/{id}`, `/api/notifications/{id}`)
+  look the owner up, so a tunnel or a wake-up rule cannot be torn down by a
+  caller the owning session never granted `forward` / `shell_notify` to.
+- `paths`: the paths the file tools may touch. Each entry is a **rule**, not just
+  a prefix: a plain prefix (`/srv/app/`), a glob (`/srv/**/*.md`), or a regex
+  (`re:^/srv/(app|logs)/`). `kind=skill` requires at least one. Matching is on the
+  **name** of the path, so a symlink inside a granted tree is not followed out of
+  it: grant the trees you mean, not a directory you expect to stay put.
+- Both lists cover the local side too: `file_read`/`file_write` carry `local_path`
+  (a path on the termcp host), and it is checked against `paths` like any remote
+  one. An extension that downloads to a local directory has to list it.
 - `allow` and `paths` are also what the *connection* is keyed on, together with
   `target`: extensions asking for the same host with the same capability set share
   one session, and different sets get their own. That is deliberate — the session
@@ -119,6 +135,18 @@ preset:
   connections reach `remote_host:remote_port` as seen from the target), or
   `remote` (the target listens on `local_port`, connections reach
   `remote_host:remote_port`).
+
+A malformed value is refused rather than quietly ignored. That matters most for
+`allow` and `paths`: they used to fall back to "no change" on a value of the
+wrong type, and for an array that meant *clearing* it — an empty `allow` is not
+"fewer tools", it is the unrestricted default, so `"allow": [1, 2]` widened the
+session instead of narrowing it.
+
+There is no `on_exit`: a session's exit policy closes the container when its last
+shell ends, which is right for a session you started by hand and wrong for one
+several extensions share. The reconciler owns an extension session's lifecycle —
+it reopens a channel whose process died and tears the connection down when the
+group empties.
 
 On `update`, an **omitted** field keeps its stored value and an **empty array**
 clears it — that is how "trim the path list" and "leave the path list alone" are

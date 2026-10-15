@@ -116,7 +116,6 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 		mcpgo.WithString("command", mcpgo.Description("create/update: the executable a pipe or run-and-exit session runs; a pipe channel has no fallback shell, so mode=pipe requires one")),
 		mcpgo.WithArray("args", mcpgo.Description("create/update: argv after command; omit keeps the stored value, [] clears it"), mcpgo.WithStringItems()),
 		mcpgo.WithString("mode", mcpgo.Description("create/update: pty or pipe; kind=skill leaves it empty, meaning no shell at all"), mcpgo.Enum("pty", "pipe")),
-		mcpgo.WithString("on_exit", mcpgo.Description("create/update: keep or close"), mcpgo.Enum("keep", "close")),
 		mcpgo.WithNumber("rows", mcpgo.Description("create/update: pty height (0 = default 24)")),
 		mcpgo.WithNumber("cols", mcpgo.Description("create/update: pty width (0 = default 80)")),
 		mcpgo.WithArray("allow", mcpgo.Description("create/update: the tool whitelist this session accepts; empty = unrestricted, and a call outside it is really refused"), mcpgo.WithStringItems()),

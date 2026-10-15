@@ -25,6 +25,14 @@ type toolGuard struct {
 // it may proceed. toolName is the registered tool name; request carries the
 // arguments the guard resolves the target from.
 //
+// The target is resolved with the same set of spellings the handlers accept —
+// a raw session id, a raw shell id, or a termcp:// locator, in either argument —
+// because the guard and the handler MUST agree on which session a call names. A
+// guard that resolved fewer spellings than the handler would be a whitelist that
+// the caller can walk around by respelling the id, which is exactly what the
+// first version of this file did (it handled a raw shell id only, while
+// requireShell also accepts a session id and a locator).
+//
 // Only arguments that actually name the target are consulted, and a tool that
 // takes neither session_id nor shell_id passes through untouched — some tools
 // (session_start, shell_detect, the extension tools themselves) legitimately
@@ -38,15 +46,8 @@ func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.
 
 	// A shell-addressed tool resolves through its parent session, since the
 	// restriction is a property of the container the shell was created under.
-	// shell_id also accepts a session id or locator (see requireShell), so the
-	// lookup falls back to the session the way the tool handlers do.
 	if shellID := getString(args, "shell_id", ""); shellID != "" {
-		var sess *session.Session
-		if cs := g.server.sessMgr.GetChildShell(shellID); cs != nil {
-			sess = g.server.sessMgr.Get(cs.ParentSessionID())
-		} else {
-			sess = g.server.sessMgr.GetByShellID(shellID)
-		}
+		sess := g.sessionForShellID(shellID)
 		if sess == nil {
 			return nil // an unresolvable id is the handler's error to report
 		}
@@ -63,7 +64,7 @@ func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.
 				if id == "" {
 					continue
 				}
-				sess := g.server.sessMgr.Get(id)
+				sess := g.sessionForSessionID(id)
 				if sess == nil {
 					continue
 				}
@@ -73,11 +74,101 @@ func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.
 			}
 			return nil
 		}
-		sess := g.server.sessMgr.Get(sessionID)
+		sess := g.sessionForSessionID(sessionID)
 		if sess == nil {
 			return nil
 		}
 		return g.checkSession(sess, toolName, args)
+	}
+
+	// Two tools name what they act on by the RESOURCE's own id rather than by the
+	// session it belongs to: forward(action=close) takes forward_id, and
+	// shell_notify(action=unregister) takes rule_id. Neither argument is one the
+	// branches above read, so the call resolved to no session and reached the
+	// handler unchecked — the same hole the REST forward-close route had, on the
+	// surface an extension handle actually reaches. The owner is resolved from the
+	// same managers the handlers use.
+	if id := getString(args, "forward_id", ""); id != "" {
+		if sess := g.sessionForForwardID(id); sess != nil {
+			return g.checkSession(sess, toolName, args)
+		}
+	}
+	if id := getString(args, "rule_id", ""); id != "" {
+		if sess := g.sessionForRuleID(id); sess != nil {
+			return g.checkSession(sess, toolName, args)
+		}
+	}
+	return nil
+}
+
+// sessionForForwardID resolves the session a forward belongs to: a forward is
+// keyed by the session that opened it, and that session is what the whitelist
+// governs. An id the manager does not know resolves to nothing and is left to
+// the handler's own not-found error.
+func (g toolGuard) sessionForForwardID(id string) *session.Session {
+	if g.server.forwardMgr == nil {
+		return nil
+	}
+	for _, fw := range g.server.forwardMgr.List() {
+		if fw.ForwardID == id {
+			return g.server.sessMgr.Get(fw.SessionID)
+		}
+	}
+	return nil
+}
+
+// sessionForRuleID resolves the session a shell_notify rule belongs to. The rule
+// carries both ids, and the session is the container whose whitelist governs it;
+// the shell is the fallback for a rule registered without one.
+func (g toolGuard) sessionForRuleID(id string) *session.Session {
+	if g.server.notifyMgr == nil {
+		return nil
+	}
+	for _, r := range g.server.notifyMgr.List("") {
+		if r.ID != id {
+			continue
+		}
+		if sess := g.server.sessMgr.Get(r.SessionID); sess != nil {
+			return sess
+		}
+		return g.sessionForShellID(r.ShellID)
+	}
+	return nil
+}
+
+// sessionForShellID resolves a shell_id argument the way requireShell does: a
+// live or retained shell id, a raw session id (its primary channel), or a
+// termcp:// locator naming either. It deliberately does not apply
+// requireShell's status check — a closed session's retained shell is still the
+// container whose whitelist governs a read of its output, and letting the guard
+// skip it would leave that path ungated.
+func (g toolGuard) sessionForShellID(shellID string) *session.Session {
+	if cs := g.server.sessMgr.GetChildShell(shellID); cs != nil {
+		return g.server.sessMgr.Get(cs.ParentSessionID())
+	}
+	// GetSessionByShellID also searches retained DEAD/restored snapshots, which
+	// is the read-only case above; a live shell is found by it too, so this is
+	// the one scan the guard needs.
+	if sess := g.server.sessMgr.GetSessionByShellID(shellID); sess != nil {
+		return sess
+	}
+	return g.sessionForSessionID(shellID)
+}
+
+// sessionForSessionID resolves a session_id argument the way requireSession
+// does: a raw session id, a shell id belonging to it, or a termcp:// locator.
+func (g toolGuard) sessionForSessionID(id string) *session.Session {
+	if sess := g.server.sessMgr.Get(id); sess != nil {
+		return sess
+	}
+	if sess := g.server.sessMgr.GetByShellID(id); sess != nil {
+		return sess
+	}
+	if looksLikeResourceLocator(id) {
+		p, err := parseResourceURL(id)
+		if err == nil && p.Kind != resourceURLEntry {
+			return g.server.sessMgr.Get(p.SessionID)
+		}
 	}
 	return nil
 }
@@ -87,27 +178,35 @@ func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.
 func (g toolGuard) checkSession(sess *session.Session, toolName string, args map[string]any) *mcpgo.CallToolResult {
 	r := sess.Restriction()
 	if !r.AllowsTool(toolName) {
-		return toolError(CodeForbidden, "%s", forbiddenToolMessage(toolName))
+		return toolError(CodeForbidden, "%s", session.ForbiddenTool(toolName))
 	}
 	// Path arguments come in several names across the file tools (remote_path,
-	// from_path/to_path), and reading is as gated as writing: the whitelist is
-	// about reachability, not direction.
+	// from_path/to_path, local_path), and reading is as gated as writing: the
+	// whitelist is about reachability, not direction.
 	for _, key := range pathArgKeys {
 		path := getString(args, key, "")
 		if path == "" {
 			continue
 		}
 		if !r.AllowsPath(path) {
-			return toolError(CodeForbidden, "%s", forbiddenPathMessage(key, path))
+			return toolError(CodeForbidden, "%s", session.ForbiddenPath(key, path))
 		}
 	}
 	return nil
 }
 
-// pathArgKeys are the argument names that name a remote path. The guard checks
-// each one a tool happens to carry, so a new file tool is covered by naming its
-// path argument the same way. Every path argument of every file tool is here:
-// file_link alone carries three (target, link_path, existing_path, new_path).
+// pathArgKeys are the argument names that name a path. The guard checks each one
+// a tool happens to carry, so a new file tool is covered by naming its path
+// argument the same way. Every path argument of every file tool is here: file_link
+// alone carries three (target, link_path, existing_path, new_path).
+//
+// local_path is in the list because it names a path too, and the one on THIS
+// host: file_read(mode=file) writes it and file_write streams from it, so leaving
+// it out let a template's paths whitelist be walked around entirely — an
+// extension granted file_read on one remote tree could read any file the termcp
+// process can open, including the deployment's own credentials. Gating it costs
+// an author one entry in paths to allow a local download directory, which is the
+// fail-closed reading of "the paths this session may reach".
 var pathArgKeys = []string{
 	"remote_path",
 	"from_path",
@@ -115,13 +214,6 @@ var pathArgKeys = []string{
 	"link_path",
 	"existing_path",
 	"new_path",
+	"local_path",
 	"target",
-}
-
-func forbiddenToolMessage(toolName string) string {
-	return "tool " + toolName + " is not permitted on this session: it is an extension session whose capability list does not include it. Use extension(action=get) to see what this session was created to allow."
-}
-
-func forbiddenPathMessage(key, path string) string {
-	return "path argument " + key + " is outside the directories this extension session may reach: " + path + ". Use extension(action=get) to see the allowed paths."
 }

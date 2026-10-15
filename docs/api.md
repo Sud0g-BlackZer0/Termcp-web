@@ -100,6 +100,15 @@ the WebSocket. One shared `internal/auth` middleware guards the whole mux. Missi
 wrong credentials return `401 Unauthorized` with `WWW-Authenticate: Basic` (browsers
 show their native login prompt).
 
+A valid token is not the only gate. A session created by an **extension** carries a
+capability whitelist (`allow` / `paths`), and it is enforced on this surface too — a
+call outside it answers `403` with `{"error_code":"forbidden", ...}` instead of
+performing the work. The list is the same one the MCP tools honour, under the same
+names, so `shell_input`, `file_read`, and the rest mean the same thing whichever
+transport you use; a route that mirrors a gated tool is gated with it. There is no
+point retrying: use `extension(action=get)` to read what the template permits, or
+ask the operator to widen it.
+
 | Caller | Credentials |
 |--------|-------------|
 | REST / MCP / curl | `Authorization: Bearer <token>` |

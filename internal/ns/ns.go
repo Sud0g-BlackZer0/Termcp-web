@@ -35,7 +35,11 @@ func ForExtensions(target string) string {
 	return Extensions + ":" + target
 }
 
-// IsExtensions reports whether a namespace belongs to the extension layer.
+// IsExtensions reports whether a namespace belongs to the extension layer. It is
+// the question the reconciler asks about a session it finds on disk: Hidden says
+// "is this off the ordinary surfaces", which a second subsystem's namespaces also
+// answer, so sweeping on Hidden would let the extension reconciler delete another
+// subsystem's restored sessions.
 func IsExtensions(namespace string) bool {
 	return namespace == Extensions || strings.HasPrefix(namespace, Extensions+":")
 }

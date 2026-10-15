@@ -142,12 +142,18 @@ func (s *Server) handleExtensionCreate(ctx context.Context, request mcpgo.CallTo
 	if name == "" {
 		return toolError(CodeInvalidArgument, "%s", "name is required"), nil
 	}
-	if _, err := s.extensions.Store().Load(name); err == nil {
+	// A name whose template still loads is a conflict. One whose template no longer
+	// loads is not: create overwrites it, which is the documented way out of a
+	// broken file (see Store.NameState), and a name that cannot be stored at all
+	// falls through to the save's own validation.
+	if taken, loadable := s.extensions.Store().NameState(name); taken && loadable {
 		return toolError(CodeConflict, "extension %q already exists; use action=update to change it", name), nil
 	}
 	ext := extensions.Preset(getString(args, "kind", extensions.KindCustom))
 	ext.Name = name
-	extensions.ApplyArgs(&ext, args, false)
+	if err := extensions.ApplyArgs(&ext, args, false); err != nil {
+		return extensionSaveError(err), nil
+	}
 	if err := extensions.SaveTemplate(s.extensions.Store(), &ext); err != nil {
 		return extensionSaveError(err), nil
 	}
@@ -168,7 +174,9 @@ func (s *Server) handleExtensionUpdate(ctx context.Context, request mcpgo.CallTo
 	if err != nil {
 		return toolError(CodeRuleNotFound, "extension %q not found", name), nil
 	}
-	extensions.ApplyArgs(ext, args, true)
+	if err := extensions.ApplyArgs(ext, args, true); err != nil {
+		return extensionSaveError(err), nil
+	}
 	if err := extensions.SaveTemplate(s.extensions.Store(), ext); err != nil {
 		return extensionSaveError(err), nil
 	}
@@ -244,7 +252,6 @@ func extensionConfigMap(ext *extensions.Extension) map[string]any {
 		"enabled":     ext.IsEnabled(),
 		"mode":        ext.Mode,
 		"command":     ext.Command,
-		"on_exit":     ext.OnExit,
 		"allow":       ext.Allow,
 		"paths":       ext.Paths,
 		"notes":       ext.Notes,

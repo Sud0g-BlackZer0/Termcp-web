@@ -2,8 +2,6 @@ package extensions
 
 import (
 	"strings"
-
-	"github.com/open-mcp-ai/termcp/internal/session"
 )
 
 // Preset returns the starting template for a kind. Every field it fills is a
@@ -14,13 +12,11 @@ import (
 // An unknown kind yields an empty custom template, so a caller that passes an
 // unvalidated string gets something valid rather than a half-filled extension.
 func Preset(kind string) Extension {
-	keep := string(session.OnExitKeep)
 	switch strings.TrimSpace(kind) {
 	case KindMCP:
 		return Extension{
 			Kind:    KindMCP,
 			Mode:    "pipe",
-			OnExit:  keep,
 			Allow:   append([]string(nil), mcpAllow...),
 			Notes:   mcpNotes,
 			Command: "npx",
@@ -35,9 +31,8 @@ func Preset(kind string) Extension {
 		}
 	case KindPrompt:
 		return Extension{
-			Kind:   KindPrompt,
-			Mode:   "pty",
-			OnExit: keep,
+			Kind: KindPrompt,
+			Mode: "pty",
 		}
 	default:
 		return Extension{Kind: KindCustom}
@@ -105,9 +100,6 @@ func ApplyDefaults(e *Extension) {
 	p := Preset(e.Kind)
 	if e.Mode == "" {
 		e.Mode = p.Mode
-	}
-	if e.OnExit == "" {
-		e.OnExit = p.OnExit
 	}
 	if e.Command == "" {
 		e.Command = p.Command

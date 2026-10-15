@@ -113,6 +113,7 @@ Termcp 的 31 个工具按"热路径 / 低频面"分成两类。MCP 标准的 `d
 | `rule_not_found` | 无此通知规则 rule_id | 用 `shell_notify(action=list)` 复核 |
 | `conflict` | 资源已存在 | 改用 edit/其它名称 |
 | `not_configured` | 功能未启用/未初始化 | 检查服务启动参数 |
+| `forbidden` | 该调用不在会话模板的 `allow`/`paths` 白名单内（extension 会话） | **不要重试**：用 `extension(action=get)` 看模板允许什么 |
 | `connection_failed` | SSH 拨号/连接失败 | 检查网络与目标地址 |
 | `operation_failed` | 其它操作失败 | 查看 `error` 详情 |
 | `internal_error` | 服务端内部错误 | 查看服务端日志 |
@@ -451,6 +452,32 @@ ssh_config(action=list)
 ---
 
 ## 服务端发现与配置
+
+### extension（扩展层统一入口）
+
+带 capability 白名单的**常驻会话**：一个存下来的模板（对着哪个 ssh_config、跑什么命令、哪些工具/路径允许），reconciler 把它保持可用并把 `session_id`/`shell_id` 交给 agent。同一个 host 上白名单相同的扩展共享**一条连接**，各自驱动自己那条 channel。完整说明见 resource `extensions.md`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `action` | string | **是** | `list` / `get` / `create` / `update` / `delete` / `retry` |
+| `name` | string | 条件 | 除 list 外都必填（`[A-Za-z0-9_-]`，最长 64） |
+| `kind` | string | 否 | create：`mcp`（stdio MCP server，pipe shell）/ `skill`（只读文件窗口，无 shell）/ `prompt`（交互终端）/ `custom`；决定未传字段的预设值 |
+| `target` | string | 否 | create 必填：ssh_config profile 名，或 `internal`（本机 loopback） |
+| `mode` | string | 否 | `pty` / `pipe`；`skill` 留空 = **不要 shell**（只有 SFTP 与转发） |
+| `command` / `args` | string / array | 否 | pipe 或一次性命令跑什么。pipe 没有登录 shell 可回退，因此 `mode=pipe` 必须给 `command` |
+| `allow` | array | 否 | 工具白名单。**空 = 不限制**；列了就是该会话能接受的完整集合 |
+| `paths` | array | 否 | 文件工具可触及的路径：前缀（`/srv/app/`）、glob（`*.md`）或正则（`re:^/srv/(app\|logs)/`）。`kind=skill` 至少一条。`local_path`（下载到本机的路径）也走这张表 |
+| `notes` | string | 否 | 给 agent 看的操作说明，`action=get` 会返回；第一次驱动前读它 |
+| `enabled` | bool | 否 | false = 停用：会话被拆掉，不再重连 |
+| `forwards` | array | 否 | 声明的隧道（`kind` = `dynamic` / `local` / `remote`），随会话建立与拆除 |
+| `rows` / `cols` | number | 否 | pty 尺寸，默认 24×80 |
+| `description` | string | 否 | 卡片上的一句话说明 |
+
+**update 的补丁语义**：**省略**的字段保持原值，**空数组**清空它——「把路径表缩短」与「不动路径表」因此是两次不同的调用。**类型不对的值直接拒绝**（不是静默忽略）：`allow`/`paths` 回退到「不修改」等于**清空**，而空 `allow` 恰恰是「不限制」，于是一个手误把会话放开了而不是收紧了。
+
+**返回**：`list` 给每个扩展的 `status`（`available` / `probing` / `unavailable` / `disabled`）以及可用时的 `session_id`/`shell_id`，不可用时给 `last_failure` 与 `next_retry`；`get` 给完整模板 + `failures` 历史 + `notes`。
+
+**驱动**：可用的扩展就是普通会话——`shell_input`/`shell_key`/`shell_output` 走它的 `shell_id`，`file_read`/`file_stat` 走 `session_id`。模板没列入的调用会被**真的拒绝**（`forbidden`，不是临时故障）：不要重试，也不要找绕道。扩展会话是基础设施，`session_list` 不列、Web UI 有独立一列，**不要 terminate/delete**（一条连接可能服务多个扩展）。
 
 ### shell_detect
 

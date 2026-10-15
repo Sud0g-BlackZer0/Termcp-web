@@ -187,7 +187,6 @@ func TestExtensionValidation(t *testing.T) {
 	for _, args := range []map[string]any{
 		{"action": "create", "name": "bad", "kind": "nope", "target": "internal"},
 		{"action": "create", "name": "bad", "kind": "skill", "target": "internal"}, // skill needs paths
-		{"action": "create", "name": "bad", "kind": "prompt", "target": "internal", "on_exit": "bogus"},
 	} {
 		out := extensionError(t, s, args)
 		if out["error_code"] != CodeInvalidArgument {

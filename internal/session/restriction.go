@@ -7,11 +7,17 @@ import (
 	"strings"
 )
 
-// Restriction trims what the MCP tool surface may do to a session. It is the
-// mechanism behind extensions: an extension is an ordinary session whose
-// capabilities were narrowed at creation time, so a handle handed to an agent
-// can only do what the extension's author decided — and nothing the author did
-// not list is silently reachable.
+// Restriction trims what may act on a session, across every surface that can
+// act on one: the MCP tools, the REST endpoints, and the WebSocket the browser
+// terminal speaks. It is the mechanism behind extensions: an extension is an
+// ordinary session whose capabilities were narrowed at creation time, so a
+// handle handed to an agent can only do what the extension's author decided —
+// and nothing the author did not list is silently reachable.
+//
+// Enforcing it on one transport only would make the whitelist a matter of which
+// door the caller picked, so each surface asks these same questions rather than
+// restating the rule: internal/mcp's toolGuard and internal/webui's
+// restRefuseTool/restRefusePaths are thin wrappers over AllowsTool/AllowsPath.
 //
 // Both halves are whitelists and the zero value means unrestricted: an ordinary
 // session carries a Restriction{} and every tool behaves exactly as before.
@@ -85,6 +91,21 @@ func (r Restriction) AllowsPath(p string) bool {
 		}
 	}
 	return false
+}
+
+// ForbiddenTool renders the refusal for a tool a session's whitelist does not
+// carry. Both surfaces that can act on a session — the MCP tool guard and the
+// REST handlers — answer with this text, so a caller who meets the whitelist on
+// either one reads the same sentence and is pointed at the same remedy.
+func ForbiddenTool(toolName string) string {
+	return "tool " + toolName + " is not permitted on this session: it is an extension session whose capability list does not include it. Use extension(action=get) to see what this session was created to allow."
+}
+
+// ForbiddenPath renders the refusal for a path argument outside the whitelist.
+// arg is the argument that carried the path, so the caller learns which of a
+// file tool's several paths was the offending one.
+func ForbiddenPath(arg, path string) string {
+	return "path argument " + arg + " is outside the directories this extension session may reach: " + path + ". Use extension(action=get) to see the allowed paths."
 }
 
 // ruleKind selects the matcher a pathPattern compiled into.
