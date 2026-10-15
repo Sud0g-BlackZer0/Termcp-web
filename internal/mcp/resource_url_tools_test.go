@@ -328,7 +328,7 @@ func TestShellToolsAcceptLocators(t *testing.T) {
 func TestForwardToolsKeyForwardsByResolvedSession(t *testing.T) {
 	s, sid, _, _, _ := locatorFixture(t)
 	s.forwardMgr = forward.NewForwardManager()
-	s.sessMgr.SetOnDeadHook(s.forwardMgr.CloseBySession)
+	s.sessMgr.AddOnDeadHook(s.forwardMgr.CloseBySession)
 
 	res, err := s.handleForwardOps(context.Background(), makeRequest(map[string]any{
 		"action": "dynamic", "session_id": "termcp://#" + sid, "local_port": 0,

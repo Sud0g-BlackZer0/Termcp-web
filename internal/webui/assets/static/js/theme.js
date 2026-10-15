@@ -11,7 +11,14 @@ var _themeChoice = (function () {
     var stored = localStorage.getItem('termcp.theme');
     if (validThemeChoice(stored)) return stored;
   } catch (e) {}
-  return _themeActive;
+  /* Nothing stored means 'auto', NOT the id data-theme carries: boot has already
+     resolved the choice into a concrete theme, so returning _themeActive here
+     would read the resolved answer back as if the user had picked it by hand.
+     That turns the default into a pin — the trigger says "Light" instead of
+     "Auto", and the scheme listener below steps aside as if the OS had been
+     overridden. theme-boot.js states the same default once, where it is needed
+     before the first paint; this is the other half of that one decision. */
+  return 'auto';
 })();
 var _themeCallbacks = [];
 var _themePending = null;
@@ -53,11 +60,12 @@ function themeText(key) {
       case 'theme.dark': return t('theme.dark');
       case 'theme.auto': return t('theme.auto');
       case 'theme.cyberpunk': return t('theme.cyberpunk');
+      case 'theme.matrix': return t('theme.matrix');
     }
   }
   var overrides = _themeStrings.en;
   if (overrides && Object.prototype.hasOwnProperty.call(overrides, key)) return overrides[key];
-  var english = { 'theme.label': 'Theme', 'theme.loading': 'Loading themes…', 'theme.discoverFailed': 'Unable to load themes', 'theme.loadFailed': 'Theme could not be loaded', 'theme.light': 'Light', 'theme.dark': 'Dark', 'theme.auto': 'Auto', 'theme.cyberpunk': 'Cyberpunk' };
+  var english = { 'theme.label': 'Theme', 'theme.loading': 'Loading themes…', 'theme.discoverFailed': 'Unable to load themes', 'theme.loadFailed': 'Theme could not be loaded', 'theme.light': 'Light', 'theme.dark': 'Dark', 'theme.auto': 'Auto', 'theme.cyberpunk': 'Cyberpunk', 'theme.matrix': 'Matrix' };
   return english[key] || key;
 }
 
@@ -203,7 +211,7 @@ function restoreThemeResources(id) {
 }
 
 function themeLabel(id) {
-  var names = { 'default-light': 'theme.light', 'default-dark': 'theme.dark', 'auto': 'theme.auto', 'cyberpunk': 'theme.cyberpunk' };
+  var names = { 'default-light': 'theme.light', 'default-dark': 'theme.dark', 'auto': 'theme.auto', 'cyberpunk': 'theme.cyberpunk', 'matrix': 'theme.matrix' };
   return Object.prototype.hasOwnProperty.call(names, id) ? themeText(names[id]) : id;
 }
 
@@ -249,10 +257,10 @@ function discoverThemes() {
         if (validThemeChoice(id) && ids.indexOf(id) < 0) ids.push(id);
       } catch (e) {}
     });
-    var builtinOrder = ['default-light', 'default-dark', 'cyberpunk'];
+    var builtinOrder = ['default-light', 'default-dark', 'cyberpunk', 'matrix'];
     return ids.sort(function (a, b) {
       var ai = builtinOrder.indexOf(a), bi = builtinOrder.indexOf(b);
-      if (ai >= 0 || bi >= 0) return (ai < 0 ? 3 : ai) - (bi < 0 ? 3 : bi);
+      if (ai >= 0 || bi >= 0) return (ai < 0 ? builtinOrder.length : ai) - (bi < 0 ? builtinOrder.length : bi);
       return a.localeCompare(b);
     });
   });
@@ -378,7 +386,15 @@ function initThemeControls() {
   syncThemeControl();
   setThemeTerminalConfig({});
   restoreThemeResources(_themeActive);
-  picker.addEventListener('toggle', function () { if (picker.open) loadThemeChoices(); });
+  /* The <details> toggle covers both directions, so the body class mirrors the
+     open state rather than being added on the way in and forgotten on the way
+     out. It is what carries .app-header over the terminal layers: this menu is a
+     child of the header, so its own z-index cannot outrank the header's own
+     stacking context (see the rule in base.css). */
+  picker.addEventListener('toggle', function () {
+    if (document.body) document.body.classList.toggle('header-theme-open', picker.open);
+    if (picker.open) loadThemeChoices();
+  });
   document.addEventListener('click', function (e) { if (!picker.contains(e.target)) picker.open = false; });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && picker.open) { picker.open = false; picker.querySelector('summary').focus(); }
