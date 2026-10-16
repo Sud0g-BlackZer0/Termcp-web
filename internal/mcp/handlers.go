@@ -48,15 +48,24 @@ func filterRunning(in []api.Session) []api.Session {
 }
 
 // listableSessions is what a session list shows: the running sessions that belong
-// to the caller. A session in a namespace was created by a subsystem — the
-// extension layer keeps one per host — and is reached through that subsystem's own
-// handle (extension(action=list) hands out its session_id and shell_id) rather
-// than discovered in a list. Its id still resolves everywhere an id is accepted,
-// so a handle already in hand keeps working.
-func listableSessions(in []api.Session) []api.Session {
+// to the caller. A session in an infrastructure namespace was created by a
+// subsystem — the extension layer keeps one per host — and is reached through that
+// subsystem's own handle (extension(action=list) hands out its session_id and
+// shell_id) rather than discovered in a list. Its id still resolves everywhere an
+// id is accepted, so a handle already in hand keeps working.
+//
+// callerNS is the caller's own namespace, empty for the operator. A caller that
+// claimed one sees exactly its own sessions — an extension session belongs to the
+// extension layer, so a tenant's list does not grow one just because the tenant
+// is the one asking. Listing and by-id reach both go through ns.OwnedBy, so the
+// two cannot disagree about what a caller may touch.
+func listableSessions(in []api.Session, callerNS string) []api.Session {
 	out := make([]api.Session, 0, len(in))
 	for _, s := range in {
-		if s.Status != api.SessionRunning || ns.Hidden(s.Namespace) {
+		if s.Status != api.SessionRunning {
+			continue
+		}
+		if !ns.Listable(s.Namespace, callerNS) {
 			continue
 		}
 		out = append(out, s)

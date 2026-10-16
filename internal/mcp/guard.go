@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"context"
 	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
 )
 
@@ -38,11 +40,18 @@ type toolGuard struct {
 // (session_start, shell_detect, the extension tools themselves) legitimately
 // operate outside any existing session, and gating them would have nothing to
 // gate against.
-func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.CallToolResult {
+//
+// ctx carries the caller's namespace (see namespace.go). It is a second, coarser
+// gate than the Restriction: a Restriction trims what a session may do, and this
+// decides whether the caller may reach the session at all. Both live here rather
+// than in the handlers so every tool that names a session is covered by
+// construction, including one added later.
+func (g toolGuard) check(ctx context.Context, toolName string, request mcpgo.CallToolRequest) *mcpgo.CallToolResult {
 	args := request.GetArguments()
 	if args == nil || g.server == nil {
 		return nil
 	}
+	callerNS := callerNamespace(ctx)
 
 	// A shell-addressed tool resolves through its parent session, since the
 	// restriction is a property of the container the shell was created under.
@@ -50,6 +59,9 @@ func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.
 		sess := g.sessionForShellID(shellID)
 		if sess == nil {
 			return nil // an unresolvable id is the handler's error to report
+		}
+		if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
+			return bad
 		}
 		return g.checkSession(sess, toolName, args)
 	}
@@ -68,6 +80,9 @@ func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.
 				if sess == nil {
 					continue
 				}
+				if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
+					return bad
+				}
 				if bad := g.checkSession(sess, toolName, args); bad != nil {
 					return bad
 				}
@@ -77,6 +92,9 @@ func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.
 		sess := g.sessionForSessionID(sessionID)
 		if sess == nil {
 			return nil
+		}
+		if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
+			return bad
 		}
 		return g.checkSession(sess, toolName, args)
 	}
@@ -90,15 +108,37 @@ func (g toolGuard) check(toolName string, request mcpgo.CallToolRequest) *mcpgo.
 	// same managers the handlers use.
 	if id := getString(args, "forward_id", ""); id != "" {
 		if sess := g.sessionForForwardID(id); sess != nil {
+			if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
+				return bad
+			}
 			return g.checkSession(sess, toolName, args)
 		}
 	}
 	if id := getString(args, "rule_id", ""); id != "" {
 		if sess := g.sessionForRuleID(id); sess != nil {
+			if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
+				return bad
+			}
 			return g.checkSession(sess, toolName, args)
 		}
 	}
 	return nil
+}
+
+// refuseForeignNamespace is the isolation gate: a caller that claimed a namespace
+// may only touch resources carrying it. It is a separate function from
+// checkSession because the two answer different questions — "may this caller
+// reach it" and "may this session do it" — and because the answer for a refusal
+// must not depend on the session's whitelist, which is somebody else's business.
+//
+// The message names what the caller is, not what the resource is: an id it was
+// handed once must not become a way to enumerate other namespaces by reading
+// error text.
+func refuseForeignNamespace(sess *session.Session, callerNS string) *mcpgo.CallToolResult {
+	if sess == nil || ns.Reachable(sess.Namespace, callerNS) {
+		return nil
+	}
+	return toolError(CodeForbidden, "%s", ns.ForbiddenForeign(callerNS))
 }
 
 // sessionForForwardID resolves the session a forward belongs to: a forward is
@@ -175,6 +215,9 @@ func (g toolGuard) sessionForSessionID(id string) *session.Session {
 
 // checkSession applies one session's whitelist to the call: the tool itself,
 // then every path argument the file tools carry.
+// checkSession enforces a session's Restriction before a tool handler runs.
+// The namespace check is separate and comes first: a caller that may not reach
+// the session at all is not told what the session's whitelist says.
 func (g toolGuard) checkSession(sess *session.Session, toolName string, args map[string]any) *mcpgo.CallToolResult {
 	r := sess.Restriction()
 	if !r.AllowsTool(toolName) {

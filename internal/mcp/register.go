@@ -103,9 +103,14 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 	s.mcpServer = mcpServer
 	// Both transports lift the request's own origin into the context, so a tools/list
 	// answer can name the address that client actually reached.
-	s.sseServer = mcpserver.NewSSEServer(mcpServer, append(s.sseOpts, mcpserver.WithSSEContextFunc(withRequestOrigin))...)
+	// Both transports lift the request's own origin into the context, so a tools/list
+	// answer can name the address that client actually reached — and the caller's
+	// namespace claim, which is what scopes its sessions. mcp-go's option is a
+	// single-slot setter, so the two are composed into one function rather than
+	// passed one after the other: the second would replace the first.
+	s.sseServer = mcpserver.NewSSEServer(mcpServer, append(s.sseOpts, mcpserver.WithSSEContextFunc(withRequestContext))...)
 	// Streamable HTTP (MCP spec): mount at /stream for clients such as Open WebUI.
 	// Do not use WithStreamableHTTPServer(mainSrv) here — Shutdown must not close the shared listener.
-	s.streamServer = mcpserver.NewStreamableHTTPServer(mcpServer, mcpserver.WithHTTPContextFunc(withRequestOrigin))
+	s.streamServer = mcpserver.NewStreamableHTTPServer(mcpServer, mcpserver.WithHTTPContextFunc(withRequestContext))
 	return s
 }

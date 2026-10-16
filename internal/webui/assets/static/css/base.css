@@ -479,6 +479,24 @@
     text-transform: none;
   }
   .sess-sid-line.is-pending:hover { color: var(--text-muted); text-decoration: none; }
+  /* The agent chip: a session an agent claimed a namespace for says so on the
+     name line, so two agents' work is tellable apart without opening either.
+     It is a label, not a control: no pointer, no hover state. */
+  .sess-client {
+    flex-shrink: 0;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-elev);
+    color: var(--text-muted);
+    font-size: 10px;
+    line-height: 16px;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .sess-copy-btn {
     flex-shrink: 0;
     width: 22px;

@@ -4,6 +4,12 @@
 
 ### 新增
 
+- **调用方命名空间：多 agent 共用实例时不再互相踩**。MCP 请求带一个 `X-Termcp-Namespace: <name>` 头，这个调用方就被圈进自己的命名空间：`session_start` 建的会话打上 `ns:<name>` 标记（随 manifest 持久化，重启后仍在），`session_list` **只返回自己的**会话，按 id 驱动别人的会话是 `forbidden` 而不是“找不到”（后者会让人去查自己的 id）。名字限字母/数字/`-_.`、最长 64；非法值不会静默降级为“无命名空间”（那会反而把共享视图交出去），而是拒绝一切会话。
+
+  **未声明命名空间 = 实例所有者，不是租户**：浏览器、stdio 桥、没设头的 agent 保持今天的行为，包括“扩展会话不出现在 `session_list` 里，但已有 id 仍可用”这条扩展文档已经承诺的契约。这个特性解决的是两个 agent 互相冲突，而不是向所有者隐藏 agent —— 所以眼前的 agent 会话仍会出现在面板上，只是多一个名字胶囊告诉你它属于谁。基础设施（扩展层）会话对命名空间调用方一律拒绝：否则一个租户就能去驱动所有扩展共享的那个 MCP server。
+
+  两半必须同时成立，而它们问的是不同的问题：`ns.Listable`（列表看不看得见）与 `ns.Reachable`（按 id 碰不碰得到）。只过滤列表是一层帘子 —— 一个从日志、截图或上一轮对话里拿到过的 id 就能掀开。`ns:` 前缀把调用方空间与 termcp 自己的基础设施空间（`ext:`）拆成不相交的两半，所以“agent 声称自己叫 ext”不会被当成扩展层。
+
 - **扩展可以直接接一个 HTTP MCP 端点，不另外起进程**。`kind=mcp` 的模板现在可以给 `url`（可选 `headers`）而不是 `command`/`args`：termcp 自己的桥跑在会话那条 pipe 通道上，把行协议转发到端点，因此**哪个主机上都不需要装第二个二进制、也不需要 PATH 里有 termcp**，凭据也不用写进命令行。路径以 `/sse` 结尾选 SSE 传输，其余走 streamable HTTP；`headers` 是每个请求都带的，服务端要 `X-Api-Key` 这类 header 就写这里。因为桥是 termcp 自己的进程，这种模板要求 `target = "internal"`（端点从本机可达），`url` 与 `command` 互斥，两者都写或都不写给 `mode=pipe` 都会在保存时被拒。
 
 - **内置命令（in-process command）**：内置 SSH server 现在可以注册“在自己进程里服务”的命令，客户端 exec 到这个名字时不会 fork、也不会查 PATH，而是直接把通道交给注册的 handler（`sshserver.Server.RegisterCommand`）。`termcp-mcp-bridge` 是第一个用户，也是上面那条扩展的载体——`internal/mcpbridge` 的桥因此能被复用成通道上的一个“程序”，而不是只能作为一个独立进程存在。桥同时支持自定义 header（`Config.Headers`）。

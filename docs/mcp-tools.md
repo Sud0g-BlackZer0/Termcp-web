@@ -34,6 +34,25 @@ MCP resources, and a `learn-api` prompt:
 
 两个文档端点在开启鉴权后仍可**无凭据**获取（仅 GET/HEAD，纯静态、无数据）；其余所有面（REST/MCP/WS/Web UI）依旧要求 token。
 
+## 调用方命名空间（namespace）
+
+多个 agent 共用一个实例时，默认它们看到的是同一批会话（全局单例），于是两个 agent 很容易互相碰到对方的终端。给 MCP 请求加一个请求头即可把调用方圈进自己的命名空间：
+
+```
+X-Termcp-Namespace: alice
+```
+
+| 行为 | 未声明（默认） | 声明了 `alice` |
+|------|----------------|----------------|
+| `session_list` | 所有非基础设施会话 | 只有 `alice` 自己开的会话 |
+| `session_start` | 普通会话 | 会话打上 `ns:alice` 标记（随 manifest 持久化） |
+| 按 id 操作（`shell_input` 等） | 任何会话（含扩展会话，只要手里有 id） | **只有 `ns:alice`**，否则 `forbidden` |
+| 扩展/基础设施会话 | 可（持有 handle 时） | 拒绝 |
+
+未声明命名空间的调用方是**实例所有者**（浏览器、stdio 桥、没设头的 agent），不是租户：它保持今天的行为（基础设施会话不进 `session_list`，但已有 id 仍可用，这正是扩展文档承诺的）。这个特性解决的是“两个 agent 互相冲突”，而不是“向所有者隐藏 agent”。
+
+名字限字母/数字/`-_.`，最长 64；非法值不会静默降级成“无命名空间”（那会反而拿到共享视图），而是拒绝一切会话。`ns:` 前缀是内部的，客户端只传裸名。stdio 桥默认不带头，要隔离就自己包一层 HTTP 客户端或在桥上加头（`Config.Headers` 已支持）。
+
 ## 工具懒加载（deferred tool loading）
 
 Termcp 的 31 个工具按"热路径 / 低频面"分成两类。MCP 标准的 `defer_loading` 标记可以让客户端**按需加载**低频工具的 Schema，但这套机制**默认关闭**：

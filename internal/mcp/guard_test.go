@@ -70,7 +70,7 @@ func TestGuardAllowsUnrestrictedSession(t *testing.T) {
 
 	// Tools the whitelist of a skill extension would forbid all pass here.
 	for _, tool := range []string{"file_write", "file_delete", "session_terminate"} {
-		if bad := (toolGuard{server: s}).check(tool, makeRequest(map[string]any{
+		if bad := (toolGuard{server: s}).check(context.Background(), tool, makeRequest(map[string]any{
 			"session_id":  sid,
 			"remote_path": "/etc/shadow",
 		})); bad != nil {
@@ -87,7 +87,7 @@ func TestGuardRefusesToolsOutsideWhitelist(t *testing.T) {
 	sid := guardTestSession(t, s, []string{"file_read", "file_stat"}, []string{"~/skills/foo/"})
 
 	for _, tool := range []string{"file_read", "file_stat"} {
-		if bad := (toolGuard{server: s}).check(tool, makeRequest(map[string]any{
+		if bad := (toolGuard{server: s}).check(context.Background(), tool, makeRequest(map[string]any{
 			"session_id":  sid,
 			"remote_path": "~/skills/foo/SKILL.md",
 		})); bad != nil {
@@ -97,7 +97,7 @@ func TestGuardRefusesToolsOutsideWhitelist(t *testing.T) {
 	}
 
 	for _, tool := range []string{"file_write", "file_delete", "shell_input", "session_terminate"} {
-		bad := (toolGuard{server: s}).check(tool, makeRequest(map[string]any{
+		bad := (toolGuard{server: s}).check(context.Background(), tool, makeRequest(map[string]any{
 			"session_id":  sid,
 			"remote_path": "~/skills/foo/SKILL.md",
 		}))
@@ -118,7 +118,7 @@ func TestGuardRefusesPathOutsideWhitelist(t *testing.T) {
 	s := newTestServer(t)
 	sid := guardTestSession(t, s, []string{"file_read"}, []string{"~/skills/foo/"})
 
-	bad := (toolGuard{server: s}).check("file_read", makeRequest(map[string]any{
+	bad := (toolGuard{server: s}).check(context.Background(), "file_read", makeRequest(map[string]any{
 		"session_id":  sid,
 		"remote_path": "/etc/passwd",
 	}))
@@ -134,7 +134,7 @@ func TestGuardRefusesPathOutsideWhitelist(t *testing.T) {
 	}
 
 	// The same tool on an allowed path passes.
-	if bad := (toolGuard{server: s}).check("file_read", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "file_read", makeRequest(map[string]any{
 		"session_id":  sid,
 		"remote_path": "~/skills/foo/scripts/run.sh",
 	})); bad != nil {
@@ -158,13 +158,13 @@ func TestGuardResolvesByShellID(t *testing.T) {
 		t.Fatal("test session has no primary shell")
 	}
 
-	if bad := (toolGuard{server: s}).check("shell_output", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "shell_output", makeRequest(map[string]any{
 		"shell_id": shellID,
 	})); bad != nil {
 		_, msg := decodeToolError(t, bad)
 		t.Errorf("shell_output on the session's own shell was refused: %s", msg)
 	}
-	if bad := (toolGuard{server: s}).check("shell_input", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "shell_input", makeRequest(map[string]any{
 		"shell_id": shellID,
 	})); bad == nil {
 		t.Error("shell_input should be refused on a session that allows only shell_output")
@@ -185,7 +185,7 @@ func TestGuardIgnoresSessionlessTools(t *testing.T) {
 		{"ssh_config": "internal"},
 		{},
 	} {
-		if bad := (toolGuard{server: s}).check("session_start", makeRequest(args)); bad != nil {
+		if bad := (toolGuard{server: s}).check(context.Background(), "session_start", makeRequest(args)); bad != nil {
 			t.Errorf("session_start with %v was refused", args)
 		}
 	}
@@ -197,7 +197,7 @@ func TestGuardIgnoresSessionlessTools(t *testing.T) {
 // sees comes from the tool with its proper code.
 func TestGuardUnknownSessionPasses(t *testing.T) {
 	s := newTestServer(t)
-	bad := (toolGuard{server: s}).check("file_read", makeRequest(map[string]any{
+	bad := (toolGuard{server: s}).check(context.Background(), "file_read", makeRequest(map[string]any{
 		"session_id": "no-such-session",
 	}))
 	if bad != nil {
@@ -266,7 +266,7 @@ func TestGuardResolvesEverySpellingOfTheTarget(t *testing.T) {
 		{"shell_id locator", map[string]any{"shell_id": locatorShell}},
 	}
 	for _, tc := range cases {
-		if bad := (toolGuard{server: s}).check("file_write", makeRequest(tc.args)); bad == nil {
+		if bad := (toolGuard{server: s}).check(context.Background(), "file_write", makeRequest(tc.args)); bad == nil {
 			t.Errorf("%s: file_write must be refused", tc.name)
 		} else if code, _ := decodeToolError(t, bad); code != CodeForbidden {
 			t.Errorf("%s: code = %q, want %q", tc.name, code, CodeForbidden)
@@ -283,7 +283,7 @@ func TestGuardResolvesEverySpellingOfTheTarget(t *testing.T) {
 			}
 			args[k] = v
 		}
-		if bad := (toolGuard{server: s}).check("file_stat", makeRequest(args)); bad == nil {
+		if bad := (toolGuard{server: s}).check(context.Background(), "file_stat", makeRequest(args)); bad == nil {
 			t.Errorf("%s: file_stat outside the path whitelist must be refused", tc.name)
 		}
 	}
@@ -298,7 +298,7 @@ func TestGuardGatesLocalPath(t *testing.T) {
 	s := newTestServer(t)
 	sid := guardTestSession(t, s, []string{"file_read", "file_write"}, []string{"~/skills/foo/"})
 
-	bad := (toolGuard{server: s}).check("file_read", makeRequest(map[string]any{
+	bad := (toolGuard{server: s}).check(context.Background(), "file_read", makeRequest(map[string]any{
 		"session_id":  sid,
 		"remote_path": "~/skills/foo/SKILL.md",
 		"local_path":  "/home/someone/.ssh/id_rsa",
@@ -316,7 +316,7 @@ func TestGuardGatesLocalPath(t *testing.T) {
 
 	// Inside the whitelist it passes. A local download directory is an author's
 	// choice, so the rule must be usable rather than a blanket ban.
-	if bad := (toolGuard{server: s}).check("file_read", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "file_read", makeRequest(map[string]any{
 		"session_id":  sid,
 		"remote_path": "~/skills/foo/SKILL.md",
 		"local_path":  "~/skills/foo/SKILL.md",
@@ -370,14 +370,14 @@ func TestGuardResolvesIndirectResourceIDs(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	if bad := (toolGuard{server: s}).check("forward", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "forward", makeRequest(map[string]any{
 		"action": "close", "forward_id": fw.ForwardID,
 	})); bad == nil {
 		t.Error("forward(close) on a session that granted no forwards must be refused")
 	} else if code, _ := decodeToolError(t, bad); code != CodeForbidden {
 		t.Errorf("forward(close) code = %q, want %q", code, CodeForbidden)
 	}
-	if bad := (toolGuard{server: s}).check("shell_notify", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "shell_notify", makeRequest(map[string]any{
 		"action": "unregister", "rule_id": rule.ID,
 	})); bad == nil {
 		t.Error("shell_notify(unregister) on a session that granted no shell_notify must be refused")
@@ -397,13 +397,13 @@ func TestGuardResolvesIndirectResourceIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if bad := (toolGuard{server: s}).check("forward", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "forward", makeRequest(map[string]any{
 		"action": "close", "forward_id": fw2.ForwardID,
 	})); bad != nil {
 		_, msg := decodeToolError(t, bad)
 		t.Errorf("an unrestricted session's forward was refused: %s", msg)
 	}
-	if bad := (toolGuard{server: s}).check("shell_notify", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "shell_notify", makeRequest(map[string]any{
 		"action": "unregister", "rule_id": rule2.ID,
 	})); bad != nil {
 		_, msg := decodeToolError(t, bad)
@@ -411,7 +411,7 @@ func TestGuardResolvesIndirectResourceIDs(t *testing.T) {
 	}
 
 	// An id nothing owns is the handler's not-found error, not a refusal.
-	if bad := (toolGuard{server: s}).check("forward", makeRequest(map[string]any{
+	if bad := (toolGuard{server: s}).check(context.Background(), "forward", makeRequest(map[string]any{
 		"action": "close", "forward_id": "fw-does-not-exist",
 	})); bad != nil {
 		t.Error("an unknown forward_id should reach the handler, not be refused by the guard")

@@ -56,6 +56,11 @@ func (s *Server) handleStartSession(ctx context.Context, request mcpgo.CallToolR
 		DefaultShell: sshconfig.EffectiveDefaultShell(ent),
 		Approval:     sshconfig.EffectiveApproval(ent),
 		OnExit:       session.OnExitPolicy(strings.TrimSpace(strings.ToLower(getString(args, "on_exit", "")))),
+		// A session started by a namespaced caller belongs to that caller: the
+		// namespace travels with the resource, which is what makes the isolation
+		// survive a restart (the tag is persisted in the manifest) and what makes
+		// listing, by-id reach and the guard agree.
+		Namespace: callerNamespace(ctx),
 		// An aborted MCP call cancels this context, and the dial stops with it
 		// rather than registering a session whose caller has already gone away.
 		Ctx: ctx,

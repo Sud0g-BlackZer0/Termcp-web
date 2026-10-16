@@ -16,11 +16,11 @@ func withLogging(name string, h toolHandler, s *Server) toolHandler {
 	guard := toolGuard{server: s}
 	return func(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		// The restriction gate runs before anything else and before the handler
-		// is even entered: a call that a session's whitelist refuses must not
-		// reach the tool at all. Guarding here rather than in each handler means
-		// every tool that acts on an existing session is covered by construction,
-		// including ones added later.
-		if bad := guard.check(name, request); bad != nil {
+		// is even entered: a call that a session's whitelist — or another caller's
+		// namespace — refuses must not reach the tool at all. Guarding here rather
+		// than in each handler means every tool that acts on an existing session is
+		// covered by construction, including ones added later.
+		if bad := guard.check(ctx, name, request); bad != nil {
 			slog.DebugContext(ctx, "tool refused by session restriction",
 				append([]any{"tool", name}, restrictionAttrs(request)...)...)
 			return bad, nil
