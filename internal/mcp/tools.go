@@ -115,6 +115,8 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 		mcpgo.WithString("description"),
 		mcpgo.WithString("command", mcpgo.Description("create/update: the executable a pipe or run-and-exit session runs; a pipe channel has no fallback shell, so mode=pipe requires one")),
 		mcpgo.WithArray("args", mcpgo.Description("create/update: argv after command; omit keeps the stored value, [] clears it"), mcpgo.WithStringItems()),
+		mcpgo.WithString("url", mcpgo.Description("create/update: an HTTP MCP endpoint to relay instead of a command (SSE if the path ends in /sse); target must be \"internal\"")),
+		mcpgo.WithObject("headers", mcpgo.Description("create/update: request headers for url (name -> value); {} clears")),
 		mcpgo.WithString("mode", mcpgo.Description("create/update: pty or pipe; kind=skill leaves it empty, meaning no shell at all"), mcpgo.Enum("pty", "pipe")),
 		mcpgo.WithNumber("rows", mcpgo.Description("create/update: pty height (0 = default 24)")),
 		mcpgo.WithNumber("cols", mcpgo.Description("create/update: pty width (0 = default 80)")),

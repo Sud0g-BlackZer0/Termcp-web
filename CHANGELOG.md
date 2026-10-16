@@ -4,6 +4,12 @@
 
 ### 新增
 
+- **扩展可以直接接一个 HTTP MCP 端点，不另外起进程**。`kind=mcp` 的模板现在可以给 `url`（可选 `headers`）而不是 `command`/`args`：termcp 自己的桥跑在会话那条 pipe 通道上，把行协议转发到端点，因此**哪个主机上都不需要装第二个二进制、也不需要 PATH 里有 termcp**，凭据也不用写进命令行。路径以 `/sse` 结尾选 SSE 传输，其余走 streamable HTTP；`headers` 是每个请求都带的，服务端要 `X-Api-Key` 这类 header 就写这里。因为桥是 termcp 自己的进程，这种模板要求 `target = "internal"`（端点从本机可达），`url` 与 `command` 互斥，两者都写或都不写给 `mode=pipe` 都会在保存时被拒。
+
+- **内置命令（in-process command）**：内置 SSH server 现在可以注册“在自己进程里服务”的命令，客户端 exec 到这个名字时不会 fork、也不会查 PATH，而是直接把通道交给注册的 handler（`sshserver.Server.RegisterCommand`）。`termcp-mcp-bridge` 是第一个用户，也是上面那条扩展的载体——`internal/mcpbridge` 的桥因此能被复用成通道上的一个“程序”，而不是只能作为一个独立进程存在。桥同时支持自定义 header（`Config.Headers`）。
+
+- **`extensions.md` 与 `extension` 工具补上端点形态**：`url`/`headers` 进了工具 schema（`{}` 清空 headers），`action=get` 会返回这两个字段，Web UI 的新建模板注释里也给出了现成写法；`kind=mcp` + `url` 的模板会自动带上描述端点形态的 notes（作者自己写的 notes 永不被覆盖，只有仍是预设文本的才会随形态更新）。
+
 - **下载 URL 可以指定响应 header**。`file_urls` 新增 `response_headers`（对象，如 `{"Content-Disposition": "attachment; filename=\"x.png\""}`），它被拼进返回的 `download_url` 的 query（`?h.<Name>=<value>`），所以**谁打开这个链接都会带上它** —— curl、浏览器、转发给别人的链接，不需要另外约定一个通道传 header。REST 侧对应 `GET /api/sessions/{id}/files/download` 的同名参数；名字不是合法 HTTP token、值不是字符串、或值里带换行会 400（header 注入），`Content-Length`/`Content-Range`/`Transfer-Encoding`/`Connection`/`Trailer` 属于服务端、请求了也会被丢弃，其馀同名 header 覆盖服务端默认值。
 
 ## v0.2.8-rc.1 — 2026-10-15

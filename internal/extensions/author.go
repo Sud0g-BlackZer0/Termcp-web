@@ -53,6 +53,16 @@ func ApplyArgs(ext *Extension, args map[string]any, update bool) error {
 		}
 		ext.Args = v
 	}
+	if hasOpt(args, "url") {
+		ext.URL = strings.TrimSpace(optString(args, "url", ""))
+	}
+	if hasOpt(args, "headers") {
+		v, err := optStringMap(args, "headers")
+		if err != nil {
+			return err
+		}
+		ext.Headers = v
+	}
 	if hasOpt(args, "allow") {
 		v, err := optStringSlice(args, "allow")
 		if err != nil {
@@ -91,6 +101,15 @@ func ApplyArgs(ext *Extension, args map[string]any, update bool) error {
 	}
 	if !update {
 		ApplyDefaults(ext)
+	}
+	// A stored template that still carries its kind's preset recipe and has just
+	// changed shape (stdio server → HTTP endpoint, or back) gets the recipe that
+	// describes it now. An author's own notes are never touched — isPresetNotes is
+	// what tells the two apart — and neither is a call that named `notes` at all,
+	// including one that cleared it: "give me the default" and "leave it empty"
+	// are different requests, and only the first is what an absent key means.
+	if update && !hasOpt(args, "notes") && isPresetNotes(ext.Notes) {
+		ext.Notes = PresetNotes(ext)
 	}
 	ext.Normalize()
 	return nil
@@ -198,4 +217,30 @@ func optStringSlice(args map[string]any, key string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("%s must be an array of strings, got %T", key, v)
 	}
+}
+
+// optStringMap reads a header table. A non-string value is refused rather than
+// stringified: a header is a credential or an identifier, and `600` becoming
+// "600" is the kind of help that hides a typo.
+func optStringMap(args map[string]any, key string) (map[string]string, error) {
+	v, ok := args[key]
+	if !ok {
+		return nil, nil
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an object of name/value pairs, got %T", key, v)
+	}
+	if len(m) == 0 {
+		return nil, nil // an empty table clears the field, like an empty array
+	}
+	out := make(map[string]string, len(m))
+	for name, item := range m {
+		s, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%s] must be a string, got %v", key, name, item)
+		}
+		out[name] = s
+	}
+	return out, nil
 }

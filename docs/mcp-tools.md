@@ -461,10 +461,12 @@ ssh_config(action=list)
 |------|------|------|------|
 | `action` | string | **是** | `list` / `get` / `create` / `update` / `delete` / `retry` |
 | `name` | string | 条件 | 除 list 外都必填（`[A-Za-z0-9_-]`，最长 64） |
-| `kind` | string | 否 | create：`mcp`（stdio MCP server，pipe shell）/ `skill`（只读文件窗口，无 shell）/ `prompt`（交互终端）/ `custom`；决定未传字段的预设值 |
-| `target` | string | 否 | create 必填：ssh_config profile 名，或 `internal`（本机 loopback） |
+| `kind` | string | 否 | create：`mcp`（MCP server：跑一个 stdio 程序，或用一个 HTTP 端点）/ `skill`（只读文件窗口，无 shell）/ `prompt`（交互终端）/ `custom`；决定未传字段的预设值 |
+| `target` | string | 否 | create 必填：ssh_config profile 名，或 `internal`（本机 loopback）。`kind=mcp` + `url` 只能用 `internal` |
 | `mode` | string | 否 | `pty` / `pipe`；`skill` 留空 = **不要 shell**（只有 SFTP 与转发） |
-| `command` / `args` | string / array | 否 | pipe 或一次性命令跑什么。pipe 没有登录 shell 可回退，因此 `mode=pipe` 必须给 `command` |
+| `command` / `args` | string / array | 否 | pipe 或一次性命令跑什么。pipe 没有登录 shell 可回退，因此 `mode=pipe` 必须给 `command`（或 `url`）。与 `url` 互斥 |
+| `url` | string | 否 | HTTP MCP 端点：**不另外起进程**，由 termcp 自己的桥在会话的 pipe 通道上转发（路径以 `/sse` 结尾 = SSE 传输）。与 `command` 互斥，且要求 `target="internal"` |
+| `headers` | object | 否 | `url` 的请求 header（name -> value），例如服务端要的 `X-Api-Key`；`{}` 清空 |
 | `allow` | array | 否 | 工具白名单。**空 = 不限制**；列了就是该会话能接受的完整集合 |
 | `paths` | array | 否 | 文件工具可触及的路径：前缀（`/srv/app/`）、glob（`*.md`）或正则（`re:^/srv/(app\|logs)/`）。`kind=skill` 至少一条。`local_path`（下载到本机的路径）也走这张表 |
 | `notes` | string | 否 | 给 agent 看的操作说明，`action=get` 会返回；第一次驱动前读它 |

@@ -27,6 +27,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/forward"
 	"github.com/open-mcp-ai/termcp/internal/logansi"
 	mcpmod "github.com/open-mcp-ai/termcp/internal/mcp"
+	"github.com/open-mcp-ai/termcp/internal/mcpbridge"
 	"github.com/open-mcp-ai/termcp/internal/message"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
@@ -316,6 +317,11 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	var sshSrv *sshserver.Server
 	if !cfg.NoInternal {
 		sshSrv = sshserver.New()
+		// The in-process MCP bridge is a command the internal server serves
+		// itself: an extension template reaches an HTTP MCP server over its own
+		// channel with no second binary and no PATH lookup (see
+		// internal/mcpbridge.RegisterBuiltin).
+		mcpbridge.RegisterBuiltin(sshSrv)
 		if err := sshSrv.Start(); err != nil {
 			slog.Error("failed to start SSH server", "err", err)
 			os.Exit(1)
