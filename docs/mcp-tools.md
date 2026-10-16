@@ -568,8 +568,20 @@ password = "placeholder2"
 | `file_delete` | 删除文件或空目录 |
 | `file_rename` | 移动/重命名 |
 | `file_mkdir` | 创建目录（含父目录） |
-| `file_urls` | 获取 HTTP 下载/上传 URL |
+| `file_urls` | 获取 HTTP 下载/上传 URL（可指定下载响应的 header） |
 | `file_getwd` | SFTP 工作目录（不是 shell 的 `pwd`） |
+
+### file_urls
+
+返回 `{ download_url, upload_url, session_id, remote_path }`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_id` | string | **是** | |
+| `remote_path` | string | **是** | 要下载/上传的远端路径 |
+| `response_headers` | object | 否 | 下载时响应必须带的 header，如 `{"Content-Disposition": "attachment; filename=\"x.png\""}` |
+
+`response_headers` 被拼进 `download_url` 的 query（`?h.<Name>=<value>`，见 `docs/api.md`），所以**谁打开这个 URL 都会带上它** —— curl、浏览器、别人转发的链接，不需要额外约定一个通道传 header。名字不是合法 HTTP token、值不是字符串、或值里带换行会被拒（header 注入）；`Content-Length`/`Content-Range`/`Transfer-Encoding`/`Connection`/`Trailer` 属于服务端，请求了也会被丢弃，其馀同名 header 覆盖服务端默认值（例如请求的 `Content-Disposition` 覆盖服务端本来是 `attachment; filename=` 的那个）。
 
 ### 低频操作：分组入口（action 枚举）
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### 新增
+
+- **下载 URL 可以指定响应 header**。`file_urls` 新增 `response_headers`（对象，如 `{"Content-Disposition": "attachment; filename=\"x.png\""}`），它被拼进返回的 `download_url` 的 query（`?h.<Name>=<value>`），所以**谁打开这个链接都会带上它** —— curl、浏览器、转发给别人的链接，不需要另外约定一个通道传 header。REST 侧对应 `GET /api/sessions/{id}/files/download` 的同名参数；名字不是合法 HTTP token、值不是字符串、或值里带换行会 400（header 注入），`Content-Length`/`Content-Range`/`Transfer-Encoding`/`Connection`/`Trailer` 属于服务端、请求了也会被丢弃，其馀同名 header 覆盖服务端默认值。
 
 ## v0.2.8-rc.1 — 2026-10-15
 

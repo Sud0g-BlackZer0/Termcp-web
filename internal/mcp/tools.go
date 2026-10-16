@@ -222,9 +222,11 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 	), withLogging("file_mkdir", s.handleFileMakeDir, s))
 
 	mcpServer.AddTool(s.newTool("file_urls",
-		mcpgo.WithDescription("Get HTTP download/upload URLs for a remote file path under a session. Use these URLs for direct curl/wget/browser access."),
+		mcpgo.WithDescription("Get HTTP download/upload URLs for a remote file path under a session. Use these URLs for direct curl/wget/browser access. response_headers are folded into the download URL, so whoever opens it (curl, a browser) gets them."),
 		mcpgo.WithString("session_id", mcpgo.Required()),
 		mcpgo.WithString("remote_path", mcpgo.Required(), mcpgo.Description("Remote file path")),
+		mcpgo.WithObject("response_headers", mcpgo.AdditionalProperties(map[string]any{"type": "string"}),
+			mcpgo.Description("Headers the download answers with, e.g. {\"Content-Disposition\": \"attachment; filename=\\\"x.png\\\"\"}; folded into the URL. Content-Length/Content-Range stay the server's.")),
 	), withLogging("file_urls", s.handleGetFileURLs, s))
 
 	// --- Low-frequency file operations: one tool per parameter family, ---

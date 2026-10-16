@@ -992,6 +992,9 @@ Downloads a file. Supports HTTP Range.
 | Parameter | Type | Meaning |
 |-----------|------|---------|
 | `path` | query | File path |
+| `h.<Name>` | query | Response header the download must carry, e.g. `?h.Content-Disposition=attachment%3B+filename%3D%22x.png%22`. Repeatable; `file_urls` folds its `response_headers` argument into the URL this way. |
+
+Framing headers (`Content-Length`, `Content-Range`, `Transfer-Encoding`, `Connection`, `Trailer`) belong to the stream and cannot be requested; a requested own header overrides the default one (a requested `Content-Disposition` replaces the `attachment; filename=` the server would send).
 
 ```
 Response: application/octet-stream (Range/206 Partial Content supported)
