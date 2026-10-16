@@ -793,6 +793,13 @@ function termcpTerminalOptions() {
     fontWeightBold: weight('--terminal-font-weight-bold', 'bold'),
     lineHeight: number('--terminal-line-height', 1),
     letterSpacing: number('--terminal-letter-spacing', 0),
+    /* Passed to xterm, which repairs a cell it cannot read by moving the text
+       colour's lightness away from the background it was painted on. `ls`
+       colours an other-writable directory blue on green, and eight of the
+       sixteen ANSI slots are the UI's semantic tokens — a hue picked to read
+       on the page, not on another ANSI colour. Without this the light theme
+       renders that cell at a ratio of 1.00 (identical colours). */
+    minimumContrastRatio: number('--terminal-minimum-contrast-ratio', 4.5),
     allowTransparency: !!_themeTerminal.transparent,
     theme: termcpXtermTheme()
   };

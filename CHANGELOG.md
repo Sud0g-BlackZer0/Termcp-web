@@ -18,6 +18,10 @@
 
 - **下载 URL 可以指定响应 header**。`file_urls` 新增 `response_headers`（对象，如 `{"Content-Disposition": "attachment; filename=\"x.png\""}`），它被拼进返回的 `download_url` 的 query（`?h.<Name>=<value>`），所以**谁打开这个链接都会带上它** —— curl、浏览器、转发给别人的链接，不需要另外约定一个通道传 header。REST 侧对应 `GET /api/sessions/{id}/files/download` 的同名参数；名字不是合法 HTTP token、值不是字符串、或值里带换行会 400（header 注入），`Content-Length`/`Content-Range`/`Transfer-Encoding`/`Connection`/`Trailer` 属于服务端、请求了也会被丢弃，其馀同名 header 覆盖服务端默认值。
 
+### 修复
+
+- **终端里叠在一起的颜色不再看不见字**。十六个 ANSI 色里有八个直接取自 UI 的语义色（`--danger`、`--success`……），它们是照着页面底色挑的，彼此之间毫无关系：浅色主题下 `ls` 给「其他人可写目录」的 `34;42`（蓝字、绿底）两个槽正好是同一个颜色，对比度 **1.00** —— 字就在自己的背景里。现在把 xterm 自带的 `minimumContrastRatio` 打开（默认 4.5，即 WCAG AA 正常文字的下限），由 xterm 在渲染时只移动文字色的明度来保证每个格子可读，16 色、256 色立方与真彩色一律适用；没有去手改那十六个十六进制值，因为那既救不了程序自己挑的颜色，也救不了 256 色。想让某个主题自己定，在 `theme.json` 里写 `minimumContrastRatio`（1–21，`1` 关闭）。
+
 ## v0.2.8-rc.1 — 2026-10-15
 
 ### 新增
