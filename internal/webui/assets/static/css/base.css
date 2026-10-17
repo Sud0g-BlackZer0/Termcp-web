@@ -678,3 +678,25 @@
   .form-ok { margin: 0 0 8px; white-space: pre-line; color: var(--success-bright); font-size: .82rem; }
   .sess-fwd-info { display: none; margin-top: 2px; color: var(--text-secondary); font-size: .62rem; text-align: center; }
 
+  /* Connected clients (clients.js): a header dropdown like the theme switch
+     beside it. The panel is bounded and scrolls, because the number of tabs and
+     agents attached to one instance is not something the page controls. */
+  .clients-menu { position: relative; display: inline-flex; }
+  .clients-btn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; border: 1px solid var(--border-subtle); border-radius: 7px; background: var(--bg-elevated); color: var(--text-secondary); cursor: pointer; font-size: 0.8rem; list-style: none; }
+  .clients-btn::-webkit-details-marker { display: none; }
+  .clients-btn:hover { background: var(--bg-card-hover); border-color: var(--border-strong); color: var(--text-primary); }
+  .clients-menu[open] .clients-btn { background: var(--accent-surface); border-color: var(--accent-ring); color: var(--text-primary); }
+  .clients-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .clients-icon { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-surface); }
+  .clients-count { min-width: 17px; padding: 0 5px; border-radius: 9px; background: var(--accent-surface); color: var(--text-primary); font-size: 0.7rem; font-weight: 600; text-align: center; }
+  .clients-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 60; width: min(340px, calc(100vw - 24px)); max-height: 60vh; overflow-y: auto; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); box-shadow: var(--shadow-card-hover); }
+  .clients-row { display: flex; gap: 8px; padding: 7px 8px; border-radius: 7px; }
+  .clients-row + .clients-row { border-top: 1px solid var(--border-subtle); }
+  .clients-badge { flex-shrink: 0; align-self: flex-start; padding: 1px 5px; border-radius: 4px; font-size: 0.62rem; font-weight: 700; letter-spacing: .04em; }
+  .clients-badge-mcp { background: var(--accent-surface); color: var(--text-primary); }
+  .clients-badge-web { background: var(--bg-card-hover); color: var(--text-secondary); }
+  .clients-body { min-width: 0; }
+  .clients-name { font-size: 0.78rem; font-weight: 600; color: var(--text-primary); word-break: break-word; }
+  .clients-meta { font-size: 0.72rem; color: var(--text-secondary); font-family: var(--font-mono); word-break: break-all; }
+  .clients-detail { font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono); word-break: break-all; }
+  .clients-empty { margin: 0; padding: 12px 8px; font-size: 0.76rem; color: var(--text-muted); text-align: center; }

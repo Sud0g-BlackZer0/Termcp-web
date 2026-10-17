@@ -40,6 +40,14 @@ type Server struct {
 	// tool). Set by main to webui.Handler.BroadcastUINotify so this package stays
 	// decoupled from webui. Returns the number of open tabs that received it.
 	uiNotify func(level, title, message, sessionID string, durationSec int) int
+
+	// connections tracks the MCP clients currently attached (see connections.go).
+	// It is fed by mcp-go's session hooks, which is the only place a client
+	// attaching or detaching is observable.
+	connections *connRegistry
+	// connListener is called when that set changes, so the Web UI can refresh
+	// without polling. Set by main to the same broadcast the session list uses.
+	connListener func()
 }
 
 // Option customizes a Server at construction time. Options keep New's signature

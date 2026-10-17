@@ -92,6 +92,13 @@ type uiWS struct {
 
 var errWSSessionNotFound = errors.New("session not found")
 
+// watchCount reports how many sessions this tab is currently streaming.
+func (c *uiWS) watchCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.watch)
+}
+
 // getTerminalShell looks up a shell channel by shell_id.
 //
 // The concrete *ChildShell is returned rather than the TerminalShell interface:
@@ -124,6 +131,15 @@ func (h *Handler) handleWebUIWS(w http.ResponseWriter, r *http.Request) {
 		send:   make(chan []byte, wsSendBuf),
 		watch:  make(map[string]*wsWatchEntry),
 	}
+	// Who is watching: the tab is registered for the life of its socket, and its
+	// watched-session count is read at list time rather than captured here.
+	viewerID := c.h.viewerHub().add(r.RemoteAddr, r.UserAgent(), c.watchCount)
+	defer c.h.viewerHub().remove(viewerID)
+	// The panel is pushed, not polled: an arrival or departure is a change to a
+	// list the page is already showing, exactly like the session list.
+	c.h.sessionHub().broadcast()
+	defer c.h.sessionHub().broadcast()
+
 	go c.writePump()
 	go c.sessionLoop()
 	// Subscribe to UI notification broadcasts (notify_user tool); deliveries land
@@ -166,6 +182,14 @@ func (c *uiWS) enqueueSessions() {
 			}
 			payload["connections"] = conns
 		}
+	}
+	/* Who is attached rides the same frame as the session list. It changes when a
+	   tab opens or closes, or when an MCP client connects or drops — all of which
+	   already wake this loop through the session hub, so there is no second timer
+	   and no polling. */
+	payload["clients"] = c.h.Viewers()
+	if c.h.MCPConnections != nil {
+		payload["mcp_clients"] = c.h.MCPConnections()
 	}
 	if c.h.Extensions != nil {
 		// The right panel renders from the same frame, so a status transition is

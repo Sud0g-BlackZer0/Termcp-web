@@ -1450,6 +1450,42 @@ Response 200:
 { "version": "v0.2.4" }
 ```
 
+### `GET /api/clients`
+
+Reports who is attached to this instance — the question "who is driving it right
+now?". Two lists, because they are two different things:
+
+- `mcp` — MCP clients (agents). `name`/`version` are what the client announced in
+  its `initialize` request and are empty when it announced nothing (the MCP spec
+  makes `clientInfo` optional); `namespace` is the claim it made with
+  `X-Termcp-Namespace`, when it made one; `session_id` is the transport session
+  id, not a termcp session id. Rows come from mcp-go's session hooks, so a row
+  exists exactly as long as the client holds a live MCP session.
+- `webui` — browser tabs holding the Web UI socket: the address they came from
+  (port stripped), their user agent, how many sessions they are streaming, and
+  when they attached. A closed tab disappears. Plain HTTP callers are not listed:
+  a request has no lifetime, so listing one would report "someone was here" as
+  "someone is connected".
+
+Distinct from `GET /api/connections`, which lists the stored SSH **profiles** —
+the hosts you can connect to, not the callers connected here.
+
+```
+GET /api/clients
+
+Response 200:
+{
+  "mcp": [
+    { "session_id": "7f3c...", "name": "claude-ai", "version": "0.1.0",
+      "namespace": "ns:alice", "connected_at": "2026-10-17T08:12:04Z" }
+  ],
+  "webui": [
+    { "id": "1", "addr": "10.0.0.5", "user_agent": "Mozilla/5.0 ...",
+      "watching": 3, "since": "2026-10-17T08:10:00Z" }
+  ]
+}
+```
+
 ### `GET /api/daemon`
 
 Reports what instance this is: whether it runs as a daemon (a detached instance

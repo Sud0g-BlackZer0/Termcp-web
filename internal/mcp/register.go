@@ -32,10 +32,11 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 		sessMgr.AddOnDeadHook(forwardMgr.CloseBySession)
 	}
 	s := &Server{
-		sessMgr:    sessMgr,
-		msgMgr:     msgMgr,
-		sshConfigs: sshConfigs,
-		forwardMgr: forwardMgr,
+		sessMgr:     sessMgr,
+		msgMgr:      msgMgr,
+		sshConfigs:  sshConfigs,
+		forwardMgr:  forwardMgr,
+		connections: newConnRegistry(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -53,6 +54,32 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 		// Every published address follows the request that asked for it, so one
 		// instance behind several addresses tells each client its own.
 		mcpserver.WithHooks(&mcpserver.Hooks{
+			// Who is attached. mcp-go registers a session before the client has
+			// said anything, so the register hook can only record the session
+			// object; the client's name arrives with initialize, and the caller's
+			// namespace claim arrives in that same request's context.
+			OnRegisterSession: []mcpserver.OnRegisterSessionHookFunc{
+				func(_ context.Context, session mcpserver.ClientSession) {
+					s.connections.add(session)
+					s.notifyConnectionsChanged()
+				},
+			},
+			OnUnregisterSession: []mcpserver.OnUnregisterSessionHookFunc{
+				func(_ context.Context, session mcpserver.ClientSession) {
+					s.connections.remove(session)
+					s.notifyConnectionsChanged()
+				},
+			},
+			OnAfterInitialize: []mcpserver.OnAfterInitializeFunc{
+				func(ctx context.Context, _ any, _ *mcpgo.InitializeRequest, _ *mcpgo.InitializeResult) {
+					// The session is on the context for the request being answered,
+					// which is how a per-request fact (the namespace claim) is tied
+					// to a session-level row.
+					if session := mcpserver.ClientSessionFromContext(ctx); session != nil {
+						s.connections.noteNamespace(session.SessionID(), callerNamespace(ctx))
+					}
+				},
+			},
 			OnAfterListTools: []mcpserver.OnAfterListToolsFunc{
 				func(ctx context.Context, _ any, _ *mcpgo.ListToolsRequest, result *mcpgo.ListToolsResult) {
 					s.decorateTools(ctx, result)

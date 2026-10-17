@@ -420,6 +420,18 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	// Bridge the MCP notify_user tool to the browser UI (toast/highlight push).
 	mcpSrv.SetExtensionReconciler(extReconciler)
 	mcpSrv.SetUINotifier(webuiH.BroadcastUINotify)
+	// Who is attached: the Web UI lists MCP clients from the MCP server and its
+	// own tabs from its own registry. The listener wakes the same broadcast the
+	// session list uses, so a client connecting shows up without a poll.
+	webuiH.MCPConnections = func() []any {
+		conns := mcpSrv.Connections()
+		out := make([]any, len(conns))
+		for i, c := range conns {
+			out[i] = c
+		}
+		return out
+	}
+	mcpSrv.SetConnectionsListener(webuiH.NotifyClientsChanged)
 
 	// An approval decision must also wake an agent parked on shell_notify, so it
 	// learns the outcome without polling. Fan-out stays in one place: the web UI

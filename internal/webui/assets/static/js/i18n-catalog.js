@@ -95,6 +95,12 @@ var I18N_CATALOG = {
     'notify.dismiss': 'Dismiss notification',
     'update.available': 'v{version} is available',
     'update.dismiss': 'Dismiss update notice',
+    'clients.label': 'Clients',
+    'clients.empty': 'Nothing connected yet.',
+    'clients.unnamed': 'unnamed client',
+    'clients.namespace': 'namespace {ns}',
+    'clients.since': 'since {time}',
+    'clients.watching': '{count} sessions',
     'notify.sessionPrefix': 'session {id}',
 
     /* --- shared words --- */
@@ -532,6 +538,12 @@ var I18N_CATALOG = {
     'notify.dismiss': '关闭通知',
     'update.available': 'v{version} 已发布',
     'update.dismiss': '关闭更新提示',
+    'clients.label': '连接者',
+    'clients.empty': '还没有连接者。',
+    'clients.unnamed': '未具名客户端',
+    'clients.namespace': '命名空间 {ns}',
+    'clients.since': '自 {time}',
+    'clients.watching': '{count} 个会话',
     'notify.sessionPrefix': '会话 {id}',
 
     /* --- shared words --- */
@@ -969,6 +981,12 @@ var I18N_CATALOG = {
     'notify.dismiss': '關閉通知',
     'update.available': 'v{version} 已發布',
     'update.dismiss': '關閉更新提示',
+    'clients.label': '連線者',
+    'clients.empty': '還沒有連線者。',
+    'clients.unnamed': '未具名用戶端',
+    'clients.namespace': '命名空間 {ns}',
+    'clients.since': '自 {time}',
+    'clients.watching': '{count} 個工作階段',
     'notify.sessionPrefix': '工作階段 {id}',
 
     /* --- shared words --- */
