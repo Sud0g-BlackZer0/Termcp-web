@@ -2,8 +2,10 @@ package webui
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,7 +29,7 @@ func TestViewerRegistryListsAttachedTabs(t *testing.T) {
 
 	watching := 0
 	id := reg.add("10.0.0.5:54321", "Mozilla/5.0 (X11; Linux x86_64) Firefox/128.0", func() int { return watching })
-	if got := reg.list(); len(got) != 1 {
+	if got := reg.list(0); len(got) != 1 {
 		t.Fatalf("one tab attached, got %d viewers", len(got))
 	} else {
 		v := got[0]
@@ -47,25 +49,25 @@ func TestViewerRegistryListsAttachedTabs(t *testing.T) {
 	// The count follows what the tab is streaming now, not what it was holding
 	// when it attached.
 	watching = 3
-	if got := reg.list()[0].Watching; got != 3 {
+	if got := reg.list(0)[0].Watching; got != 3 {
 		t.Errorf("watching = %d, want the current 3 (the count must be read, not captured)", got)
 	}
 	watching = 0
-	if got := reg.list()[0].Watching; got != 0 {
+	if got := reg.list(0)[0].Watching; got != 0 {
 		t.Errorf("watching = %d, want 0 after the tab stopped streaming", got)
 	}
 
 	// Oldest first, so the panel does not reshuffle on every frame.
 	time.Sleep(2 * time.Millisecond)
 	reg.add("10.0.0.9:1234", "second", func() int { return 1 })
-	got := reg.list()
+	got := reg.list(0)
 	if len(got) != 2 || got[0].Addr != "10.0.0.5" {
 		t.Fatalf("viewers must be oldest-first; got %+v", got)
 	}
 
 	// A closed tab is gone.
 	reg.remove(id)
-	got = reg.list()
+	got = reg.list(0)
 	if len(got) != 1 || got[0].Addr != "10.0.0.9" {
 		t.Fatalf("the closed tab is still listed: %+v", got)
 	}
@@ -76,7 +78,7 @@ func TestViewerRegistryListsAttachedTabs(t *testing.T) {
 func TestViewerUserAgentIsBounded(t *testing.T) {
 	reg := newViewerRegistry()
 	reg.add("1.2.3.4:1", string(make([]byte, 4096)), nil)
-	if got := reg.list()[0].UserAgent; len(got) > 200 {
+	if got := reg.list(0)[0].UserAgent; len(got) > 200 {
 		t.Fatalf("user agent was not truncated: %d bytes", len(got))
 	}
 }
@@ -139,4 +141,143 @@ func decodeBody(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
 		t.Fatalf("bad JSON %q: %v", rr.Body.String(), err)
 	}
 	return m
+}
+
+// The badge says how many clients there are BESIDES the page you are reading
+// it in. Every open tab is itself a viewer, so counting all rows made a lone
+// page show "1" and made the empty state unreachable — the reported bug.
+//
+// The fix has two halves and both matter: the server marks the caller's own row
+// (`self`), and the page leaves it out of the number while still listing it.
+func TestViewerListMarksTheCallersOwnTab(t *testing.T) {
+	reg := newViewerRegistry()
+	self := reg.add("10.0.0.5:1111", "this tab", func() int { return 0 })
+	other := reg.add("10.0.0.9:2222", "other tab", func() int { return 2 })
+
+	rows := reg.list(self)
+	if len(rows) != 2 {
+		t.Fatalf("the caller's own row must still be listed (that is how a page shows the list works), got %d rows", len(rows))
+	}
+	var marked, unmarked int
+	for _, v := range rows {
+		if v.Self {
+			marked++
+			// The marked row must be the one that asked, not merely the first.
+			if v.UserAgent != "this tab" {
+				t.Errorf("the wrong row is marked as self: %+v", v)
+			}
+		} else {
+			unmarked++
+		}
+	}
+	if marked != 1 || unmarked != 1 {
+		t.Fatalf("exactly one row must be self; got %d marked, %d not", marked, unmarked)
+	}
+
+	// A caller with no id (the REST route, which is nobody's tab) marks nothing.
+	for _, v := range reg.list(0) {
+		if v.Self {
+			t.Errorf("list(0) must not mark any row as self: %+v", v)
+		}
+	}
+
+	// The ids are identities, not positions: removing a tab must not renumber
+	// the others, or a page holding its own id would start matching a stranger.
+	before := map[string]bool{}
+	for _, v := range reg.list(0) {
+		before[v.ID] = true
+	}
+	reg.remove(other)
+	after := reg.list(self)
+	if len(after) != 1 {
+		t.Fatalf("one tab left, got %d", len(after))
+	}
+	if !before[after[0].ID] {
+		t.Errorf("the surviving row's id changed after another tab closed (%q was not in %v); ids must be stable", after[0].ID, before)
+	}
+	if !after[0].Self {
+		t.Error("the surviving row is still the caller's own tab and must stay marked")
+	}
+}
+
+// Every theme must get the panel's styling, including the built-in ones that
+// ship their own CSS directory.
+//
+// A theme folder may override any chunk, and the file server prefers the theme's
+// copy — which is the feature. The trap is a theme shipping an *old* copy of a
+// shared chunk: it silently shadows every later addition, so a component added to
+// the shared stylesheet renders unstyled in that theme only. That is what happened
+// to the clients panel in cyberpunk (a stale base.css), and the same fork had
+// already swallowed the update pill and the session namespace chip.
+//
+// So the rule is not "no copies" — it is "a copy must not be a stale fork". A
+// theme may still restyle a component by declaring its own rules in theme.css,
+// which is where theme-specific appearance belongs.
+func TestEveryThemeStylesTheClientsPanel(t *testing.T) {
+	// The shared chunk owns the layout: it must define the panel at all.
+	shared := readAssetLF(t, "static/css/base.css")
+	for _, sel := range []string{".clients-menu", ".clients-btn", ".clients-panel", ".clients-row", ".clients-badge"} {
+		if !strings.Contains(shared, sel+" ") && !strings.Contains(shared, sel+"{") && !strings.Contains(shared, sel+",") && !strings.Contains(shared, sel+" :") {
+			t.Errorf("static/css/base.css no longer styles %s; the panel would be unstyled everywhere", sel)
+		}
+	}
+
+	themes, err := fs.Glob(Assets(), "themes/*/theme.css")
+	if err != nil || len(themes) == 0 {
+		t.Fatalf("no themes found: %v", err)
+	}
+	for _, themeCSS := range themes {
+		dir := strings.TrimSuffix(themeCSS, "/theme.css")
+		name := strings.TrimPrefix(dir, "themes/")
+
+		/* Structural chunks describe how the page is built, so a theme that forks
+		   one loses every later addition to it — the failure was exactly this, with
+		   cyberpunk's base.css predating the panel, the update pill and the
+		   namespace chip. These chunks have no legitimate reason to diverge.
+		   Palette and appearance chunks (tokens, theme, workspace) are the theme's
+		   own business and are deliberately not checked: their whole point is to
+		   differ. */
+		for _, file := range []string{"base.css", "approval.css", "terminal.css", "timeline.css"} {
+			sharedPath := "static/css/" + file
+			if _, err := fs.Stat(Assets(), sharedPath); err != nil {
+				continue
+			}
+			themeCopy, err := readAsset(dir + "/assets/static/css/" + file)
+			if err != nil {
+				continue // no override: the shared chunk is used as-is, which is right
+			}
+			sharedBody, err := readAsset(sharedPath)
+			if err != nil {
+				continue
+			}
+			if missing := missingLines(sharedBody, themeCopy); len(missing) > 0 {
+				t.Errorf("%s overrides the structural chunk static/css/%s but is missing %d line(s) the shared "+
+					"copy has; every component added since that copy was taken renders unstyled in this theme "+
+					"only. Delete the override to inherit the shared chunk (theme.css is the place for "+
+					"theme-specific appearance). First missing: %q",
+					name, file, len(missing), missing[0])
+			}
+		}
+	}
+}
+
+// missingLines returns the non-blank lines of shared that do not appear in copy.
+// It is a whole-line comparison, not a diff: a stale fork drops whole rules, and
+// a rule split across lines would still match as long as its text is unchanged.
+func missingLines(shared, copy string) []string {
+	have := make(map[string]bool, 4096)
+	for _, line := range strings.Split(copy, "\n") {
+		have[strings.TrimSpace(line)] = true
+	}
+	var missing []string
+	for _, line := range strings.Split(shared, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed == "}" || trimmed == "{" {
+			continue
+		}
+		if !have[trimmed] {
+			missing = append(missing, trimmed)
+		}
+	}
+	return missing
 }

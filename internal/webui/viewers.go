@@ -30,6 +30,12 @@ type Viewer struct {
 	Watching int `json:"watching"`
 	// Since is when the socket opened, RFC 3339 in UTC.
 	Since string `json:"since"`
+	// Self marks the tab asking. Every open page is itself a viewer, so without
+	// this the panel's own page always counts as one of the clients — which is
+	// where "why does it say 1 when nothing is connected?" came from. The flag is
+	// set per response (the same list is different for each caller), so it is
+	// deliberately not stored on the entry.
+	Self bool `json:"self,omitempty"`
 }
 
 // viewerRegistry tracks the Web UI's attached tabs.
@@ -46,6 +52,7 @@ type viewerRegistry struct {
 }
 
 type viewerEntry struct {
+	id        uint64 // the registry key; also what the page uses to find itself
 	addr      string
 	userAgent string
 	since     time.Time
@@ -62,6 +69,7 @@ func (r *viewerRegistry) add(addr, userAgent string, watching func() int) uint64
 	defer r.mu.Unlock()
 	r.nextID++
 	r.tabs[r.nextID] = &viewerEntry{
+		id:        r.nextID,
 		addr:      addr,
 		userAgent: userAgent,
 		since:     time.Now().UTC(),
@@ -77,7 +85,12 @@ func (r *viewerRegistry) remove(id uint64) {
 }
 
 // list returns the attached tabs, longest-attached first.
-func (r *viewerRegistry) list() []Viewer {
+//
+// selfID is the caller's own tab, marked so a page can tell itself apart from
+// everybody else. It is filtered out of the *count* by the client, not here: the
+// panel should still show you your own row (that is how you know the list works),
+// but "connected clients" means "clients other than the page you are looking at".
+func (r *viewerRegistry) list(selfID uint64) []Viewer {
 	r.mu.Lock()
 	entries := make([]*viewerEntry, 0, len(r.tabs))
 	for _, e := range r.tabs {
@@ -88,12 +101,17 @@ func (r *viewerRegistry) list() []Viewer {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].since.Before(entries[j].since) })
 
 	out := make([]Viewer, 0, len(entries))
-	for i, e := range entries {
+	for _, e := range entries {
 		v := Viewer{
-			ID:        strconv.Itoa(i + 1),
+			// The registry key, not the position in this list. A positional id
+			// renumbers itself every time a tab opens or closes, so a client
+			// holding "1" would be pointing at a different tab a second later —
+			// and the page needs a stable id to recognise which row is its own.
+			ID:        strconv.FormatUint(e.id, 10),
 			Addr:      stripPort(e.addr),
 			UserAgent: truncateUA(e.userAgent),
 			Since:     e.since.Format(time.RFC3339),
+			Self:      selfID != 0 && e.id == selfID,
 		}
 		if e.watching != nil {
 			v.Watching = e.watching()
@@ -111,7 +129,7 @@ func (h *Handler) Viewers() []Viewer {
 	if h == nil {
 		return []Viewer{}
 	}
-	return h.viewerHub().list()
+	return h.viewerHub().list(0)
 }
 
 func (h *Handler) viewerHub() *viewerRegistry {

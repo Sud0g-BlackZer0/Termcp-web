@@ -100,9 +100,15 @@ function renderClients(mcpClients, viewers) {
   mcpClients = Array.isArray(mcpClients) ? mcpClients : [];
   viewers = Array.isArray(viewers) ? viewers : [];
 
-  // The count is the number a person watching the header cares about, and it is
-  // cheap, so it updates whether or not the panel is open.
-  var total = mcpClients.length + viewers.length;
+  /* The count says how many clients there are BESIDES this page. Every open tab
+     is itself a viewer, so counting every row meant a lone page always showed
+     "1" — and the empty state could never appear at all, which is exactly how
+     this was reported. The current tab is still listed in the panel (that is how
+     a person confirms the list works), marked as "this tab" and left out of the
+     number. */
+  var selfCount = 0;
+  viewers.forEach(function (v) { if (v && v.self) selfCount++; });
+  var total = mcpClients.length + viewers.length - selfCount;
   count.textContent = String(total);
   count.hidden = total === 0;
 
@@ -126,8 +132,15 @@ function renderClients(mcpClients, viewers) {
     if (v && typeof v.watching === 'number' && v.watching > 0) {
       meta += (meta ? ' · ' : '') + t('clients.watching', { count: v.watching });
     }
-    body.appendChild(clientRow('web', v && v.addr ? String(v.addr) : '', meta, ''));
+    // This tab says so, so the row below the count is explainable rather than a
+    // mystery extra client.
+    var title = v && v.addr ? String(v.addr) : '';
+    body.appendChild(clientRow('web', title, meta, v && v.self ? t('clients.thisTab') : ''));
   });
+  /* The empty state is about the *other* clients: with only this tab open the
+     list has one row (yourself), so hiding the hint on `body.childElementCount`
+     would leave a panel that looks populated while the badge says 0. */
+  var others = mcpClients.length + viewers.length - selfCount;
   var empty = document.getElementById('clients-empty');
-  if (empty) empty.hidden = total > 0;
+  if (empty) empty.hidden = others > 0;
 }

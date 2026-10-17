@@ -88,6 +88,10 @@ type uiWS struct {
 	send   chan []byte
 	mu     sync.Mutex
 	watch  map[string]*wsWatchEntry
+	// viewerID is this tab's own row in the viewer registry. Each frame marks it
+	// so the page can count the clients besides itself — every open page is a
+	// viewer, so without the mark a lone tab always counted as one client.
+	viewerID uint64
 }
 
 var errWSSessionNotFound = errors.New("session not found")
@@ -134,6 +138,7 @@ func (h *Handler) handleWebUIWS(w http.ResponseWriter, r *http.Request) {
 	// Who is watching: the tab is registered for the life of its socket, and its
 	// watched-session count is read at list time rather than captured here.
 	viewerID := c.h.viewerHub().add(r.RemoteAddr, r.UserAgent(), c.watchCount)
+	c.viewerID = viewerID
 	defer c.h.viewerHub().remove(viewerID)
 	// The panel is pushed, not polled: an arrival or departure is a change to a
 	// list the page is already showing, exactly like the session list.
@@ -187,7 +192,7 @@ func (c *uiWS) enqueueSessions() {
 	   tab opens or closes, or when an MCP client connects or drops — all of which
 	   already wake this loop through the session hub, so there is no second timer
 	   and no polling. */
-	payload["clients"] = c.h.Viewers()
+	payload["clients"] = c.h.viewerHub().list(c.viewerID)
 	if c.h.MCPConnections != nil {
 		payload["mcp_clients"] = c.h.MCPConnections()
 	}
