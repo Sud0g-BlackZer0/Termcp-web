@@ -18,6 +18,8 @@
 
 - **下载 URL 可以指定响应 header**。`file_urls` 新增 `response_headers`（对象，如 `{"Content-Disposition": "attachment; filename=\"x.png\""}`），它被拼进返回的 `download_url` 的 query（`?h.<Name>=<value>`），所以**谁打开这个链接都会带上它** —— curl、浏览器、转发给别人的链接，不需要另外约定一个通道传 header。REST 侧对应 `GET /api/sessions/{id}/files/download` 的同名参数；名字不是合法 HTTP token、值不是字符串、或值里带换行会 400（header 注入），`Content-Length`/`Content-Range`/`Transfer-Encoding`/`Connection`/`Trailer` 属于服务端、请求了也会被丢弃，其馀同名 header 覆盖服务端默认值。
 
+- **页面会提示有新版本（#106）**。顶栏读一次 GitHub 的 release 列表，当前构建比最新正式版旧时就挂一个「vX.Y.Z 已发布」的胶囊，点开是 release 页面，关掉之后这个版本不再提。**只比较真正的 `vX.Y.Z`**：`make` 给非 tag 构建打的 `dev-<sha>`／`dev-<sha>-dirty` 在版本序里没有位置，拿它去比会在每次本地构建时都喊更新、且每次都错，所以这类构建一声不吭；预发布版（`v0.2.8-rc.1`）当作它所对应的那个版本处理——正式版发布时会提示，不会被推去「升级」到更旧的版本。比较按数字逐段做（按字符串比的话 `0.2.10` 比 `0.2.9` 还小，正好是下一次发布的那个版本）。查不到、限流、断网、api.github.com 被拦，全都安静地什么都不发生。
+
 ### 修复
 
 - **`notify_user` 现在会响，系统通知也真的能弹出来（#94）**。两个症状是同一个原因：声音和通知权限都只在**用户手势**里才被浏览器允许，而通知是从 WebSocket 推过来的，不算手势。于是权限申请被静默忽略（`Notification.permission` 永远停在 `default`，桌面通知一次都没弹出来过），音频通道也一直是 `suspended`。现在页面在**第一次点击或按键**时申请一次权限、并当场打开音频通道（每次页面加载一次，已经在通知路径里那次无效申请删掉了）；提示音用 Web Audio 现场合成两声短音（`warn`/`error` 音高不同），不是音频文件，省一次请求也绕开 `<audio>` 的自动播放策略。没交互过的页面只有 toast，这跟“没有页面打开”不是一回事。

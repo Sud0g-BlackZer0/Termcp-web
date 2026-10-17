@@ -93,6 +93,8 @@ var I18N_CATALOG = {
     'toast.copied': 'Copied',
     'toast.copy.failed': 'Copy failed',
     'notify.dismiss': 'Dismiss notification',
+    'update.available': 'v{version} is available',
+    'update.dismiss': 'Dismiss update notice',
     'notify.sessionPrefix': 'session {id}',
 
     /* --- shared words --- */
@@ -528,6 +530,8 @@ var I18N_CATALOG = {
     'toast.copied': '已复制',
     'toast.copy.failed': '复制失败',
     'notify.dismiss': '关闭通知',
+    'update.available': 'v{version} 已发布',
+    'update.dismiss': '关闭更新提示',
     'notify.sessionPrefix': '会话 {id}',
 
     /* --- shared words --- */
@@ -963,6 +967,8 @@ var I18N_CATALOG = {
     'toast.copied': '已複製',
     'toast.copy.failed': '複製失敗',
     'notify.dismiss': '關閉通知',
+    'update.available': 'v{version} 已發布',
+    'update.dismiss': '關閉更新提示',
     'notify.sessionPrefix': '工作階段 {id}',
 
     /* --- shared words --- */
