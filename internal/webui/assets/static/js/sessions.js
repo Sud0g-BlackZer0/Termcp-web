@@ -667,7 +667,7 @@ function applySessionsSnapshot(sessions) {
     // Approval mode is part of the session snapshot, so an open window reflects a
     // switch flipped in another tab without needing its own request.
     w._approvalNeed = s.approval_need || 1;
-    applyApprovalMode(w, !!s.approval_mode);
+    applyApprovalMode(w, !!s.approval_mode, s.approval_scopes);
   }
   // Prune invisible client-side state for sessions that have left the
   // server registry entirely, even if no window was open when they died.

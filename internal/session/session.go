@@ -739,9 +739,15 @@ func (s *Session) Info() api.Session {
 	if approvalState != nil {
 		cp.ApprovalMode = true
 		cp.ApprovalNeed = approvalState.queue.Need()
+		// Empty for "every kind": the JSON key is omitted then, so an older
+		// reader sees exactly the manifest it always did.
+		for _, k := range approvalState.scopeList() {
+			cp.ApprovalScopes = append(cp.ApprovalScopes, string(k))
+		}
 	} else {
 		cp.ApprovalMode = false
 		cp.ApprovalNeed = 0
+		cp.ApprovalScopes = nil
 	}
 	return cp
 }

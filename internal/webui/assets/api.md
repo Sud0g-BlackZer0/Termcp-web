@@ -1232,6 +1232,43 @@ those are transient UI events, including the review notifications above. An empt
 tab next to a toast you just saw is therefore correct, and the empty state says so
 rather than leaving it ambiguous.
 
+### What review holds: `scopes`
+
+By default review holds **every** gated kind: command lines, the file operations
+that change a host, and port forwards. That is the model it started with, and an
+empty scope list still means exactly that.
+
+A deployment that wants a narrower gate names the kinds instead (issue #75):
+
+```
+PATCH /api/sessions/{id}/approval
+{ "enabled": true, "scopes": ["file_write", "file_delete"] }
+```
+
+Valid scopes are `shell_input`, `file_write`, `file_delete`, `file_rename`,
+`file_mkdir`, `file_perm`, `file_link`, `file_truncate`, `forward_open`,
+`forward_close`. Opening and closing a tunnel are separate names because they are
+separate decisions.
+
+Two rules make the narrowing trustworthy:
+
+- **An unknown name is an error**, never a silent drop. A misspelled scope that
+  quietly did nothing would leave the operator believing an operation is gated
+  when it is not — the one failure a gate must not have.
+- **Anything outside the scope passes through untouched.** A session scoped to
+  file writes lets `forward` run, and lets the operator type; a session scoped to
+  `shell_input` holds the agent's commands and nothing else. This direction is
+  the one that is easy to get wrong (a gate that checks "is review mode on"
+  instead of "is this kind held" looks identical in the UI) and it is what the
+  tests pin.
+
+Reads are never held at any scope: listing a directory or reading a file changes
+nothing, and gating it would train a reviewer to accept without reading.
+
+`GET /api/sessions/{id}/approval` reports the scope in force as `"all"` or the
+list, so a reloaded page draws the same lock. The session snapshot carries it as
+`approval_scopes` (empty for "all").
+
 ### One reviewer
 
 Whoever turns review on is the reviewer, and one approval is enough. There is no
