@@ -153,6 +153,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// Who is attached to this instance: MCP clients and Web UI tabs. Not the SSH
 	// profiles of GET /api/connections — those are hosts to connect to.
 	mux.HandleFunc("GET /api/clients", h.handleListClients)
+	// Recent agent and human actions across every session, newest first. Derived
+	// from the per-shell marks the terminal timeline already reads.
+	mux.HandleFunc("GET /api/activity", h.handleActivity)
 	// Daemon management (`termcp daemon status|start|stop`): an instance is
 	// found and stopped purely over HTTP, wherever it listens.
 	mux.HandleFunc("GET /api/daemon", h.handleDaemonInfo)

@@ -1487,6 +1487,42 @@ Response 200:
 { "version": "v0.2.4" }
 ```
 
+### `GET /api/activity`
+
+Recent agent and human actions across **every** session, newest first — the "what
+did the agent do, and when?" view (issue #110). It is derived entirely from the
+per-shell marks the terminal timeline already reads (`log.jsonl`): nothing new is
+recorded, and there is no second copy of the log.
+
+Each row names the session and shell, the millisecond, who acted (`ai`, `human`,
+or `system` for a review transition), what happened, and the byte offset where
+the action's output begins — so a row leads to the exact transcript bytes.
+
+Output spans are **not** in the feed. Every command produces output, and a single
+`find` can print thousands of lines; including them would bury the handful of rows
+a reader cares about. Follow `bytes` into `shell_output` or the REST range route to
+see the result.
+
+Query parameters: `limit` (default 200, max 2000), `since_ms` (page forward without
+re-reading), `session_id` (narrow to one session). An invalid value is `400` rather
+than being silently defaulted.
+
+```
+GET /api/activity?limit=50
+
+Response 200:
+{
+  "activity": [
+    { "time": "2026-10-17T08:12:04Z", "unix_ms": 1760689924000,
+      "session_id": "sess-1", "session_name": "prod", "shell_id": "sh-1",
+      "source": "ai", "kind": "a", "verdict": "input", "bytes": 4096 }
+  ]
+}
+```
+
+> Token consumption is **not** reported. termcp never sees an agent's tokens —
+> the model client does — so any number here would be invented.
+
 ### `GET /api/clients`
 
 Reports who is attached to this instance — the question "who is driving it right
