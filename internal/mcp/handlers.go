@@ -300,3 +300,57 @@ func (s *Server) resolveSSHFromArgs(args map[string]any) (string, *sshconfig.Ent
 	}
 	return name, ent, r, nil
 }
+
+// batchShellResult runs op over every shell id in a batch, one outcome per entry.
+//
+// It is the shell-side twin of batchSessionResult, and it exists for the same
+// reason: a batch must not be all-or-nothing, because "type into all ten shells"
+// is precisely a case where one dead shell should not stop the other nine.
+//
+// Each entry carries whatever op returned plus shell_id and ok, so a caller can
+// tell which shells took the bytes and which refused. `results` is always
+// present, even for one entry, because a batch that silently degraded to a single
+// result would be indistinguishable from a single call.
+func (s *Server) batchShellResult(ids []string, op func(id string) (map[string]any, *mcpgo.CallToolResult)) *mcpgo.CallToolResult {
+	results := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		entry := map[string]any{"shell_id": id}
+		out, bad := op(id)
+		if bad != nil {
+			entry["ok"] = false
+			// unwrapToolError yields the human-readable message from the tool's
+			// error envelope; a reply that is not one passes through unchanged.
+			if txt := errorReplyText(bad); txt != "" {
+				entry["error"] = txt
+			}
+		} else {
+			entry["ok"] = true
+			for k, v := range out {
+				entry[k] = v
+			}
+		}
+		results = append(results, entry)
+	}
+	return jsonResult(map[string]any{"results": results})
+}
+
+// errorReplyText is the message inside an error reply, or "" when there is none.
+//
+// Deliberately not toolResultText: that one substitutes a fallback sentence for an
+// empty reply, which is right when reporting a failed operation and wrong here — a
+// batch entry with no message would claim an error it cannot describe.
+func errorReplyText(res *mcpgo.CallToolResult) string {
+	if res == nil {
+		return ""
+	}
+	var parts []string
+	for _, c := range res.Content {
+		if t, ok := c.(mcpgo.TextContent); ok && t.Text != "" {
+			parts = append(parts, t.Text)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return unwrapToolError(strings.Join(parts, "; "))
+}

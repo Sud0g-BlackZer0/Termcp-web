@@ -223,7 +223,7 @@ ssh_config(action=list)
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `shell_id` | string | **是** | — | |
+| `shell_id` | string | **是** | — | shell_id、session_id、`termcp://` 定位符，或**逗号分隔的列表**（批量：一条命令发给一批 shell） |
 | `text` | string | **是** | — | UTF-8 文本（不自动追加换行） |
 
 **返回**：`{ success, offset, total_lines, line }`（行协议驱动的关键返回值）
@@ -232,13 +232,32 @@ ssh_config(action=list)
 - `total_lines`：提交时的完整行数；`line`：按零长度位置语义（与 message spans 一致）——回显将续写的行号，流正好结束在行边界时为 `0`（回显将成为 `total_lines+1` 行，完成后经 `message` 可查）。
 - 时序提醒：pty 回显是异步的，`offset` 之后可能有进程输出插队；把 `offset` 当"提交位置"用，不要当"回显精确起点"断言。审阅模式（review pending）返回等待审阅的文本回复，无 offset——什么都没写入。
 
+#### 批量：一条命令发一批
+
+`shell_id` 写逗号分隔的列表就是批量（`"<idA>,<idB>,<idC>"`，每项可以是 shell_id、session_id 或 locator）：
+
+```jsonc
+{ "shell_id": "sh-a,sh-b,sh-c", "text": "systemctl status nginx\n" }
+→ { "results": [
+     { "shell_id": "sh-a", "ok": true, "success": true, "offset": 1024, "total_lines": 12, "line": 12 },
+     { "shell_id": "sh-b", "ok": true, ... },
+     { "shell_id": "sh-c", "ok": false, "error": "..." }
+   ] }
+```
+
+- **不是全有或全无**：每项独立尝试，一台 shell 失效不会挡住其余——这正是"发给十台"时最常见的情形。
+- **单个 id 的回包形状不变**（`{success, offset, …}`，没有 `results` 外壳），所以只对一个 shell 输入的调用方不用改代码。
+- 受审阅模式拦截的项在结果里带 `approved: false` + `review_pending: true`，与单次调用同一个形状；批量回包是模型判断"到底写没写"的唯一依据，因此不能只说 `ok`。
+
+`shell_key` 的 `shell_id` 同样接受列表，所以结束一批命令行也是一次调用。
+
 ### shell_key
 
 向 shell 发送命名按键。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `shell_id` | string | **是** | — | |
+| `shell_id` | string | **是** | — | 同 `shell_input`，接受逗号分隔的列表（批量结束多行） |
 | `key` | string | **是** | — | 见下方白名单 |
 | `repeat` | number | 否 | `1` | 重复次数（上限约 20） |
 

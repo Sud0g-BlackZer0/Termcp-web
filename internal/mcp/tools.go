@@ -44,13 +44,13 @@ func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
 	), withLogging("shell_close", s.handleCloseShell, s))
 
 	mcpServer.AddTool(s.newTool("shell_input",
-		mcpgo.WithDescription("Write text bytes to a shell's stdin. Follow with shell_key(key=\"enter\") to execute the typed line, then shell_output for the result. shell_id accepts a raw id, a session id, or a termcp:// locator (\"termcp://#<sid>\" = primary shell, \"termcp://#<sid>:2\" = 2nd shell channel). Returns {success, offset, total_lines, line}: offset is the stream end at submission — where this input's echo begins (a pipe shell records no echo; the zero-length a/i mark in message(action=list) lands there). line is the line the echo continues, 0 when it starts a fresh line (it becomes total_lines+1 once complete)."),
+		mcpgo.WithDescription("Write text bytes to a shell's stdin. Follow with shell_key(key=\"enter\") to execute the typed line, then shell_output for the result. shell_id accepts a raw id, a session id, or a termcp:// locator (\"termcp://#<sid>\" = primary shell, \"termcp://#<sid>:2\" = 2nd shell channel), or a comma-separated list (batch: type into many shells at once, one command to a fleet — each entry is attempted independently so one dead shell does not stop the rest, and the reply is {results:[{shell_id, ok, ...}]} with one outcome per entry; a single id keeps the flat reply). Returns {success, offset, total_lines, line}: offset is the stream end at submission — where this input's echo begins (a pipe shell records no echo; the zero-length a/i mark in message(action=list) lands there). line is the line the echo continues, 0 when it starts a fresh line (it becomes total_lines+1 once complete)."),
 		mcpgo.WithString("shell_id", mcpgo.Required()),
 		mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("UTF-8 text to write (no automatic newline)")),
 	), withLogging("shell_input", s.handleSendInput, s))
 
 	mcpServer.AddTool(s.newTool("shell_key",
-		mcpgo.WithDescription("Send a named key to a shell. Supported: enter, tab, esc, up/down/left/right, backspace, delete, home, end, ctrl+c/d/z/l/u/w. Use enter after shell_input to run a command. shell_id accepts a raw id, a session id, or a termcp:// locator (\"termcp://#<sid>\" or \"termcp://#<sid>:N\")."),
+		mcpgo.WithDescription("Send a named key to a shell. Supported: enter, tab, esc, up/down/left/right, backspace, delete, home, end, ctrl+c/d/z/l/u/w. Use enter after shell_input to run a command. shell_id accepts a raw id, a session id, a termcp:// locator (\"termcp://#<sid>\" or \"termcp://#<sid>:N\"), or a comma-separated list (batch: end many lines at once; the reply is {results:[...]}, one outcome per entry, and a single id keeps the flat reply)."),
 		mcpgo.WithString("shell_id", mcpgo.Required()),
 		mcpgo.WithString("key", mcpgo.Required(), mcpgo.Description("Named key (e.g. enter, ctrl+c, up)")),
 		mcpgo.WithNumber("repeat", mcpgo.Description("Times to send the key (1–20)"), mcpgo.DefaultNumber(1)),
