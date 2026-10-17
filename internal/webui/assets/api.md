@@ -217,6 +217,24 @@ handle it as a secret.
 longer resolves is skipped rather than failing the file. Naming `internal` in
 `names` is refused with `400` — export of the built-in profile does not exist.
 
+**Password-protected export.** Send `X-Termcp-Password: <password>` and the
+response is sealed with it instead of being plain TOML: `Content-Type:
+application/x-termcp-encrypted`, filename `termcp-connections.enc`. The file is
+an envelope (`TERMCP-ENC 1` header, then base64 of salt ‖ nonce ‖
+AES-256-GCM ciphertext, 64-column wrapped) so it survives mail and chat, and it
+is recognisable as encrypted — an operator who tries to import it without the
+password is told to supply one instead of seeing a TOML parse error. The key is
+PBKDF2-HMAC-SHA256 at 600 000 iterations; nothing in the file is readable
+without the password.
+
+A header rather than a query parameter: a URL lands in shell history, proxy logs
+and browser history, so a password in one is leaked by the same act that used it.
+No header = the plain TOML export this route has always produced.
+
+This is export/import protection only. It is **not** at-rest encryption of the
+stored configuration: that is a separate problem (OS keychain, container
+fallback, invisible to the user).
+
 ### `POST /api/connections/batch?temporary=false`
 
 Imports a TOML file. Send its bytes as the request body (`Content-Type:
@@ -224,7 +242,15 @@ application/toml`). Set `temporary=true` to keep **all** imported profiles only
 in memory. The upload limit is 16 MiB. Existing names, case-insensitive
 duplicates, and the reserved `internal` name receive a unique `-2`, `-3`, …
 suffix; existing profiles are never overwritten. Invalid profiles reject the
-whole import before any profile is added. The format is the same for import and
+whole import before any profile is added.
+
+An **encrypted** export imports the same way, with the password in
+`X-Termcp-Password`. Missing password → `401` naming the header; wrong password
+or a modified file → `400` (the two are indistinguishable by design — GCM
+authenticates, it does not identify). A plain TOML document needs no password
+and keeps working, so old exports stay importable.
+
+The format is the same for import and
 export:
 
 ```toml
