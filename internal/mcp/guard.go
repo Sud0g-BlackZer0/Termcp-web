@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
@@ -55,48 +54,24 @@ func (g toolGuard) check(ctx context.Context, toolName string, request mcpgo.Cal
 
 	// A shell-addressed tool resolves through its parent session, since the
 	// restriction is a property of the container the shell was created under.
+	//
+	// Both arguments take a comma-separated batch, and the HANDLERS split it
+	// themselves (session_terminate/session_delete for session_id, shell_input /
+	// shell_key for shell_id). The guard therefore has to split it with the same
+	// helper before it resolves anything: resolving the raw string "a,b" finds no
+	// session, and "no session" is the one answer that means "nothing to
+	// gate" — so the whole batch reached the handler unchecked and every entry in
+	// it was acted on, including a session whose whitelist forbids the tool and a
+	// session in another caller's namespace. A single id splits to itself, so the
+	// ordinary case is the same loop of one.
 	if shellID := getString(args, "shell_id", ""); shellID != "" {
-		sess := g.sessionForShellID(shellID)
-		if sess == nil {
-			return nil // an unresolvable id is the handler's error to report
-		}
-		if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
-			return bad
-		}
-		return g.checkSession(sess, toolName, args)
+		ids, _ := splitBatchIDs(shellID)
+		return g.checkEach(ids, g.sessionForShellID, callerNS, toolName, args)
 	}
 
 	if sessionID := getString(args, "session_id", ""); sessionID != "" {
-		// A batch (comma-separated ids) is refused wholesale when any entry is
-		// restricted: running part of a batch against a session the caller may not
-		// touch would make the refusal partial and the outcome confusing.
-		if strings.Contains(sessionID, ",") {
-			for _, id := range strings.Split(sessionID, ",") {
-				id = strings.TrimSpace(id)
-				if id == "" {
-					continue
-				}
-				sess := g.sessionForSessionID(id)
-				if sess == nil {
-					continue
-				}
-				if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
-					return bad
-				}
-				if bad := g.checkSession(sess, toolName, args); bad != nil {
-					return bad
-				}
-			}
-			return nil
-		}
-		sess := g.sessionForSessionID(sessionID)
-		if sess == nil {
-			return nil
-		}
-		if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
-			return bad
-		}
-		return g.checkSession(sess, toolName, args)
+		ids, _ := splitBatchIDs(sessionID)
+		return g.checkEach(ids, g.sessionForSessionID, callerNS, toolName, args)
 	}
 
 	// Two tools name what they act on by the RESOURCE's own id rather than by the
@@ -120,6 +95,35 @@ func (g toolGuard) check(ctx context.Context, toolName string, request mcpgo.Cal
 				return bad
 			}
 			return g.checkSession(sess, toolName, args)
+		}
+	}
+	return nil
+}
+
+// checkEach applies both gates — reachability, then the session's own whitelist —
+// to every id a call names.
+//
+// A batch is refused WHOLESALE when any entry fails: running part of a batch
+// against a session the caller may not touch would make the refusal partial and
+// the outcome confusing, and a caller that asked for ten things would have to
+// read ten results to learn which two were allowed.
+//
+// An id that resolves to nothing is skipped rather than refused: that is the
+// handler's not-found error to report, with its own code and its own wording.
+func (g toolGuard) checkEach(ids []string, resolve func(string) *session.Session, callerNS, toolName string, args map[string]any) *mcpgo.CallToolResult {
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		sess := resolve(id)
+		if sess == nil {
+			continue
+		}
+		if bad := refuseForeignNamespace(sess, callerNS); bad != nil {
+			return bad
+		}
+		if bad := g.checkSession(sess, toolName, args); bad != nil {
+			return bad
 		}
 	}
 	return nil

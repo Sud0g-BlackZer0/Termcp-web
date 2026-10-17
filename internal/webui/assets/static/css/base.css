@@ -688,7 +688,7 @@
   .clients-menu[open] .clients-btn { background: var(--accent-surface); border-color: var(--accent-ring); color: var(--text-primary); }
   .clients-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .clients-icon { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-surface); }
-  .clients-count { min-width: 17px; padding: 0 5px; border-radius: 9px; background: var(--accent-surface); color: var(--text-primary); font-size: 0.7rem; font-weight: 600; text-align: center; }
+  .clients-label { white-space: nowrap; }
   .clients-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 60; width: min(340px, calc(100vw - 24px)); max-height: 60vh; overflow-y: auto; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); box-shadow: var(--shadow-card-hover); }
   .clients-row { display: flex; gap: 8px; padding: 7px 8px; border-radius: 7px; }
   .clients-row + .clients-row { border-top: 1px solid var(--border-subtle); }

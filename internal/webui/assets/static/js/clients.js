@@ -87,33 +87,47 @@ function shortClock(rfc3339) {
   return d.toLocaleTimeString(_termcpLang === 'en' ? 'en' : _termcpLang, { hour: '2-digit', minute: '2-digit' });
 }
 
+/** The last lists handed to renderClients, kept so the panel can be painted on
+ *  the moment it is OPENED rather than on the next frame.
+ *
+ *  Frames are change-driven: the server broadcasts when a session, a client or a
+ *  tab changes, which on a quiet page can be minutes apart. A panel that only
+ *  ever painted from a frame was therefore blank from page load until something
+ *  else happened — the list was already in hand and got thrown away, and all a
+ *  reader saw was the "nothing connected yet" hint sitting under an empty box. */
+var _clientsLast = null;
+
 /** Paint the panel from the session frame's client lists.
  *
- *  Called for every frame, so it must be cheap and must not touch anything when
- *  the panel is closed: the frame arrives many times per second while a command
- *  streams, and rebuilding a hidden DOM list each time is pure waste. */
+ *  Cheap and side-effect-free while the panel is closed: the frame arrives many
+ *  times per second while a command streams, and rebuilding a hidden DOM list
+ *  each time is pure waste. The lists are remembered instead, so opening the
+ *  panel draws immediately (see the toggle wiring at the end of this file). */
 var _clientsSignature = '';
 function renderClients(mcpClients, viewers) {
-  var count = document.getElementById('clients-count');
   var body = document.getElementById('clients-body');
-  if (!body || !count) return;
+  if (!body) return;
   mcpClients = Array.isArray(mcpClients) ? mcpClients : [];
   viewers = Array.isArray(viewers) ? viewers : [];
-
-  /* The count says how many clients there are BESIDES this page. Every open tab
-     is itself a viewer, so counting every row meant a lone page always showed
-     "1" — and the empty state could never appear at all, which is exactly how
-     this was reported. The current tab is still listed in the panel (that is how
-     a person confirms the list works), marked as "this tab" and left out of the
-     number. */
-  var selfCount = 0;
-  viewers.forEach(function (v) { if (v && v.self) selfCount++; });
-  var total = mcpClients.length + viewers.length - selfCount;
-  count.textContent = String(total);
-  count.hidden = total === 0;
+  _clientsLast = [mcpClients, viewers];
 
   var menu = document.getElementById('clients-menu');
   if (menu && !menu.open) return;
+  paintClients(mcpClients, viewers);
+}
+
+/** Draw the panel from one pair of lists. Split from renderClients so the open
+ *  event can repaint without a fresh frame to carry it. */
+function paintClients(mcpClients, viewers) {
+  var body = document.getElementById('clients-body');
+  if (!body) return;
+
+  /* There is no count badge: how many clients are attached is what the panel
+     says when it is opened, and a number in the header that is almost always 0
+     or 1 is one more thing to read for nothing. The current tab is still listed
+     and marked, so the list is explainable rather than a mystery extra row. */
+  var selfCount = 0;
+  viewers.forEach(function (v) { if (v && v.self) selfCount++; });
 
   /* Skip the rebuild when nothing changed. A frame arrives per output batch; with
      a terminal streaming that is thousands of identical repaints of a list that
@@ -132,15 +146,44 @@ function renderClients(mcpClients, viewers) {
     if (v && typeof v.watching === 'number' && v.watching > 0) {
       meta += (meta ? ' · ' : '') + t('clients.watching', { count: v.watching });
     }
-    // This tab says so, so the row below the count is explainable rather than a
+    // This tab says so, so a list with one row is explainable rather than a
     // mystery extra client.
     var title = v && v.addr ? String(v.addr) : '';
     body.appendChild(clientRow('web', title, meta, v && v.self ? t('clients.thisTab') : ''));
   });
-  /* The empty state is about the *other* clients: with only this tab open the
-     list has one row (yourself), so hiding the hint on `body.childElementCount`
-     would leave a panel that looks populated while the badge says 0. */
+  /* The empty state is still about the OTHER clients: your own tab is always
+     the one row the list has, so a panel that only hid the hint on a non-empty
+     body would look populated while nothing is actually attached. */
   var others = mcpClients.length + viewers.length - selfCount;
   var empty = document.getElementById('clients-empty');
   if (empty) empty.hidden = others > 0;
 }
+
+/* Paint on open.
+ *
+ *  Without this the panel is drawn only when a frame happens to arrive WHILE it
+ *  is open, and frames are change-driven: opening the panel on a quiet page left
+ *  the list empty and the "nothing connected yet" hint showing, which reads as
+ *  "nobody is attached" even though this very tab is. The lists are already in
+ *  hand from the last frame, so the fix is to paint from them rather than to
+ *  wait for the next one.
+ *
+ *  A `toggle` listener rather than an onclick on the summary: the element is a
+ *  <details>, so it can also be opened by the keyboard, by find-in-page, or by
+ *  the browser restoring its state, and all of those fire toggle. */
+(function wireClientsPanelOpen() {
+  function wire() {
+    var menu = document.getElementById('clients-menu');
+    if (!menu || menu._termcpClientsWired) return;
+    menu._termcpClientsWired = true;
+    menu.addEventListener('toggle', function () {
+      if (!menu.open || !_clientsLast) return;
+      paintClients(_clientsLast[0], _clientsLast[1]);
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire);
+  } else {
+    wire();
+  }
+})();

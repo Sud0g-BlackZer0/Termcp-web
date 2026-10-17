@@ -78,6 +78,100 @@ func TestURLTemplateValidation(t *testing.T) {
 	}
 }
 
+// The endpoint form has to be reachable through the AUTHORING path, not only
+// through a hand-built Extension.
+//
+// Both real entry points — the WebUI's JSON create and the MCP `extension` tool —
+// start from extensions.Preset(kind), and a kind=mcp preset carries `npx -y
+// example-mcp-server`. ApplyArgs used to set URL beside that command, so Validate
+// refused the pair with "url and command are alternatives" and the documented
+// shape could not be created at all: the author never sent a command, and the
+// refusal named a rule they had not broken. Only the TOML editor worked, because
+// a document is taken literally with no preset behind it.
+//
+// The earlier end-to-end test (TestURLTemplateAvailableWithoutAnExternalBinary)
+// missed this because it clears the preset by hand before saving, which is
+// precisely the step the real callers do not take.
+func TestCreateURLTemplateThroughApplyArgs(t *testing.T) {
+	t.Run("a create needs no hand-clearing of the preset", func(t *testing.T) {
+		ext := Preset(KindMCP)
+		ext.Name, ext.Target = "http-ext", "internal"
+		if err := ApplyArgs(&ext, map[string]any{
+			"kind":   "mcp",
+			"target": "internal",
+			"url":    "https://mcp.example.com/mcp",
+		}, false); err != nil {
+			t.Fatalf("ApplyArgs: %v", err)
+		}
+		if ext.Command != "" || ext.Args != nil {
+			t.Fatalf("the stdio preset survived a URL template: command=%q args=%v", ext.Command, ext.Args)
+		}
+		if err := ext.Validate(); err != nil {
+			t.Fatalf("the documented url shape must be creatable: %v", err)
+		}
+	})
+
+	t.Run("an explicit command still wins and still collides", func(t *testing.T) {
+		// The fix clears only what the caller did not name. A caller that names
+		// both answered one question twice, and that refusal is the point of the
+		// rule — so it must survive.
+		ext := Preset(KindMCP)
+		ext.Name, ext.Target = "both", "internal"
+		if err := ApplyArgs(&ext, map[string]any{
+			"url":     "https://mcp.example.com/mcp",
+			"command": "npx",
+		}, false); err != nil {
+			t.Fatalf("ApplyArgs: %v", err)
+		}
+		if ext.Command != "npx" {
+			t.Fatalf("an explicit command was dropped: %q", ext.Command)
+		}
+		err := ext.Validate()
+		if err == nil || !strings.Contains(err.Error(), "alternatives") {
+			t.Fatalf("err = %v, want the alternatives refusal", err)
+		}
+	})
+
+	t.Run("a stored stdio template converts to an endpoint on update", func(t *testing.T) {
+		// The same collision blocks the other direction: the command is already in
+		// the stored template, and setting a url left it there. An update must be
+		// able to change the shape, which is what the notes refresh also assumes.
+		ext := Preset(KindMCP)
+		ext.Name, ext.Target = "conv", "internal"
+		if err := ApplyArgs(&ext, map[string]any{
+			"command": "npx", "args": []any{"-y", "example-mcp-server"},
+		}, false); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := ApplyArgs(&ext, map[string]any{"url": "https://mcp.example.com/mcp"}, true); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if ext.Command != "" || ext.Args != nil {
+			t.Fatalf("the stored command survived the conversion: %q %v", ext.Command, ext.Args)
+		}
+		if err := ext.Validate(); err != nil {
+			t.Fatalf("a converted template must validate: %v", err)
+		}
+	})
+
+	t.Run("clearing the url restores the commandless-pipe refusal", func(t *testing.T) {
+		// The url branch must not become a way to produce a pipe with nothing to
+		// run: clearing the endpoint leaves neither side, and Validate says so.
+		ext := Preset(KindMCP)
+		ext.Name, ext.Target = "gone", "internal"
+		if err := ApplyArgs(&ext, map[string]any{"url": "https://mcp.example.com/mcp"}, false); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := ApplyArgs(&ext, map[string]any{"url": ""}, true); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		err := ext.Validate()
+		if err == nil || !strings.Contains(err.Error(), "requires a command") {
+			t.Fatalf("err = %v, want the commandless-pipe refusal", err)
+		}
+	})
+}
+
 // A blank header name is dropped rather than sent as an unparseable request
 // line; the map is left nil when nothing survives, so an empty table and no
 // table are the same template.

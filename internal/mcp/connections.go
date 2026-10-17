@@ -29,6 +29,14 @@ type Connection struct {
 	Namespace string `json:"namespace,omitempty"`
 	// ConnectedAt is when the session was registered, RFC 3339 in UTC.
 	ConnectedAt string `json:"connected_at"`
+	// seq is the registration order, and it is what the list actually sorts on.
+	// ConnectedAt renders whole seconds, so two clients that attach inside the
+	// same second compare equal — and a sort with equal keys over a map's
+	// iteration order is free to put them either way, which made "oldest first"
+	// a coin flip for exactly the pair a test (and a reader) cares about. It is
+	// unexported because it is an ordering detail, not something a client asked
+	// for; connected_at remains the human-readable form.
+	seq uint64
 }
 
 // connRegistry tracks live MCP client sessions.
@@ -142,6 +150,7 @@ func (r *connRegistry) list() []Connection {
 			SessionID:   e.session.SessionID(),
 			Namespace:   e.namespace,
 			ConnectedAt: e.connectedAt.Format(time.RFC3339),
+			seq:         e.seq,
 		}
 		// The client's name is read from the session, which mcp-go stores
 		// atomically: safe here, and the only correct place — it arrives with
@@ -156,7 +165,17 @@ func (r *connRegistry) list() []Connection {
 
 	// Sorted after unlocking: the timestamps are copies by now, and holding the
 	// lock through a sort would block a client connecting for no reason.
-	sort.Slice(out, func(i, j int) bool { return out[i].ConnectedAt < out[j].ConnectedAt })
+	//
+	// The timestamp is the primary key because it is what the panel shows, and the
+	// registration sequence breaks its ties: two clients that attach within one
+	// second are still ordered by who arrived first, rather than by whichever
+	// order the map happened to yield.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ConnectedAt != out[j].ConnectedAt {
+			return out[i].ConnectedAt < out[j].ConnectedAt
+		}
+		return out[i].seq < out[j].seq
+	})
 	return out
 }
 

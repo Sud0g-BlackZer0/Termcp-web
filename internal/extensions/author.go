@@ -55,6 +55,25 @@ func ApplyArgs(ext *Extension, args map[string]any, update bool) error {
 	}
 	if hasOpt(args, "url") {
 		ext.URL = strings.TrimSpace(optString(args, "url", ""))
+		// A URL template runs termcp's in-process relay instead of a program, and
+		// Validate refuses the pair — but the preset a create starts from is a
+		// stdio server, so it already carries `npx -y example-mcp-server`. Left
+		// in place that preset value collides with the URL the author just gave
+		// and the create fails with "url and command are alternatives", which is
+		// a rule about what the author sent, not about a default nobody asked
+		// for. Clear only what the caller did not name, so an explicit
+		// command/args still wins and still meets the same refusal.
+		//
+		// This also covers the other direction on update: a stored stdio template
+		// edited into an endpoint drops the command it no longer runs.
+		if ext.URL != "" {
+			if !hasOpt(args, "command") {
+				ext.Command = ""
+			}
+			if !hasOpt(args, "args") {
+				ext.Args = nil
+			}
+		}
 	}
 	if hasOpt(args, "headers") {
 		v, err := optStringMap(args, "headers")

@@ -5,6 +5,9 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -143,12 +146,15 @@ func decodeBody(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
 	return m
 }
 
-// The badge says how many clients there are BESIDES the page you are reading
-// it in. Every open tab is itself a viewer, so counting all rows made a lone
-// page show "1" and made the empty state unreachable — the reported bug.
+// The server marks the caller's own row (`self`).
 //
-// The fix has two halves and both matter: the server marks the caller's own row
-// (`self`), and the page leaves it out of the number while still listing it.
+// This started as the fix for a count badge that included the page itself — a
+// lone tab always read "1", and the empty state was unreachable. The badge is
+// gone (see TestClientsTriggerHasNoCountBadge), but the mark it needed is not:
+// the empty state is still about the clients BESIDES this page, so the panel has
+// to know which row is yours in order to say "nothing connected yet" while
+// listing one row, and in order to label that row "this tab" rather than
+// leaving it a mystery extra client.
 func TestViewerListMarksTheCallersOwnTab(t *testing.T) {
 	reg := newViewerRegistry()
 	self := reg.add("10.0.0.5:1111", "this tab", func() int { return 0 })
@@ -281,3 +287,185 @@ func missingLines(shared, copy string) []string {
 	}
 	return missing
 }
+
+// The header trigger carries no count badge.
+//
+// It used to: a number beside the label saying how many clients were attached
+// besides this page. That number is almost always 0 or 1, it had to be explained
+// (which tabs count, why "1" was not one client), and it duplicates what the
+// panel says as soon as it is opened. The label is the whole trigger now.
+//
+// This is asserted on the three places the badge lived — the markup, the module
+// that wrote it, and the stylesheet that dressed it — because removing it from
+// only one of them leaves either a stray "0" or a rule no element wears.
+func TestClientsTriggerHasNoCountBadge(t *testing.T) {
+	index := readAssetLF(t, "index.html")
+	clients := readAssetLF(t, "static/js/clients.js")
+	css := readAssetLF(t, "static/css/base.css")
+
+	if strings.Contains(index, "clients-count") {
+		t.Error("index.html still carries the count badge element")
+	}
+	if strings.Contains(clients, "clients-count") {
+		t.Error("clients.js still looks the count badge up and writes to it")
+	}
+	if strings.Contains(css, ".clients-count") {
+		t.Error("base.css still dresses .clients-count, which no element wears")
+	}
+
+	// The trigger still identifies itself: the dot is the icon and the label is
+	// what a narrow header hides. Losing both would leave an unlabelled square.
+	if !strings.Contains(index, `class="clients-label"`) {
+		t.Error("the trigger needs its own label span for the narrow-screen rule to hide")
+	}
+	if !strings.Contains(index, `id="clients-menu"`) {
+		t.Error("clients.js still opens the panel by id; the markup must keep it")
+	}
+}
+
+// On a narrow header the clients trigger keeps its glyph and drops its word,
+// exactly as the docs link and the language/theme keys beside it do.
+//
+// The label is display:none rather than removed: the summary keeps its title and
+// the span still exists for the i18n engine, so the accessible name and the
+// tooltip survive at every width.
+func TestClientsTriggerCollapsesToItsGlyphOnNarrowScreens(t *testing.T) {
+	// Both copies: the shared sheet and the cyberpunk theme's own copy of it. A
+	// theme that keeps the label would overflow the header on a phone, and the
+	// theme's copy is the one that renders there.
+	for _, path := range []string{
+		"static/css/workspace.css",
+		"themes/cyberpunk/assets/static/css/workspace.css",
+	} {
+		css := readAssetLF(t, path)
+		narrow := between(t, css, "@media (max-width: 768px) {", "\n}\n")
+		if !strings.Contains(narrow, ".clients-label { display: none; }") {
+			t.Errorf("%s: the narrow-header block must hide the clients label", path)
+		}
+		if !strings.Contains(narrow, ".clients-btn { width: 32px; height: 32px; padding: 0; justify-content: center; }") {
+			t.Errorf("%s: the clients trigger must become a 32px square beside the other keys", path)
+		}
+	}
+
+	// And the wide header still shows the word: the rule belongs to the media
+	// query, not to the base sheet.
+	base := readAssetLF(t, "static/css/base.css")
+	if !strings.Contains(base, ".clients-label { white-space: nowrap; }") {
+		t.Error("base.css should keep the label on the wide header")
+	}
+	if strings.Contains(base, ".clients-label { display: none; }") {
+		t.Error("base.css must not hide the label unconditionally")
+	}
+}
+
+// Opening the panel must draw it, not wait for the next frame.
+//
+// Frames are change-driven — the server broadcasts when a session, a client or a
+// tab changes — so on a quiet page the next one can be minutes away. The panel
+// used to paint only from a frame that arrived WHILE it was open, which meant a
+// freshly opened panel showed an empty box with the "nothing connected yet" hint
+// under it. That reads as "nobody is attached" even though the reader's own tab
+// is always one of the rows.
+//
+// The harness drives the real module: the lists are delivered once while the
+// panel is closed, and then the open event fires with no new frame. What the
+// assertion pins is that the second step draws from the lists already in hand.
+func TestClientsPanelPaintsWhenItIsOpened(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; cannot exercise the clients panel")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "clients.js")
+	if err := os.WriteFile(script, []byte(clientsPanelHarness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(dir, "clients-module.js")
+	if err := os.WriteFile(module, []byte(readAssetLF(t, "static/js/clients.js")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, script, module).CombinedOutput()
+	if err != nil {
+		t.Fatalf("the clients panel check failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "CLIENTS PANEL OK") {
+		t.Fatalf("the panel harness did not report success:\n%s", out)
+	}
+}
+
+// clientsPanelHarness drives clients.js against a small DOM stub.
+const clientsPanelHarness = `
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+
+/* --- DOM stub ----------------------------------------------------------- */
+function el(id) {
+  const node = {
+    id: id || '', open: false, hidden: true, textContent: '', className: '',
+    children: [], _listeners: {},
+    appendChild(c) { node.children.push(c); return c; },
+    setAttribute() {}, getAttribute() { return null; },
+    addEventListener(name, fn) { (node._listeners[name] = node._listeners[name] || []).push(fn); },
+    fire(name) { (node._listeners[name] || []).forEach(fn => fn()); }
+  };
+  return node;
+}
+const els = {
+  'clients-menu': el('clients-menu'),
+  'clients-body': el('clients-body'),
+  'clients-empty': el('clients-empty')
+};
+const document = {
+  readyState: 'complete',
+  getElementById: id => els[id] || null,
+  addEventListener() {},
+  createElement: () => el('row')
+};
+const context = {
+  console, JSON, String, Number, Array, Object, Date, isNaN, isFinite, parseInt,
+  document,
+  t: (k, opts) => k + (opts ? JSON.stringify(opts) : ''),
+  shortClock: () => '12:00',
+  _termcpLang: 'en'
+};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), context);
+
+const menu = els['clients-menu'];
+assert.ok(menu._termcpClientsWired, 'the open event must be wired at load');
+
+/* A frame arrives while the panel is closed. Nothing is drawn — the frame path
+   stays cheap — but the lists are kept. */
+context.renderClients(
+  [{ name: 'agent-a', version: '1.0', connected_at: '2026-10-17T10:00:00Z' }],
+  [{ addr: '127.0.0.1', user_agent: 'Chrome/120', self: true, watching: 2 }]
+);
+assert.strictEqual(els['clients-body'].children.length, 0,
+  'a closed panel must not rebuild its list on every frame');
+
+/* The reader opens it. No new frame is coming. */
+menu.open = true;
+menu.fire('toggle');
+assert.strictEqual(els['clients-body'].children.length, 2,
+  'opening the panel must draw the lists already in hand, or it reads as "nothing connected"');
+assert.strictEqual(els['clients-empty'].hidden, true,
+  'with a client and this tab attached, the empty hint must be hidden');
+
+/* Reopening must not duplicate rows: the signature guard is what makes the
+   paint idempotent across toggle and frame. */
+menu.open = false; menu.fire('toggle');
+menu.open = true; menu.fire('toggle');
+assert.strictEqual(els['clients-body'].children.length, 2,
+  'a repaint must replace the list, not append to it');
+
+/* And a lone tab is still "nothing connected yet": the reader's own row is not
+   another client. */
+context.renderClients([], [{ addr: '127.0.0.1', self: true }]);
+menu.open = false; menu.fire('toggle');
+menu.open = true; menu.fire('toggle');
+assert.strictEqual(els['clients-empty'].hidden, false,
+  'a page with only itself open has no other clients');
+
+console.log('CLIENTS PANEL OK');
+`
