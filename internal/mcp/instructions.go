@@ -26,7 +26,7 @@ const mcpServerInstructions = `termcp agent rules:
 3) A reply is TERM/1: status line, headers only when meaningful (Path, Status, Exit-Code, Handle, Content-Range, Error-Code, Usage), then the raw body. code>=400 = isError. Content-Range end is inclusive: end+1 is the next --cursor.
 4) Windows bound the reply, never the command: timeout (wait), bytes_limit/lines_limit (one slot), total_bytes_limit (whole reply). bytes_limit=0 returns the handle and consumes nothing. Truncation is 206, not a failure.
 5) After discovery act with concrete calls, not prose; verify via output or an explicit success field.
-6) Lifecycle: close <handle> closes one channel, the connection and its forwards/files stay; close --force <session> terminates it (entry stays as exited, output still readable); rm <session> erases it.
+6) Lifecycle: close <handle> closes one channel, the connection and its forwards/files stay; close <session> --force terminates it (entry stays as exited, output still readable); rm <session> erases it.
 7) Human in the loop (HARD BOUNDARY): notify FIRST (--level warn|error --sticky --on <session>) before any password/sudo/passphrase/MFA, confirmation, approval, choice or interactive input, and say it in your reply. Never guess, paste, echo or store secrets; never bypass sudo/auth/approval (sudo -n, NOPASSWD/setuid/sudoers, reword, encode, wrap, retry loops).
 8) review_pending=true: held, nothing ran, no id to poll - do NOT resubmit, reword or retry it. notify (rule 7), then WAIT (not a stall): staged text queues when its ending key arrives, and read later shows whether it ran.
 9) Other keys use JSON \u001b escapes in type. Repeating traceback: close --force, retry with PYTHON_BASIC_REPL=1. Silent hang: info <handle>.

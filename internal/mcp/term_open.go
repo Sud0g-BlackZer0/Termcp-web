@@ -34,6 +34,10 @@ func (s *Server) directiveOpen(ctx context.Context, stmt directive.Statement, wi
 	if pty {
 		mode = "pty"
 	}
+	if stmt.Target == "internal" && s.NoInternal {
+		return []envelope.Slot{{Code: 409, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConflict},
+			Body: "the internal profile is disabled on this instance (it was started with --no-internal)"}}
+	}
 	capID := capability.ShellOpen
 	if _, bad := s.requireSession(stmt.Target); bad != nil {
 		// The target is not an existing session, so this call creates one.
@@ -166,16 +170,15 @@ type aliasTable struct {
 // only touched from directive handling, which is serialised per call.
 var aliases = &aliasTable{m: map[string]string{}}
 
-// Expand resolves a directive's first word through the alias table, once.
+// Expand resolves a directive's first word through the alias table. The
+// expansion may itself name an alias, so resolution repeats until it reaches a
+// real directive (with a cycle guard).
 func (a *aliasTable) Expand(stmt directive.Statement) directive.Statement {
-	target, ok := a.m[stmt.Op]
-	if !ok {
+	if _, ok := a.m[stmt.Op]; !ok {
 		return stmt
 	}
-	// The expansion is re-parsed, so an alias can name another alias; the final
-	// expansion is what Path reports.
-	if f, err := directive.Parse(target + " " + strings.TrimSpace(stmt.Target+" "+stmt.Payload)); err == nil && len(f.Statements) == 1 {
-		return f.Statements[0]
+	if resolved, ok := a.resolve(stmt.Op, strings.TrimSpace(stmt.Target+" "+stmt.Payload)); ok {
+		return resolved
 	}
 	return stmt
 }
@@ -188,15 +191,34 @@ func (a *aliasTable) expandError(err error) (directive.Statement, bool) {
 	if !ok || derr.Op == "" {
 		return directive.Statement{}, false
 	}
-	target, ok := a.m[derr.Op]
-	if !ok {
-		return directive.Statement{}, false
+	return a.resolve(derr.Op, derr.Rest)
+}
+
+// resolve follows a name through the table until it lands on a directive the
+// parser knows, or fails (unknown name, unparseable expansion, or a cycle).
+func (a *aliasTable) resolve(name, rest string) (directive.Statement, bool) {
+	seen := map[string]bool{}
+	for {
+		expansion, ok := a.m[name]
+		if !ok || seen[name] {
+			return directive.Statement{}, false
+		}
+		seen[name] = true
+		f, err := directive.Parse(strings.TrimSpace(expansion + " " + rest))
+		if err == nil && len(f.Statements) == 1 {
+			stmt := f.Statements[0]
+			if _, next := a.m[stmt.Op]; !next {
+				return stmt, true
+			}
+			name, rest = stmt.Op, strings.TrimSpace(stmt.Target+" "+stmt.Payload)
+			continue
+		}
+		derr, ok := err.(*directive.Error)
+		if !ok || derr.Op == "" {
+			return directive.Statement{}, false
+		}
+		name, rest = derr.Op, derr.Rest
 	}
-	f, perr := directive.Parse(strings.TrimSpace(target + " " + derr.Rest))
-	if perr != nil || len(f.Statements) != 1 {
-		return directive.Statement{}, false
-	}
-	return f.Statements[0], true
 }
 
 // directiveAlias manages the runtime table.
@@ -213,8 +235,8 @@ func (s *Server) directiveAlias(_ context.Context, stmt directive.Statement, win
 		for name, expansion := range aliases.m {
 			b.WriteString(name + " = " + expansion + "\n")
 		}
-		capped, _ := capGenerated(b.String(), win)
-		return envelope.Slot{Code: 200, Headers: headers, Body: capped}
+		capped, code := capGenerated(b.String(), win)
+		return envelope.Slot{Code: code, Headers: headers, Body: capped}
 	}
 	name, expansion, _ := strings.Cut(body, " ")
 	name, expansion = strings.TrimSpace(name), strings.TrimSpace(expansion)

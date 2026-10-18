@@ -67,11 +67,7 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 	// A generated reply is capped by the same window as a byte stream: a listing is
 	// exactly as capable of flooding a context as a log is, and the directives with
 	// no stream to continue are the ones with no other protection.
-	code := 200
-	if capped, cut := capGenerated(body, win); cut {
-		body = capped
-		code = 206
-	}
+	body, code := capGenerated(body, win)
 	return envelope.Slot{Code: code, Headers: headers, Body: body}
 }
 
@@ -97,12 +93,7 @@ func (s *Server) directiveInfo(ctx context.Context, stmt directive.Statement, wi
 		writeKV(&b, "shell", fmt.Sprintf("%s %s %s %s",
 			handleOf(info.ID, sh.Index), sh.Status, dash(string(sh.Mode)), dash(sh.Name)))
 	}
-	code := 200
-	body := b.String()
-	if capped, cut := capGenerated(body, win); cut {
-		body = capped
-		code = 206
-	}
+	body, code := capGenerated(b.String(), win)
 	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: body}
 }
 
@@ -165,7 +156,13 @@ func (s *Server) directiveRemove(ctx context.Context, stmt directive.Statement, 
 
 // directiveSpan lists a channel's transcript spans.
 func (s *Server) directiveSpan(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	res, fail := s.callTool(ctx, "message", argsOf("action", "list", "shell_id", stmt.Target))
+	args := argsOf("action", "list", "session_id", stmt.Target)
+	// A session-level target means its primary shell, which the handler picks
+	// when shell_id is omitted. A shell id or locator is passed through.
+	if s.sessMgr.Get(stmt.Target) == nil {
+		args["shell_id"] = stmt.Target
+	}
+	res, fail := s.callTool(ctx, "message", args)
 	if fail != nil {
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
@@ -249,7 +246,7 @@ func (s *Server) directiveWatch(ctx context.Context, stmt directive.Statement, w
 	if !ok {
 		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
 	}
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: compactDocument(doc)}
+	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
 // directiveNotify posts a notification to the human.
@@ -274,7 +271,7 @@ func (s *Server) directiveNotify(ctx context.Context, stmt directive.Statement, 
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
 	doc, _ := toolResultMap(res)
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: compactDocument(doc)}
+	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
 // directiveDetect probes the termcp host for a shell.
@@ -284,7 +281,7 @@ func (s *Server) directiveDetect(ctx context.Context, stmt directive.Statement, 
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
 	doc, _ := toolResultMap(res)
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: compactDocument(doc)}
+	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
 // directiveForward maps `fwd` onto the forward tool.
@@ -321,7 +318,7 @@ func (s *Server) directiveForward(ctx context.Context, stmt directive.Statement,
 		return envelope.Slot{Code: 202, Headers: map[string]string{"Path": stmt.Path}, Body: *held}
 	}
 	doc, _ := toolResultMap(res)
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: compactDocument(doc)}
+	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
 // forwardCapability maps a forward action onto its capability.
@@ -389,7 +386,7 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 		text := toolResultText(res)
 		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: text}
 	}
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: compactDocument(doc)}
+	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
 // fileToolForAction maps a `file --action` onto the tool that implements it and
@@ -425,6 +422,9 @@ func fileToolForAction(action string) (tool, capID string, ok bool) {
 // directiveProfile maps `profile` onto ssh_config.
 func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	action := stmt.Flags["action"]
+	if action == "" && len(stmt.Args) > 0 {
+		action = stmt.Args[0]
+	}
 	if action == "" {
 		action = "list"
 	}
@@ -438,6 +438,9 @@ func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement,
 	}
 	args := map[string]any{"action": action}
 	setFlagString(args, stmt, "name", "name")
+	if _, ok := args["name"]; !ok && len(stmt.Args) > 1 {
+		args["name"] = stmt.Args[1]
+	}
 	setFlagString(args, stmt, "host", "host")
 	setFlagString(args, stmt, "user", "user")
 	setFlagNumber(args, stmt, "port", "port")
@@ -473,7 +476,7 @@ func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement,
 		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: listFromDoc(res, "configs", "name")}
 	}
 	doc, _ := toolResultMap(res)
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: compactDocument(doc)}
+	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
 // profileCapability maps a profile action onto its capability.
@@ -496,6 +499,9 @@ func profileCapability(action string) (string, bool) {
 // directiveExtension maps `ext` onto the extension tool.
 func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	action := stmt.Flags["action"]
+	if action == "" && len(stmt.Args) > 0 {
+		action = stmt.Args[0]
+	}
 	if action == "" {
 		action = "list"
 	}
@@ -509,6 +515,9 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	}
 	args := map[string]any{"action": action}
 	setFlagString(args, stmt, "name", "name")
+	if _, ok := args["name"]; !ok && len(stmt.Args) > 1 {
+		args["name"] = stmt.Args[1]
+	}
 	setFlagString(args, stmt, "kind", "kind")
 	setFlagString(args, stmt, "target", "target")
 	setFlagString(args, stmt, "description", "description")
@@ -537,7 +546,7 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: extensionListing(res)}
 	}
 	doc, _ := toolResultMap(res)
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: compactDocument(doc)}
+	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
 // extensionCapability maps an extension action onto its capability.
@@ -622,15 +631,16 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 			// reads once it has decided to produce the thing.
 			body += "\n" + op.Detail + "\n"
 		}
-		capped, _ := capGenerated(body, win)
-		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: capped}
+		capped, code := capGenerated(body, win)
+		return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: capped}
 	}
 	var b strings.Builder
 	for _, op := range directive.Ops() {
 		b.WriteString(op.Usage)
 		b.WriteByte('\n')
 	}
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: b.String()}
+	capped, code := capGenerated(b.String(), win)
+	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: capped}
 }
 
 // termGuide is the empty-call answer: where am I, what can I do, and what is here.
@@ -660,7 +670,8 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolRe
 			b.WriteString("  " + line + "\n")
 		}
 	}
-	return termSlotResult(envelope.Slot{Code: 200, Body: b.String()}), nil
+	body, code := capGenerated(b.String(), win)
+	return termSlotResult(envelope.Slot{Code: code, Body: body}), nil
 }
 
 // --- small helpers ---
@@ -830,19 +841,31 @@ func extensionListing(res *mcpgo.CallToolResult) string {
 
 // capGenerated applies the byte and line windows to a generated reply, in that
 // order, and reports whether it had to cut.
-func capGenerated(body string, win termArgs) (string, bool) {
-	cut := false
+// generatedSlot renders a generated body through the caller's window: the same
+// three axes that bound a stream bound a listing or a document.
+func generatedSlot(stmt directive.Statement, win termArgs, body string) envelope.Slot {
+	capped, code := capGenerated(body, win)
+	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: capped}
+}
+
+func capGenerated(body string, win termArgs) (string, int) {
+	if win.BytesLimit == 0 {
+		// The schema's zero-byte window: streamed replies hand back a handle and
+		// consume nothing; a generated reply has no stream, so it is simply empty.
+		return "", 204
+	}
+	code := 200
+	if win.BytesLimit > 0 && len(body) > win.BytesLimit {
+		body = foldOrTruncate(body, win.BytesLimit, win.OnBytesOverflow)
+		code = 206
+	}
 	if win.LinesLimit > 0 {
 		if lines := strings.Count(body, "\n"); lines > win.LinesLimit {
 			body = foldOrTruncateLines(body, win.LinesLimit, win.OnLinesOverflow)
-			cut = true
+			code = 206
 		}
 	}
-	if win.BytesLimit > 0 && len(body) > win.BytesLimit {
-		body = foldOrTruncate(body, win.BytesLimit, win.OnBytesOverflow)
-		cut = true
-	}
-	return body, cut
+	return body, code
 }
 
 // setFlagString copies a string flag into a handler argument.

@@ -8,7 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
+
+	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/envelope"
@@ -37,16 +42,24 @@ import (
 // inside one conversation; a leak would be one small session struct per opened
 // URL, and the alternative (a reaper) is machinery nobody asked for. Add eviction
 // when a long-lived instance actually accumulates them.
-var mcpChannels = map[string]*httpMCPChannel{}
+var (
+	mcpChannelsMu sync.Mutex
+	mcpChannels   = map[string]*httpMCPChannel{}
+)
+
+// mcpHandleSeq mints handles monotonically: len(mcpChannels)+1 can reuse a
+// handle after a close and silently point two names at one channel.
+var mcpHandleSeq atomic.Int64
 
 // httpMCPChannel is one opened HTTP endpoint.
 type httpMCPChannel struct {
-	url      string
-	sse      bool
-	session  string // Mcp-Session-Id, once initialize answered
-	client   *http.Client
-	endpoint string // SSE: the message URL discovered from the event stream
-	nextID   int
+	url         string
+	sse         bool
+	session     string // Mcp-Session-Id, once initialize answered
+	client      *http.Client
+	endpoint    string // SSE: the message URL discovered from the event stream
+	nextID      int
+	initialized bool
 }
 
 // mcpOpen connects an HTTP MCP endpoint and hands back a handle.
@@ -54,9 +67,20 @@ type httpMCPChannel struct {
 // It does not spend a shell channel: the transport is HTTP, so `ps` grows nothing.
 // The handle is an opaque short name; it is what the other subcommands take.
 func (s *Server) mcpOpen(ctx context.Context, stmt directive.Statement, url string) envelope.Slot {
-	ch := &httpMCPChannel{url: url, sse: strings.HasSuffix(url, "/sse"), client: http.DefaultClient, nextID: 1}
-	handle := "mcp" + fmt.Sprint(len(mcpChannels)+1)
+	u, err := neturl.Parse(url)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+			Body: "mcp open needs an http(s) URL, e.g. https://host/mcp"}
+	}
+	if strings.HasSuffix(url, "/sse") {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+			Body: "the mcp directive speaks streamable HTTP; use the endpoint that serves POST /stream (the legacy /sse transport is not implemented)"}
+	}
+	ch := &httpMCPChannel{url: url, client: http.DefaultClient, nextID: 1}
+	handle := fmt.Sprintf("mcp%d", mcpHandleSeq.Add(1))
+	mcpChannelsMu.Lock()
 	mcpChannels[handle] = ch
+	mcpChannelsMu.Unlock()
 	return envelope.Slot{
 		Code:    200,
 		Headers: map[string]string{"Path": stmt.Path, "Handle": handle},
@@ -71,7 +95,16 @@ func (s *Server) mcpChannel(ctx context.Context, stmt directive.Statement, sub s
 			Body: "mcp " + sub + " needs a handle (a shell handle for stdio, or the one mcp open returned)"}
 	}
 	handle := rest[0]
-	if ch, ok := mcpChannels[handle]; ok {
+	mcpChannelsMu.Lock()
+	ch, ok := mcpChannels[handle]
+	if ok && sub == "close" {
+		delete(mcpChannels, handle)
+	}
+	mcpChannelsMu.Unlock()
+	if ok {
+		if sub == "close" {
+			return envelope.Slot{Code: 204, Headers: map[string]string{"Path": stmt.Path}}
+		}
 		return s.mcpHTTP(ctx, stmt, sub, ch, rest[1:])
 	}
 	// Not an opened endpoint: it is a shell handle, and the peer is the process on
@@ -83,9 +116,6 @@ func (s *Server) mcpChannel(ctx context.Context, stmt directive.Statement, sub s
 func (s *Server) mcpHTTP(ctx context.Context, stmt directive.Statement, sub string, ch *httpMCPChannel, rest []string) envelope.Slot {
 	headers := map[string]string{"Path": stmt.Path}
 	switch sub {
-	case "close":
-		delete(mcpChannels, strings.TrimPrefix(ch.url, "//"))
-		return envelope.Slot{Code: 204, Headers: headers}
 	case "recv":
 		return envelope.Slot{Code: 204, Headers: headers,
 			Body: "an HTTP endpoint answers each send; there is nothing to receive. Use `mcp call`."}
@@ -105,15 +135,106 @@ func (s *Server) mcpHTTP(ctx context.Context, stmt directive.Statement, sub stri
 					Body: "the frame is not JSON: " + err.Error()}
 			}
 		}
+		method, _ := frame["method"].(string)
+		if method != "initialize" {
+			if err := ch.ensureInitialized(ctx); err != nil {
+				return envelope.Slot{Code: 500, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConnectionFailed}, Body: err.Error()}
+			}
+		}
 		ch.nextID++
 		reply, err := ch.post(ctx, frame)
 		if err != nil {
 			return envelope.Slot{Code: 500, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConnectionFailed}, Body: err.Error()}
 		}
+		if method == "initialize" {
+			ch.initialized = true
+		}
 		return envelope.Slot{Code: 200, Headers: headers, Body: reply}
 	}
 	return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
 		Body: "unknown mcp subcommand: " + sub}
+}
+
+// ensureInitialized performs the MCP initialize handshake for streamable HTTP.
+// It runs once per channel; the session id it captures is what every later
+// frame must carry, and its absence was the "Invalid session ID" failure.
+func (c *httpMCPChannel) ensureInitialized(ctx context.Context) error {
+	if c.initialized || c.sse {
+		return nil
+	}
+	id := c.nextID
+	init := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": mcpgo.LATEST_PROTOCOL_VERSION,
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]any{"name": "termcp", "version": "mcp-directive"},
+		},
+	}
+	c.nextID++
+	reply, err := c.post(ctx, init)
+	if err != nil {
+		return err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(reply), &doc); err != nil {
+		return fmt.Errorf("initialize: %s", reply)
+	}
+	if e, ok := doc["error"]; ok {
+		return fmt.Errorf("initialize: %v", e)
+	}
+	note := map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}
+	if _, err := c.post(ctx, note); err != nil {
+		return err
+	}
+	c.initialized = true
+	return nil
+}
+
+// sseData extracts the JSON-RPC payload from a text/event-stream body: the
+// event whose data id matches wantID, or the first data event for a
+// notification. Server-sent responses are normal for streamable HTTP.
+func sseData(raw string, wantID any) string {
+	var data strings.Builder
+	var best string
+	flush := func() {
+		payload := strings.TrimSpace(data.String())
+		data.Reset()
+		if payload == "" {
+			return
+		}
+		var probe map[string]any
+		if json.Unmarshal([]byte(payload), &probe) != nil {
+			return
+		}
+		if wantID == nil {
+			if best == "" {
+				best = payload
+			}
+			return
+		}
+		if got, ok := probe["id"]; ok && fmt.Sprint(got) == fmt.Sprint(wantID) {
+			best = payload
+		}
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			flush()
+			continue
+		}
+		if payload, ok := strings.CutPrefix(line, "data:"); ok {
+			data.WriteString(strings.TrimSpace(payload))
+			data.WriteByte('\n')
+		}
+	}
+	flush()
+	if best != "" {
+		return best
+	}
+	return strings.TrimSpace(raw)
 }
 
 // post sends one frame and returns the reply body.
@@ -146,7 +267,11 @@ func (c *httpMCPChannel) post(ctx context.Context, frame map[string]any) (string
 	if resp.StatusCode >= 400 {
 		return string(raw), fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(raw)))
 	}
-	return strings.TrimSpace(string(raw)), nil
+	text := strings.TrimSpace(string(raw))
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		text = sseData(text, frame["id"])
+	}
+	return text, nil
 }
 
 // mcpStdio speaks to the process running on a shell channel.

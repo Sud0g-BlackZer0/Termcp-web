@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -497,11 +498,19 @@ func TestTermStructuredContentIsIsomorphic(t *testing.T) {
 		t.Fatal(err)
 	}
 	var slots []map[string]any
-	if err := json.Unmarshal(raw, &slots); err != nil {
-		var one map[string]any
-		if err := json.Unmarshal(raw, &one); err != nil {
-			t.Fatalf("structuredContent is neither an array nor an object: %s", raw)
+	var one map[string]any
+	if err := json.Unmarshal(raw, &one); err != nil {
+		t.Fatalf("structuredContent is not an object: %s", raw)
+	}
+	if wrapped, ok := one["slots"].([]any); ok {
+		for _, item := range wrapped {
+			slot, ok := item.(map[string]any)
+			if !ok {
+				t.Fatalf("structuredContent slots contain a non-object: %s", raw)
+			}
+			slots = append(slots, slot)
 		}
+	} else {
 		slots = []map[string]any{one}
 	}
 
@@ -680,6 +689,145 @@ func TestTermIsTheOnlyEntryAndFitsItsBudget(t *testing.T) {
 		if name == "cmd" {
 			t.Error("cmd must not be required: the empty call is how a caller gets its bearings")
 		}
+	}
+}
+
+// Generated replies honor the same space windows as streams: zero bytes means
+// no bytes, a line window truncates with 206, and an invalid overflow policy is
+// an argument error rather than a silent default.
+func TestTermGeneratedRepliesHonorSpaceWindows(t *testing.T) {
+	s := newTestServer(t)
+	empty := termText(t, s, map[string]any{"cmd": "help", "bytes_limit": float64(0)})
+	if !strings.HasPrefix(empty, "TERM/1 204 No Content") {
+		t.Fatalf("bytes_limit=0 on help = %q", strings.SplitN(empty, "\n", 2)[0])
+	}
+	one := termText(t, s, map[string]any{"cmd": "help", "lines_limit": float64(1)})
+	if !strings.HasPrefix(one, "TERM/1 206 Partial Content") {
+		t.Fatalf("lines_limit=1 on help = %q", strings.SplitN(one, "\n", 2)[0])
+	}
+	if body := strings.SplitN(one, "\n\n", 2); len(body) != 2 || strings.Count(body[1], "\n") > 1 {
+		t.Fatalf("lines_limit=1 body = %q", one)
+	}
+	detect := termText(t, s, map[string]any{"cmd": "detect", "bytes_limit": float64(0)})
+	if !strings.HasPrefix(detect, "TERM/1 204 No Content") {
+		t.Fatalf("bytes_limit=0 on detect = %q", strings.SplitN(detect, "\n", 2)[0])
+	}
+	res := termCall(t, s, map[string]any{"cmd": "help", "on_bytes_overflow": "bogus"})
+	if !res.IsError || !strings.Contains(toolResultText(res), "on_bytes_overflow") {
+		t.Fatalf("invalid overflow policy was accepted:\n%s", toolResultText(res))
+	}
+}
+
+// learn_mode attaches the directive's Usage to generated replies too, not only
+// to streamed windows.
+func TestTermLearnModeAttachesUsageToGeneratedReplies(t *testing.T) {
+	s := newTestServer(t)
+	ps := termText(t, s, map[string]any{"cmd": "ps", "learn_mode": true})
+	if !strings.Contains(ps, "Usage: ps") {
+		t.Fatalf("ps with learn_mode has no Usage:\n%s", ps)
+	}
+	help := termText(t, s, map[string]any{"cmd": "help run", "learn_mode": true})
+	if !strings.Contains(help, "Usage: help") {
+		t.Fatalf("help with learn_mode has no Usage:\n%s", help)
+	}
+}
+
+// The mcp directive performs the streamable HTTP handshake against a real
+// endpoint, and close actually removes the handle.
+func TestTermMCPStreamableHandshakeAndClose(t *testing.T) {
+	s := newTestServer(t)
+	ts := httptest.NewServer(s.StreamableHTTPHandler())
+	defer ts.Close()
+
+	text := termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL})
+	h := handleFrom(t, text)
+	tools := termText(t, s, map[string]any{"cmd": "mcp tools " + h})
+	if !strings.HasPrefix(tools, "TERM/1 200 OK") ||
+		(!strings.Contains(tools, `"name":"term"`) && !strings.Contains(tools, `"name": "term"`)) {
+		t.Fatalf("tools/list did not return the term tool:\n%s", tools)
+	}
+	if res := termCall(t, s, map[string]any{"cmd": "mcp close " + h}); res.IsError {
+		t.Fatalf("mcp close failed:\n%s", toolResultText(res))
+	}
+	after := termText(t, s, map[string]any{"cmd": "mcp tools " + h})
+	if !strings.Contains(after, "not found") {
+		t.Fatalf("closed handle still resolves:\n%s", after)
+	}
+}
+
+func TestTermMcpOpenValidatesURL(t *testing.T) {
+	s := newTestServer(t)
+	res := termCall(t, s, map[string]any{"cmd": "mcp open not-a-url"})
+	if !res.IsError || !strings.Contains(toolResultText(res), "http(s) URL") {
+		t.Fatalf("mcp open accepted a non-URL:\n%s", toolResultText(res))
+	}
+	res = termCall(t, s, map[string]any{"cmd": "mcp open http://127.0.0.1:18765/sse"})
+	if !res.IsError || !strings.Contains(toolResultText(res), "streamable HTTP") {
+		t.Fatalf("mcp open accepted the unsupported SSE transport:\n%s", toolResultText(res))
+	}
+}
+
+// span accepts the same three handle spellings as every other directive,
+// including a session id whose channel has exited.
+func TestTermSpanAcceptsSessionHandle(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "echo hi")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, closed := s.channelExitState(h); closed {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	text := termText(t, s, map[string]any{"cmd": "span " + h})
+	if !strings.HasPrefix(text, "TERM/1 200 OK") {
+		t.Fatalf("span on an exited session:\n%s", text)
+	}
+}
+
+// A disabled internal profile is a configuration conflict (409), not an
+// internal server error.
+func TestTermInternalDisabledIsConflict(t *testing.T) {
+	s := newTestServer(t)
+	s.NoInternal = true
+	res := termCall(t, s, map[string]any{"cmd": "pipe internal --argv echo hi"})
+	if !strings.HasPrefix(toolResultText(res), "TERM/1 409 Conflict") {
+		t.Fatalf("pipe internal with NoInternal = %q", strings.SplitN(toolResultText(res), "\n", 2)[0])
+	}
+}
+
+// The documented positional action forms must reach their handlers, and a
+// gated write is 403, not 500.
+func TestTermPositionalActions(t *testing.T) {
+	s := newTestServer(t)
+	res := termCall(t, s, map[string]any{"cmd": "profile create --name demo --host 127.0.0.1 --user demo"})
+	if !res.IsError || !strings.Contains(toolResultText(res), "disabled") {
+		t.Fatalf("profile create did not reach the write gate:\n%s", toolResultText(res))
+	}
+	if !strings.HasPrefix(toolResultText(res), "TERM/1 403 Forbidden") {
+		t.Fatalf("profile write gate status = %q", strings.SplitN(toolResultText(res), "\n", 2)[0])
+	}
+	res = termCall(t, s, map[string]any{"cmd": "ext delete nope"})
+	if !res.IsError {
+		t.Fatalf("ext delete nope was silently accepted:\n%s", toolResultText(res))
+	}
+}
+
+// An alias may name another alias; resolution follows the chain to the real
+// directive.
+func TestTermAliasChains(t *testing.T) {
+	s := newTestServer(t)
+	defer termText(t, s, map[string]any{"cmd": "alias chain1 --off"})
+	defer termText(t, s, map[string]any{"cmd": "alias chain2 --off"})
+	if res := termCall(t, s, map[string]any{"cmd": "alias chain1 help"}); res.IsError {
+		t.Fatal(toolResultText(res))
+	}
+	if res := termCall(t, s, map[string]any{"cmd": "alias chain2 chain1"}); res.IsError {
+		t.Fatal(toolResultText(res))
+	}
+	text := termText(t, s, map[string]any{"cmd": "chain2"})
+	if !strings.Contains(text, "run <handle>") {
+		t.Fatalf("chained alias did not reach help:\n%s", text)
 	}
 }
 

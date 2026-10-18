@@ -30,6 +30,7 @@
 
 ### 修复
 
+- **对单入口做全功能黑盒测试后修掉的一批表示与交互问题**：多 slot 的 `structuredContent` 改为 `{"slots":[…]}`（客户端要求顶层是对象，裸数组会让整条回复被丢弃）；生成式回复（`help`/`ps`/`info`/`detect`/各列表）也遵守 `bytes_limit=0` 与 `lines_limit`（截断给 206）；`mcp` 指令补齐 streamable HTTP 的 initialize/session 握手，`close` 真正删除句柄，非法 URL 与旧的 `/sse` 在 `open` 时即被拒绝；`span` 接受 session 级 handle；`ext`/`profile` 的位置子命令（`ext delete x`）不再被静默当成 list；`learn_mode` 对成功回复也附 `Usage`；`on_*_overflow` 的非法枚举被拒绝；`close` 的 Usage 改为 target-first；profile 写门控返回 403 而不是 500；内部 profile 被禁用时返回 409。
 - **只渲染 `structuredContent` 的 MCP 客户端看不到 body**。JSON 投影此前刻意不带 body（"text 里已经有了"），但客户端可以只渲染结构化结果——于是成功回复只剩状态行和头部，正文消失；报错反而正常，因为 `isError` 结果走文本。现在 `body` 同时放进结构化投影：两个投影各自完整，代价是正文在传输里各存一份。
 
 - **准入拒绝被当成成功吞掉了**。`callTool` 只看 transport error，不看 `res.IsError`，于是 namespace 隔离与模板白名单的拒绝（它们以 isError `result` 返回）被各指令渲染成 `204 No Content`/`200 OK`——命令**没有执行**，调用方却被告知执行了。修在源头：`callTool` 把 isError 结果转成同样的 `toolFailure`，二十多个调用点一次性修好。顺带修了状态码：`failureFromResult` 走 `extractErrorInfo` 取专用 `error_code`，否则每个拒绝都退化成 `operation_failed`(500) 而不是 403。

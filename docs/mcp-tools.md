@@ -59,7 +59,7 @@ drwxr-xr-x ...
 - 状态行：`TERM/1 <code> <reason>`。`2xx` 成功、`4xx` 参数/状态错误、`5xx` 命令本身失败。`isError` 恰为 `code >= 400`。
 - 头部按固定顺序出现，**只出现有意义的**：`Path`（总是，显示实际执行的指令，别名已展开）、`Status`、`Exit-Code`、`Handle`、`Content-Range`、`Error-Code`、`Idempotent`、`Usage`。
 - body 是原始字节。**同一个值**的 JSON 投影在 `structuredContent`：`protocol` / `code` / `reason` 加每个头部同名键，再加 `body`（原样，不省略）——只渲染结构化投影的客户端也不会丢字节。
-- 批量目标（`run a1f3:1,b7c2:1 …`）返回一个 slot per 目标，按顺序拼接。`isError` 是任一 slot 失败。
+- 批量目标（`run a1f3:1,b7c2:1 …`）返回一个 slot per 目标，按顺序拼接。`isError` 是任一 slot 失败；多 slot 时 `structuredContent` 是 `{"slots":[…]}`（客户端要求顶层是对象，裸数组会被整条丢弃）。
 
 `Content-Range` 用 RFC 9110 形式，`end` 包含在内，所以 `end+1` 就是下一次的 `--cursor`。被 `total_bytes_limit` 截断的 slot 会同时改写这个头——它必须描述 body **实际**携带的字节，否则下一次读会跳过一段。
 
@@ -89,7 +89,7 @@ drwxr-xr-x ...
 | `ps [--shells] [--all]` | 当前有什么在跑。终端列格式，每行第一个字段就是可直接复制的 handle |
 | `info <session\|handle>` | `key: value` 一行一个事实 |
 | `resize <handle> <rows> <cols>` | 改 pty 尺寸 |
-| `close [--force] [--grace N] <handle\|session>` | 关通道或会话。`--grace` 默认 5 秒（进程退出的等待时间）；`--force` 只对会话生效 |
+| `close <handle\|session> [--force] [--grace N]` | 关通道或会话。`--grace` 默认 5 秒（进程退出的等待时间）；`--force` 只对会话生效 |
 | `rm <session>` | 彻底删除会话 |
 | `detect` | 探测本机的交互式 shell |
 
@@ -121,7 +121,7 @@ drwxr-xr-x ...
 | `file <session> --action read\|write\|stat\|delete\|rename\|mkdir\|urls\|perm\|link\|fs\|getwd …` | SFTP 操作 |
 | `profile list\|create\|edit\|copy\|delete …` | SSH 连接配置 |
 | `ext list\|get\|create\|update\|delete\|retry …` | 扩展层（MCP server / 技能窗口 / prompt 终端） |
-| `mcp open <url> [--sse]` / `mcp tools\|send\|recv\|call\|close <handle> …` | 把任意第三方 MCP server 当成一条通道驱动。HTTP 端点不消耗通道 |
+| `mcp open <url>` / `mcp tools\|send\|recv\|call\|close <handle> …` | 把任意第三方 MCP server 当成一条通道驱动。会做 initialize/会话握手；支持 streamable HTTP（`/stream`），不支持旧的 `/sse` 传输。HTTP 端点不消耗通道 |
 | `alias <name> <directive>` / `alias` / `alias <name> --off` | 给指令起名字。展开一次，`Path` 显示展开后的模样 |
 | `help [directive]` | 指令表 / 单条用法 |
 

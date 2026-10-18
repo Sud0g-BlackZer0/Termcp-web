@@ -48,7 +48,7 @@ func (s *Server) handleSSHConfigOps(ctx context.Context, request mcpgo.CallToolR
 		return s.handleListSSHConfigs(ctx, request)
 	case "create", "edit", "copy", "delete":
 		if !s.ManageSSHConfigs {
-			return toolError(CodeOperationFailed, "%s", "SSH config write actions are disabled; start termcp with --mcp-manage-ssh-configs"), nil
+			return toolError(CodeForbidden, "%s", "SSH config write actions are disabled; start termcp with --mcp-manage-ssh-configs"), nil
 		}
 		switch action {
 		case "create":

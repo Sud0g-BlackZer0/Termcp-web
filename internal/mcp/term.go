@@ -86,6 +86,12 @@ func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
 		return termArgs{}, &directive.Error{Msg: "lines_limit must be >= 0 (0 = no line limit)"}
 	case w.TotalBytesLimit <= 0:
 		return termArgs{}, &directive.Error{Msg: "total_bytes_limit must be > 0: it is the absolute cap for the whole reply"}
+	case w.OnTimeOverflow == "":
+		return termArgs{}, &directive.Error{Msg: "on_time_overflow must be truncate or fold"}
+	case w.OnBytesOverflow == "":
+		return termArgs{}, &directive.Error{Msg: "on_bytes_overflow must be truncate or fold"}
+	case w.OnLinesOverflow == "":
+		return termArgs{}, &directive.Error{Msg: "on_lines_overflow must be truncate or fold"}
 	}
 	return w, nil
 }
@@ -101,7 +107,7 @@ func overflowPolicy(args map[string]any, key string) string {
 	case "fold":
 		return "fold"
 	}
-	return "truncate"
+	return "" // invalid; parseTermArgs turns this into a 400
 }
 
 // handleTerm is the single entry point.
@@ -143,7 +149,18 @@ func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement,
 	s.currentReply = &out
 	defer func() { s.currentReply = nil }()
 	for _, stmt := range stmts {
-		out.slots = append(out.slots, s.runDirective(ctx, aliases.Expand(stmt), win)...)
+		expanded := aliases.Expand(stmt)
+		slots := s.runDirective(ctx, expanded, win)
+		// learn_mode is a property of the reply, so it is attached here rather
+		// than in each directive: generated replies (ps, help, detect, …) carry
+		// it exactly like streamed ones. withUsage de-duplicates per directive.
+		if win.LearnMode && len(slots) > 0 {
+			if slots[0].Headers == nil {
+				slots[0].Headers = map[string]string{}
+			}
+			s.addUsage(&out, expanded, slots[0].Headers)
+		}
+		out.slots = append(out.slots, slots...)
 	}
 	return out.result()
 }
@@ -223,7 +240,10 @@ func (t termReply) result() *mcpgo.CallToolResult {
 	if len(structured) == 1 {
 		result.StructuredContent = structured[0]
 	} else {
-		result.StructuredContent = structured
+		// structuredContent must be a JSON object. A batch is several slots, so
+		// it is wrapped rather than sent as a bare array, which clients reject
+		// against the object-shaped result schema.
+		result.StructuredContent = map[string]any{"slots": structured}
 	}
 	return result
 }
