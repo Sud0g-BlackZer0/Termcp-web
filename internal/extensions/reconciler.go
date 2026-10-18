@@ -464,14 +464,22 @@ func (r *Reconciler) reconcileAll(ctx context.Context) error {
 		case StatusAvailable:
 			sess := r.attachedSession(st)
 			if sess == nil {
+				// The connection is gone. Forget the handle before recording the
+				// failure, or the state keeps advertising a channel that cannot be
+				// driven.
+				r.detach(st)
 				r.fail(st, "session", "session is no longer running")
 				continue
 			}
 			if ch := liveShell(sess, st.shellOf()); m.ext.Mode != "" && ch == nil {
 				// The channel the extension runs on ended by itself: its process is
 				// gone while the connection it shares is not, so the retry opens a
-				// channel instead of redialing the host.
-				r.fail(st, "session", r.channelEndReason(sess, st))
+				// channel instead of redialing the host. Read the exit line before
+				// detach closes the channel, then drop the handle so the recorded
+				// failure does not carry a dead one.
+				reason := r.channelEndReason(sess, st)
+				r.detach(st)
+				r.fail(st, "session", reason)
 				continue
 			}
 			if err := r.ensureForwards(m.ext, st); err != nil {
