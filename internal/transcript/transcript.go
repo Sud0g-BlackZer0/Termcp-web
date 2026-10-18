@@ -114,7 +114,9 @@ func (o *Source) BaseOffset() int64 {
 //   - a session_id: the primary shell (live), or the merged output stream
 //     (DEAD / restart-restored session);
 //   - a termcp:// locator: a session, optionally one of its shell channels
-//     by stable channel index.
+//     by stable channel index;
+//   - the short handle `<session>:<N>` that ps/info/pty print, which names the
+//     same channel as the locator's `:N` form.
 //
 // Resolution order: live shells → live registry sessions (incl. restored
 // DEAD). Every valid session lives in the registry; there is no hidden archive.
@@ -132,6 +134,13 @@ func Resolve(sessMgr *session.Manager, msgMgr *message.Manager, id string) (*Sou
 			return nil, errf(ErrInvalid, "resource URL %q names an entry, not a session or shell", id)
 		}
 		id, shellIdx = p.SessionID, p.Index
+	} else if shortID, index := locator.SplitHandle(id); index > 0 {
+		// The short handle from ps. Reading has to agree with writing: a `run`
+		// whose bytes reached the right channel must not then be read back from
+		// the primary, or answer "not found" and drop the output it produced.
+		// Recording a bare session id keeps the session fallback identical to the
+		// locator path above.
+		id, shellIdx = shortID, index
 	}
 
 	// Locator channel form (:N): the target is that specific shell.

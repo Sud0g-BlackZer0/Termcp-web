@@ -11,6 +11,8 @@ import (
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/open-mcp-ai/termcp/internal/sshconfig"
 )
 
 // termCall drives the single entry the way a model would, with the same JSON
@@ -965,5 +967,131 @@ func TestTermRefusalIsNeverSuccessShaped(t *testing.T) {
 	// The failure must name the reason a caller can act on, not a generic one.
 	if code, _ := headerValue(t, out, "Error-Code"); code != "forbidden" {
 		t.Errorf("Error-Code = %q, want forbidden:\n%s", code, out)
+	}
+}
+
+// TestProfileListRendersTheHandlersKey pins the listing against the handler's
+// own field name.
+//
+// `profile list` rendered from "configs" while handleListSSHConfigs answers
+// "ssh_configs", and listFromDoc treats a missing key as an empty list — so the
+// one call that says what you can connect to always answered "(none)" on an
+// instance holding four profiles. The fix is the key AND the shape: this listing
+// is a plain array of names, not objects with a description field.
+func TestProfileListRendersTheHandlerKey(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	store := sshconfig.NewStore(dir)
+	seed := "kind = \"remote\"\nhost = \"10.0.0.1\"\nuser = \"u\"\npassword = \"placeholder\"\n"
+	if err := store.Save("demo-one", []byte(seed)); err != nil {
+		t.Fatalf("seeding the profile: %v", err)
+	}
+	s.sshConfigs = store
+
+	out := termText(t, s, map[string]any{"cmd": "profile list"})
+	if !strings.Contains(out, "demo-one") {
+		t.Fatalf("profile list dropped the profile it was given:\n%s", out)
+	}
+	if strings.Contains(out, "(none)") {
+		t.Fatalf("profile list answered the empty state while a profile exists:\n%s", out)
+	}
+}
+
+// TestFileSubActionsAreReachable pins that the three multi-action file verbs can
+// be asked at all.
+//
+// perm/link/fs dispatch on their own sub-action, which the directive reads from
+// --op. --op was never in the flag whitelist, so the parser rejected the only
+// spelling that worked ("unknown flag for file: --op") and the sub-action
+// defaulted to empty ("action must be chmod, chown, or chtimes") — three
+// capabilities unreachable from the tool surface with no way to discover it.
+func TestFileSubActionsAreReachable(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "sleep 30")
+	defer closeShell(t, s, h)
+
+	for _, tc := range []struct{ action, sub, want string }{
+		{"perm", "chmod", "chmod"},
+		{"link", "readlink", "readlink"},
+		{"fs", "realpath", "realpath"},
+	} {
+		out := termText(t, s, map[string]any{"cmd": "file " + h + " --action " + tc.action + " --op " + tc.sub + " --remote-path /tmp"})
+		if strings.Contains(out, "unknown flag") {
+			t.Errorf("file --action %s --op %s: the flag is still not accepted:\n%s", tc.action, tc.sub, out)
+		}
+		// Reaching the handler is what matters here; whether the SFTP call succeeds
+		// against a stub server is not this directive's contract.
+		if strings.Contains(out, "action must be") {
+			t.Errorf("file --action %s --op %s did not pass the sub-action through:\n%s", tc.action, tc.sub, out)
+		}
+	}
+}
+
+// TestReadBytesLimitZeroConsumesNothing pins that the directive whose job is
+// reading can still be told not to.
+//
+// readSlotAfter honoured bytes_limit=0; read had its own path that skipped the
+// check, so max_bytes=0 reached the handler and meant "no limit" — the opposite
+// of the documented "hand back the handle, consume nothing".
+func TestReadBytesLimitZeroConsumesNothing(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "seq 1 5")
+	waitForOutput(t, s, h, "5")
+
+	out := termText(t, s, map[string]any{"cmd": "read " + h, "bytes_limit": float64(0), "timeout": float64(0)})
+	if !strings.HasPrefix(out, "TERM/1 204") {
+		t.Fatalf("bytes_limit 0 must return no bytes:\n%s", out)
+	}
+	after := termText(t, s, map[string]any{"cmd": "read " + h, "timeout": float64(1)})
+	if !strings.Contains(after, "1\n2\n3") {
+		t.Errorf("a bytes_limit 0 read consumed the stream:\n%s", after)
+	}
+}
+
+// TestPipeToForwardsAndConsumes pins the one schema parameter that had no
+// implementation: pipe_to was parsed into termArgs and then read by nobody, so
+// asking for a pipe silently returned the bytes inline.
+func TestPipeToForwardsAndConsumes(t *testing.T) {
+	s := newTestServer(t)
+	src := openPipe(t, s, "echo forwarded-payload")
+	sink := openPipe(t, s, "cat")
+	defer closeShell(t, s, sink)
+
+	out := termText(t, s, map[string]any{"cmd": "read " + src, "pipe_to": sink, "timeout": float64(1)})
+	if strings.Contains(out, "forwarded-payload") {
+		t.Errorf("pipe_to left the forwarded bytes in the reply body:\n%s", out)
+	}
+	got := termText(t, s, map[string]any{"cmd": "read " + sink, "timeout": float64(1)})
+	if !strings.Contains(got, "forwarded-payload") {
+		t.Errorf("pipe_to wrote nothing into the target handle:\n%s", got)
+	}
+}
+
+// TestPipeToBadTargetIsAnError pins that a pipe which goes nowhere is reported.
+func TestPipeToBadTargetIsAnError(t *testing.T) {
+	s := newTestServer(t)
+	src := openPipe(t, s, "echo payload")
+	out := termText(t, s, map[string]any{"cmd": "read " + src, "pipe_to": "no-such-handle", "timeout": float64(1)})
+	if !strings.Contains(out, "not found") {
+		t.Fatalf("pipe_to to a missing handle reported nothing:\n%s", out)
+	}
+}
+
+// TestMCPCallTakesTheFrameFirst pins the argument position of the frame.
+//
+// mcpHTTP joined rest[1:], but mcpChannel had already sliced the handle off, so
+// the frame's first word was dropped: `mcp call <h> {"jsonrpc":…}` answered
+// "needs a JSON-RPC frame" and only worked with a junk word in front of it.
+func TestMCPCallTakesTheFrameFirst(t *testing.T) {
+	s := newTestServer(t)
+	ts := httptest.NewServer(s.StreamableHTTPHandler())
+	defer ts.Close()
+
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL}))
+	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
+
+	out := termText(t, s, map[string]any{"cmd": `mcp call ` + h + ` {"jsonrpc":"2.0","id":7,"method":"tools/list"}`})
+	if !strings.Contains(out, `"name":"term"`) && !strings.Contains(out, `"name": "term"`) {
+		t.Fatalf("mcp call did not send the frame it was given:\n%s", out)
 	}
 }

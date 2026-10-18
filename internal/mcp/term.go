@@ -162,7 +162,44 @@ func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement,
 		}
 		out.slots = append(out.slots, slots...)
 	}
+	if win.PipeTo != "" {
+		out.slots = s.forwardSlotsToStdin(ctx, win.PipeTo, out.slots)
+	}
 	return out.result()
+}
+
+// forwardSlotsToStdin implements pipe_to: the reply's bytes go into another
+// handle's stdin, and stay out of the reply body.
+//
+// It is the one parameter in the schema that made a promise nothing kept — the
+// argument was parsed and then read by nobody, so a caller that asked for a pipe
+// got its bytes back inline instead. The rule is one call, one target: whatever
+// this call produced, in order, into one channel. Type-and-enter is deliberately
+// not implied (the bytes are written as they are), because a pipeline stage takes
+// raw input, not a shell line.
+//
+// The forwarded bytes leave the reply body — that is the point of asking — and a
+// target that does not resolve adds its own failing slot, because silently
+// returning the bytes anyway would tell the caller the pipe worked.
+func (s *Server) forwardSlotsToStdin(ctx context.Context, target string, slots []envelope.Slot) []envelope.Slot {
+	var body strings.Builder
+	for _, slot := range slots {
+		if slot.Code < 400 {
+			body.WriteString(slot.Body)
+		}
+	}
+	if body.Len() == 0 {
+		return slots
+	}
+	if _, fail := s.callTool(ctx, "shell_input", argsOf("shell_id", target, "text", body.String())); fail != nil {
+		return append(slots, failureSlot(fail))
+	}
+	for i := range slots {
+		if slots[i].Code < 400 {
+			slots[i].Body = ""
+		}
+	}
+	return slots
 }
 
 // parseErrorSlot renders a directive-level failure as one slot, so a bad

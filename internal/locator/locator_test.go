@@ -142,3 +142,56 @@ func TestParseResourceURL(t *testing.T) {
 		})
 	}
 }
+
+// TestSplitHandleDoesNotTouchLocators is the guard on the Web UI's copy buttons.
+//
+// `termcp://#sid:2` ends in the same `:<N>` a short handle does, so a
+// handle-splitter that ran first would cut a locator in half and the one spelling
+// the UI emits would stop resolving. SplitHandle therefore refuses anything
+// LooksLike claims, and Parse stays the only reader of that syntax.
+func TestSplitHandleDoesNotTouchLocators(t *testing.T) {
+	for _, raw := range []string{
+		"termcp://#abc123", "termcp://#abc123:2", "termcp://mac",
+		"#abc123", "#abc123:2",
+	} {
+		if id, index := SplitHandle(raw); id != raw || index != 0 {
+			t.Errorf("SplitHandle(%q) = (%q, %d); a locator must survive untouched", raw, id, index)
+		}
+		// And the locator itself still parses to the channel it named.
+		if _, err := Parse(raw); err != nil {
+			t.Errorf("Parse(%q) broke: %v", raw, err)
+		}
+	}
+
+	// A colon-bearing value SplitHandle leaves alone is still Parse's to reject:
+	// the two spellings must not quietly trade meaning.
+	schemeWithIndex := "termcp://session-abc123:2"
+	if id, index := SplitHandle(schemeWithIndex); id != schemeWithIndex || index != 0 {
+		t.Errorf("SplitHandle(%q) = (%q, %d), want it left alone", schemeWithIndex, id, index)
+	}
+	if _, err := Parse(schemeWithIndex); err == nil {
+		t.Errorf("Parse(%q) accepted an entry name carrying a shell index", schemeWithIndex)
+	}
+
+	// The short handle is split; a bare id is passed through.
+	for _, tc := range []struct {
+		raw   string
+		id    string
+		index int
+	}{
+		{"abc123", "abc123", 0},
+		{"abc123:2", "abc123", 2},
+		{"abc123:1", "abc123", 1},
+		{"session-abc123:3", "session-abc123", 3},
+		// Not a handle: the suffix is not a positive integer.
+		{"abc:0", "abc:0", 0},
+		{"abc:", "abc:", 0},
+		{"a:b:c", "a:b:c", 0},
+		{"", "", 0},
+	} {
+		id, index := SplitHandle(tc.raw)
+		if id != tc.id || index != tc.index {
+			t.Errorf("SplitHandle(%q) = (%q, %d), want (%q, %d)", tc.raw, id, index, tc.id, tc.index)
+		}
+	}
+}

@@ -148,3 +148,33 @@ func LooksLike(s string) bool {
 	s = strings.TrimSpace(s)
 	return strings.HasPrefix(s, Scheme) || strings.HasPrefix(s, "#")
 }
+
+// SplitHandle splits the SHORT handle form `<session>[:N]` that `ps`, `info` and
+// every `pty`/`pipe` reply prints — the form the guide tells a caller to copy
+// straight into its next command.
+//
+// Locator syntax is refused here rather than at each call site: `termcp://#sid:2`
+// ends in the same `:<N>`, so a caller that tried this first would split a
+// locator into "termcp://#sid" and 2 and lose the one spelling the Web UI's copy
+// buttons emit. Locators keep exactly one parser (Parse), and this returns
+// nothing for them.
+//
+// A bare id with no colon returns index 0 ("no channel named"), which every
+// caller treats as the primary channel. A colon that is not followed by a
+// positive integer means this is a bare id containing a colon, so it is returned
+// unchanged rather than reported as a broken handle.
+func SplitHandle(s string) (id string, index int) {
+	s = strings.TrimSpace(s)
+	if LooksLike(s) {
+		return s, 0
+	}
+	i := strings.LastIndex(s, ":")
+	if i <= 0 || i == len(s)-1 {
+		return s, 0
+	}
+	n, err := strconv.Atoi(s[i+1:])
+	if err != nil || n < 1 {
+		return s, 0
+	}
+	return s[:i], n
+}

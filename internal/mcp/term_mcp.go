@@ -125,10 +125,14 @@ func (s *Server) mcpHTTP(ctx context.Context, stmt directive.Statement, sub stri
 		case "tools":
 			frame = map[string]any{"jsonrpc": "2.0", "id": ch.nextID, "method": "tools/list"}
 		default:
-			payload := strings.Join(rest[1:], " ")
+			// rest is already everything AFTER the handle (mcpChannel sliced it),
+			// so the frame starts at rest[0]. Skipping one more dropped the frame's
+			// first word: `mcp call h {"jsonrpc":…}` reported "needs a frame" and
+			// only worked with a junk word in front of it.
+			payload := strings.Join(rest, " ")
 			if payload == "" {
 				return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-					Body: "mcp send needs a JSON-RPC frame"}
+					Body: "mcp " + sub + " needs a JSON-RPC frame"}
 			}
 			if err := json.Unmarshal([]byte(payload), &frame); err != nil {
 				return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},

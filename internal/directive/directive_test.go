@@ -435,3 +435,64 @@ func asError(err error, target **Error) bool {
 	}
 	return ok
 }
+
+// TestTrailingSemicolonIsNotPayload pins the fix for a `;` leaking into the
+// caller's bytes.
+//
+// Statements are separated by `;`, so `run h echo hi;` is ONE statement whose
+// text ends at `echo hi`. The parser sliced payloads to stmt.End(), which counts
+// the separator, so the shell received `echo hi;` — and worse, a trailing `;` on
+// a flag value or a handle produced `mcp tools a1f3:1;` → "shell 'a1f3:1;' not
+// found", and `alias x3 help read;` stored `x3 = help read;` instead of a
+// directive.
+func TestTrailingSemicolonIsNotPayload(t *testing.T) {
+	f, err := Parse("run a1f3:1 echo AAA;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Statements) != 1 {
+		t.Fatalf("statements = %d, want 1", len(f.Statements))
+	}
+	if got := f.Statements[0].Payload; got != "echo AAA" {
+		t.Errorf("payload = %q, want %q", got, "echo AAA")
+	}
+	if got := f.Statements[0].Path; got != "run a1f3:1 echo AAA" {
+		t.Errorf("path = %q", got)
+	}
+
+	// Same for a payload whose own text legitimately ends in punctuation, and for
+	// the two statements of a chain: each keeps its own bytes, neither keeps the
+	// separator.
+	f, err = Parse("run a1f3:1 echo A; run b:1 echo B;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Statements) != 2 {
+		t.Fatalf("statements = %d, want 2", len(f.Statements))
+	}
+	if got := f.Statements[0].Payload; got != "echo A" {
+		t.Errorf("stmt0 payload = %q", got)
+	}
+	if got := f.Statements[1].Payload; got != "echo B" {
+		t.Errorf("stmt1 payload = %q", got)
+	}
+
+	// A quoted `;` belongs to the caller and must survive.
+	f, err = Parse(`run a1f3:1 echo 'a;b';`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Statements[0].Payload; got != `echo 'a;b'` {
+		t.Errorf("quoted semicolon payload = %q", got)
+	}
+
+	// --argv takes the rest of the statement: the separator stays out of the
+	// program's last argument.
+	f, err = Parse(`pipe mac --argv printf '[%s]' 'a';`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Statements[0].Flags["argv"]; got != `printf '[%s]' 'a'` {
+		t.Errorf("argv = %q", got)
+	}
+}

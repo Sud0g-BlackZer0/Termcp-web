@@ -7,6 +7,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sftp"
@@ -90,6 +91,14 @@ func (s *Server) requireSession(sessionID string) (*session.Session, *mcpgo.Call
 	}
 	if sess := s.sessMgr.GetByShellID(sessionID); sess != nil {
 		return sess, nil
+	}
+	// The short handle `sid:N` names a session too (plus one of its channels),
+	// which is what makes `info`, `close` and the namespace check agree with
+	// `read` about a handle copied out of `ps`.
+	if id, index := locator.SplitHandle(sessionID); index > 0 {
+		if sess := s.sessMgr.Get(id); sess != nil {
+			return sess, nil
+		}
 	}
 	if looksLikeResourceLocator(sessionID) {
 		p, err := parseResourceURL(sessionID)
@@ -236,6 +245,26 @@ func (s *Server) requireShell(shellID string) (*session.ChildShell, *mcpgo.CallT
 			return cs, nil
 		}
 		return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Session '%s' has no shell", shellID))
+	}
+	// The short handle `sid:N` that ps/info/pty print. It is accepted HERE, at the
+	// one door every terminal directive goes through, so "copy the handle from ps
+	// into the next command" is true for all of them instead of only for the
+	// locator spelling. SplitHandle refuses locator syntax, so the `:` in
+	// `termcp://#sid:2` is still the locator's to consume below.
+	if id, index := locator.SplitHandle(shellID); index > 0 {
+		if sess := s.sessMgr.Get(id); sess != nil {
+			if sess.Info().Status != api.SessionRunning {
+				return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is read-only via shell_output", sess.ID, sess.Info().Status))
+			}
+			cs, err := s.shellFromIndex(sess, index)
+			if err != nil {
+				return nil, toolError(CodeShellNotFound, "%s", err.Error())
+			}
+			if cs == nil {
+				return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Session '%s' has no shell", sess.ID))
+			}
+			return cs, nil
+		}
 	}
 	if looksLikeResourceLocator(shellID) {
 		p, err := parseResourceURL(shellID)

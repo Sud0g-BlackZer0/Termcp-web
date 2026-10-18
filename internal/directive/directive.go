@@ -191,8 +191,8 @@ var ops = []Op{
 	{Name: "file", Kind: KindFlags, Target: true,
 		Flags: []string{"action", "remote-path", "from-path", "to-path", "local-path", "data", "mode",
 			"offset", "length", "local-offset", "target", "link-path", "existing-path", "new-path",
-			"uid", "gid", "atime", "mtime", "size", "response-headers"},
-		Usage: "file <session> --action read|write|stat|delete|rename|mkdir|urls|perm|link|fs|getwd …"},
+			"uid", "gid", "atime", "mtime", "size", "response-headers", "op", "action-verb"},
+		Usage: "file <session> --action read|write|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …"},
 	{Name: "profile", Kind: KindFlags,
 		Flags: []string{"action", "name", "host", "user", "port", "password", "private-key", "key-passphrase",
 			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
@@ -384,6 +384,20 @@ func leadCall(cmd syntax.Command) *syntax.CallExpr {
 	return nil
 }
 
+// commandEnd is the source offset where a statement's command text ends,
+// excluding the `;` separator that stmt.End() counts as part of the statement.
+//
+// A payload is sliced to this offset so the caller's sequencing punctuation stays
+// out of the bytes sent to the shell: `run h echo hi;` must send `echo hi`, not
+// `echo hi;`. Everything else about the statement is unchanged — a pipeline or an
+// `&&` chain is still one command, and its text still ends at its last word.
+func commandEnd(stmt *syntax.Stmt) int {
+	if stmt.Semicolon.IsValid() {
+		return int(stmt.Semicolon.Offset())
+	}
+	return int(stmt.End().Offset())
+}
+
 // parseStatement reads one statement. ok is false for a statement that is not a
 // directive at all (an assignment, a redirection-only command) — those are left
 // for the next statement rather than reported, because `cmd` is a shell string
@@ -412,10 +426,17 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		}
 	}
 
+	// The statement's body ends at the command, not at the `;`/newline that
+	// separates it from the next one: stmt.End() includes a `;` separator, so a
+	// payload or last word sliced to it would carry the caller's `;` into the
+	// shell, the program's argv, or an identifier (`mcp tools a1f3:1;` →
+	// "a1f3:1;"). An explicit newline is already excluded by stmt.End().
+	bodyEnd := commandEnd(stmt)
+
 	out := Statement{
 		Op:    name,
 		Flags: map[string]string{},
-		Path:  strings.TrimSpace(src[stmt.Pos().Offset():stmt.End().Offset()]),
+		Path:  strings.TrimSpace(src[stmt.Pos().Offset():bodyEnd]),
 	}
 
 	var rest []word
@@ -488,7 +509,7 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 						}
 					}
 				}
-				tail := src[rest[i+1].start:stmt.End().Offset()]
+				tail := src[rest[i+1].start:bodyEnd]
 				if val != "" {
 					val += " " + tail
 				} else {
@@ -518,11 +539,11 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 				Usage: op.Usage,
 			}
 		}
-		start, end := rest[i].start, stmt.End().Offset()
+		start, end := rest[i].start, bodyEnd
 		if op.Kind == KindInterpreted {
 			// An interpreted payload is a NAME, not a command line: it stops at
 			// that word, because more words follow it (`alias jira mcp open …`).
-			end = rest[i].end
+			end = int(rest[i].end)
 			out.Args = append(out.Args, texts(rest[i+1:])...)
 		}
 		out.Payload = src[start:end]
@@ -592,7 +613,7 @@ func texts(ws []word) []string {
 // statement the parser could not parse — a caller-defined directive, whose meaning
 // only the alias table knows.
 func restOfStatement(src string, stmt *syntax.Stmt) string {
-	start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+	start, end := int(stmt.Pos().Offset()), commandEnd(stmt)
 	if start < 0 || end > len(src) || start >= end {
 		return ""
 	}

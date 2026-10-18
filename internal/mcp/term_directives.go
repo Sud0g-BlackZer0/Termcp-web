@@ -271,6 +271,18 @@ func (s *Server) directiveRead(ctx context.Context, stmt directive.Statement, wi
 
 // directiveReadOne reads one channel.
 func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
+	// bytes_limit 0 means "hand back the handle, consume nothing". readSlotAfter
+	// honours it; this path has to as well, or the one directive whose whole point
+	// is reading would be the one place the caller cannot decline to read.
+	// The offset is the stream's current end, so the reply still says where the
+	// next read starts.
+	if win.BytesLimit == 0 {
+		start, _ := s.outputSizeFor(stmt.Target)
+		return envelope.Slot{
+			Code:    204,
+			Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.UnsatisfiedRange(start)},
+		}
+	}
 	args := argsOf("shell_id", stmt.Target)
 	if v, ok := stmt.Flags["cursor"]; ok {
 		args["offset"] = flagNumber(v)

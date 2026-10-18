@@ -516,3 +516,73 @@ func TestShellOutputAcceptsLocator(t *testing.T) {
 		t.Fatalf("closed out-of-range: code=%q msg=%q", code, msg)
 	}
 }
+
+// TestShortHandleResolvesLikeTheLocator is the invariant behind the guide's
+// "copy a handle from ps into the next command".
+//
+// `ps`, `info` and the `pty`/`pipe` replies all print `<session>[:N]`, and the
+// empty call advertises that form as the thing to copy. Before this it did not
+// resolve at all — only the locator spelling did — so the printed handle was a
+// dead end and `run <sid>:2` answered shell_not_found.
+//
+// The two spellings must therefore address the SAME channel: adding the short
+// form may not move, shadow or renumber what the Web UI's copy buttons emit.
+func TestShortHandleResolvesLikeTheLocator(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleStartSession(context.Background(), makeRequest(map[string]any{
+		"command":    testShell(),
+		"args":       testInteractiveShellArgs(),
+		"mode":       "pty",
+		"ssh_config": "internal",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := parseResult(t, res)
+	sid := m["session_id"].(string)
+	primary := m["shell_id"].(string)
+	second := startSubShell(t, s, sid)
+
+	for _, tc := range []struct {
+		handle string
+		want   string
+	}{
+		{sid, primary},        // bare session id → primary channel
+		{sid + ":1", primary}, // explicit primary
+		{sid + ":2", second},  // the second channel
+		{"termcp://#" + sid, primary},
+		{"termcp://#" + sid + ":1", primary},
+		{"termcp://#" + sid + ":2", second},
+	} {
+		cs, bad := s.requireShell(tc.handle)
+		if bad != nil {
+			t.Fatalf("requireShell(%q) failed: %s", tc.handle, bad.Content[0].(mcpgo.TextContent).Text)
+		}
+		if cs.ID != tc.want {
+			t.Errorf("requireShell(%q) = %q, want %q", tc.handle, cs.ID, tc.want)
+		}
+	}
+
+	// Writes and reads go through the same door, so a handle that resolves for a
+	// read must be the one a run writes to.
+	if out := termText(t, s, map[string]any{"cmd": "run " + sid + ":2 echo short-handle"}); !strings.Contains(out, "short-handle") {
+		t.Fatalf("run %s:2 did not reach the channel:\n%s", sid, out)
+	}
+
+	// A channel number that names nothing stays an error on both spellings —
+	// the short form must not become a silent fallback to the primary.
+	for _, handle := range []string{sid + ":9", "termcp://#" + sid + ":9"} {
+		if _, bad := s.requireShell(handle); bad == nil {
+			t.Errorf("requireShell(%q) resolved; an out-of-range channel must fail", handle)
+		} else if code, _ := decodeToolError(t, bad); code != CodeShellNotFound {
+			t.Errorf("requireShell(%q) code = %q, want %q", handle, code, CodeShellNotFound)
+		}
+	}
+
+	// info/close resolve a short handle as a session too, so the namespace and
+	// admission gates see the same container the I/O routes it to.
+	sess, bad := s.requireSession(sid + ":2")
+	if bad != nil || sess.ID != sid {
+		t.Fatalf("requireSession(%q) = %v (bad=%v), want session %q", sid+":2", sess, bad, sid)
+	}
+}

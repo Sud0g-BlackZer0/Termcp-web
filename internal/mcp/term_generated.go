@@ -364,13 +364,24 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	setFlagNumber(args, stmt, "mtime", "mtime")
 	setFlagNumber(args, stmt, "size", "size")
 	if action != "read" && action != "write" && action != "getwd" {
-		// The actions that dispatch on their own action field take it verbatim.
+		// perm/link/fs each dispatch on their OWN action field (chmod, symlink,
+		// realpath …), so the sub-action overwrites the verb that selected the
+		// tool. --op is the spelling; --action-verb is the older alias.
+		//
+		// A missing flag yields "", not nil — the previous `== nil` test therefore
+		// never fired and the sub-action was silently empty, which is what made
+		// these three reachable only as "action must be chmod, chown, or chtimes".
 		switch action {
 		case "perm", "link", "fs":
-			args["action"] = stmt.Flags["action-verb"]
-			if args["action"] == nil {
-				args["action"] = stmt.Flags["op"]
+			sub := stmt.Flags["op"]
+			if sub == "" {
+				sub = stmt.Flags["action-verb"]
 			}
+			if sub == "" {
+				return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+					Body: "file --action " + action + " needs the sub-action: --op " + fileSubActions(action)}
+			}
+			args["action"] = sub
 		}
 	}
 
@@ -387,6 +398,20 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: text}
 	}
 	return generatedSlot(stmt, win, compactDocument(doc))
+}
+
+// fileSubActions names the sub-actions of a multi-action file verb, for the
+// error that has to teach the shape without a second call.
+func fileSubActions(action string) string {
+	switch action {
+	case "perm":
+		return "chmod|chown|chtimes"
+	case "link":
+		return "readlink|symlink|link"
+	case "fs":
+		return "truncate|realpath|statvfs"
+	}
+	return ""
 }
 
 // fileToolForAction maps a `file --action` onto the tool that implements it and
@@ -473,7 +498,7 @@ func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement,
 	if action == "list" {
 		// The profile listing is a set of names, one per line: copy-pasteable into
 		// the next `pty`/`pipe`.
-		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: listFromDoc(res, "configs", "name")}
+		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: listFromDoc(res, "ssh_configs", "name")}
 	}
 	doc, _ := toolResultMap(res)
 	return generatedSlot(stmt, win, compactDocument(doc))
@@ -790,6 +815,14 @@ func listFromDoc(res *mcpgo.CallToolResult, listKey, field string) string {
 	items, _ := doc[listKey].([]any)
 	var b strings.Builder
 	for _, raw := range items {
+		// Some lists are plain names (ssh_configs), others are objects with a
+		// description beside the name. Both shapes reach here, and a listing that
+		// silently drops one of them reads as "there is nothing there".
+		if name, ok := raw.(string); ok {
+			b.WriteString(name)
+			b.WriteByte('\n')
+			continue
+		}
 		item, ok := raw.(map[string]any)
 		if !ok {
 			continue
