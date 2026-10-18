@@ -496,3 +496,83 @@ func TestTrailingSemicolonIsNotPayload(t *testing.T) {
 		t.Errorf("argv = %q", got)
 	}
 }
+
+// TestFwdTakesItsSessionAsTheTarget pins the positional form the usage line
+// advertises: `fwd <session> --action …`.
+//
+// The op was declared without Target, so the second word was never read as the
+// object: `fwd a1f3 --action dynamic` left stmt.Target empty and the forward tool
+// answered "session_id required" for a command that had named its session. The
+// only working spelling was the undocumented `--session`, which the usage line
+// does not mention — a documented form that cannot work and a working form that
+// is not documented.
+func TestFwdTakesItsSessionAsTheTarget(t *testing.T) {
+	f, err := Parse("fwd a1f3 --action dynamic --local-port 11080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Statements) != 1 {
+		t.Fatalf("got %d statements, want 1", len(f.Statements))
+	}
+	st := f.Statements[0]
+	if st.Target != "a1f3" {
+		t.Errorf("Target = %q, want %q", st.Target, "a1f3")
+	}
+	if got := st.Flags["action"]; got != "dynamic" {
+		t.Errorf("action = %q, want %q", got, "dynamic")
+	}
+	if got := st.Flags["local-port"]; got != "11080" {
+		t.Errorf("local-port = %q, want %q", got, "11080")
+	}
+
+	// The flag form still works: it is the one existing callers may be using.
+	f, err = Parse("fwd --session a1f3 --action list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Statements[0].Flags["session"]; got != "a1f3" {
+		t.Errorf("--session = %q, want %q", got, "a1f3")
+	}
+}
+
+// TestEveryFlagIsDocumented pins the flag table against the help text.
+//
+// A flag that exists but appears in no usage line and no Detail page is a flag
+// only the source knows about, which is the same as not having it: the caller
+// who needs `file --local-offset` reads `help file`, does not find it, and
+// concludes the capability is missing. The reverse is worse and is caught in the
+// mcp package, where a flag can be listed here and consumed nowhere.
+func TestEveryFlagIsDocumented(t *testing.T) {
+	for _, op := range Ops() {
+		if len(op.Flags) == 0 {
+			continue
+		}
+		// Usage may name flags; Detail is where the ones that do not fit belong.
+		documented := op.Usage + "\n" + op.Detail
+		var missing []string
+		for _, f := range op.Flags {
+			if !strings.Contains(documented, "--"+f) {
+				missing = append(missing, "--"+f)
+			}
+		}
+		if len(missing) > 0 {
+			t.Errorf("%s: %d flag(s) documented nowhere (neither Usage nor Detail): %s\n"+
+				"add them to the Detail page, or drop them from Flags if nothing consumes them",
+				op.Name, len(missing), strings.Join(missing, ", "))
+		}
+	}
+}
+
+// TestValuelessFlagsAreReal pins that a flag listed in Valueless is also in
+// Flags: the parser consults them separately, so an entry in one and not the
+// other is either a flag that can never be set or one that silently demands a
+// value it does not take.
+func TestValuelessFlagsAreReal(t *testing.T) {
+	for _, op := range Ops() {
+		for _, v := range op.Valueless {
+			if !slices.Contains(op.Flags, v) {
+				t.Errorf("%s: %q is Valueless but not in Flags", op.Name, v)
+			}
+		}
+	}
+}

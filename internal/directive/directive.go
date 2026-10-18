@@ -147,13 +147,13 @@ var ops = []Op{
 	{Name: "key", Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat"},
 		Usage: "key <handle> <key> [--repeat N]"},
 	{Name: "read", Kind: KindFlags, Target: true,
-		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw", "timeout", "max-bytes"},
+		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw"},
 		Valueless: []string{"raw"},
 		Usage:     "read <handle> [--cursor N|--from-line N|--tail N] [--stream o|e] [--raw]",
 		Detail:    readDetail},
 	{Name: "pipe", Kind: KindPayload, Target: true,
 		Flags: []string{"argv", "name", "on-exit", "rows", "cols"}, RestValue: []string{"argv"},
-		Usage:  "pipe <entry|session> [--name ...] [--on-exit keep|close] [--argv <command> [args…]]",
+		Usage:  "pipe <entry|session> [--name ...] [--on-exit keep|close] [--rows N] [--cols N] [--argv <command> [args…]]",
 		Detail: argvDetail},
 	{Name: "pty", Kind: KindPayload, Target: true,
 		Flags: []string{"argv", "name", "on-exit", "size"}, RestValue: []string{"argv"},
@@ -181,32 +181,36 @@ var ops = []Op{
 		Usage:     "watch <handle> [--event output|exit|silence] [--for N] [--channel resource|sampling]   |   watch --off <rule>   |   watch --list",
 		Detail:    watchDetail},
 	{Name: "notify", Kind: KindPayload, Flags: []string{"level", "sticky", "on", "title", "for"}, Valueless: []string{"sticky"},
-		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] <body>",
+		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] [--title T] [--for SECONDS] <body>",
 		Detail: notifyDetail},
 	{Name: "detect", Kind: KindFlags,
 		Usage: "detect"},
-	{Name: "fwd", Kind: KindFlags,
-		Flags: []string{"action", "session", "remote-host", "remote-port", "local-port", "local-host", "forward-id"},
-		Usage: "fwd --action local|remote|dynamic|list|close … <session>"},
+	{Name: "fwd", Kind: KindFlags, Target: true, TargetOptional: true,
+		Flags:  []string{"action", "session", "remote-host", "remote-port", "local-port", "local-host", "forward-id"},
+		Usage:  "fwd <session> --action local|remote|dynamic|list|close …",
+		Detail: fwdDetail},
 	{Name: "file", Kind: KindFlags, Target: true,
 		Flags: []string{"action", "remote-path", "from-path", "to-path", "local-path", "data", "mode",
 			"offset", "length", "local-offset", "target", "link-path", "existing-path", "new-path",
-			"uid", "gid", "atime", "mtime", "size", "response-headers", "op", "action-verb"},
-		Usage: "file <session> --action read|write|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …"},
+			"uid", "gid", "atime", "mtime", "size", "op", "action-verb"},
+		Usage:  "file <session> --action read|write|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …",
+		Detail: fileDetail},
 	{Name: "profile", Kind: KindFlags,
 		Flags: []string{"action", "name", "host", "user", "port", "password", "private-key", "key-passphrase",
 			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
 			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port", "source"},
 		Valueless: []string{"trust-unknown-host", "default-approval"},
 		Usage:     "profile list|create|edit|copy|delete …",
-		Detail:    profileFileFormat},
+		Detail:    profileDetail + "\n\n" + profileFileFormat},
 	{Name: "ext", Kind: KindFlags,
 		Flags: []string{"action", "name", "kind", "target", "description", "command", "args", "url", "headers",
 			"mode", "rows", "cols", "allow", "paths", "notes", "enabled", "forwards"},
 		Valueless: []string{"enabled"},
-		Usage:     "ext list|get|create|update|delete|retry …"},
+		Usage:     "ext list|get|create|update|delete|retry …",
+		Detail:    extDetail},
 	{Name: "mcp", Kind: KindPayload,
-		Usage: "mcp open <url>   |   mcp tools|send|recv|call|close <handle> …"},
+		Usage:  "mcp open <url>   |   mcp tools|send|recv|call|close <handle> …",
+		Detail: mcpDetail},
 	{Name: "alias", Kind: KindPayload,
 		Usage: "alias <name> <directive>   |   alias   |   alias <name> --off"},
 	{Name: "help", Kind: KindFlags,
@@ -248,7 +252,9 @@ MFA, passphrase, confirmation, approval, a choice, interactive input — and whe
 a long task ends or fails. Blocking asks: --level warn|error --sticky. Once you
 have asked, WAIT: never poll, guess or fake an answer. A reply with no open page
 was delivered to nobody, so say the ask in your own reply too. Defaults: --level
-info; the toast lasts 10 seconds unless --sticky.`
+info; the toast lasts 10 seconds unless --sticky. --title sets the heading (the
+body is still the positional argument); --for N is the toast's lifetime in
+seconds, which --sticky overrides to "until dismissed".`
 
 // readDetail states the defaults because "read" without a selector is the
 // common call: whether that means "new bytes" or "everything" decides what the
@@ -256,7 +262,179 @@ info; the toast lasts 10 seconds unless --sticky.`
 const readDetail = `Defaults: the new bytes since the last read on a live channel; a closed channel
 returns its tail. --stream o keeps stdout only, e keeps stderr only; the default
 keeps both. --cursor N is a byte offset (end+1 from Content-Range), --from-line N
-a complete line, --tail N the last N lines.`
+a complete line, --tail N the last N lines.
+
+READ IS A CURSOR. A plain read CONSUMES what it returns: the next plain read of
+an unchanged channel is legitimately empty, which is not data loss and not an
+error. To see the whole log again, ask for it by position (--from-line 1); to
+peek without consuming, use bytes_limit 0 on the call (it returns the handle and
+the range it would have read).`
+
+// fileDetail is the file directive's flag map.
+//
+// The one-line Usage can only name the actions, but `file` carries more flags than
+// any other directive (22, versus 3-7 elsewhere) and each action accepts a
+// different subset. Without this page the flags were reachable only by guessing
+// or by reading the source: `help file` was 106 bytes while `help watch` was 999,
+// so the directive with the most parameters had the least documentation.
+//
+// Per-action fields are listed because an unknown flag is not an error the
+// caller can see: it is simply not passed on to the handler, which then reports a
+// missing field the caller did believe it had provided.
+const fileDetail = `Actions and the flags each one uses.
+  stat|delete          --remote-path
+  mkdir|urls|getwd     --remote-path            (getwd ignores it)
+  rename               --from-path --to-path
+  read                 --remote-path --offset --length [--mode text|hex|file]
+  write                --remote-path --data | --local-path --mode text|hex|file
+                       --offset is the REMOTE write position; --local-offset the
+                       position inside --local-path; --length caps the transfer
+
+--mode MEANS TWO DIFFERENT THINGS, by action. For read and write it is a STRING:
+text, hex, or file ("file" reads or writes --local-path as raw bytes). For
+--action perm --op chmod it is a NUMBER, and the number is DECIMAL, not octal:
+0644 is 420 and 0755 is 493. Writing "0644" there does not fail — it is parsed as
+the decimal value 644, which sets a different (and surprising) permission set, so
+a wrong mode is silent rather than rejected.
+
+--offset 0 TRUNCATES the remote file and writes from the start; --offset N > 0
+writes at that byte position and leaves the rest alone. That is what makes a
+large upload resumable chunk by chunk from N, but it also means a transfer
+interrupted at offset 0 cannot be resumed by rewriting its first chunk at 0 —
+that restarts the file rather than filling it. Re-send from offset 0 instead.
+
+--action-verb is the older spelling of --op and does the same thing; --op wins if
+both are given. Prefer --op.
+
+perm, link and fs take a SUB-ACTION via --op:
+  --action perm --op chmod    --remote-path --mode DECIMAL  (0644 -> 420, 0755 -> 493)
+  --action perm --op chown    --remote-path --uid N [--gid N]
+  --action perm --op chtimes  --remote-path --atime MS --mtime MS  (unix millis)
+  --action link --op readlink --remote-path
+  --action link --op symlink  --target T --link-path P
+  --action link --op link     --existing-path E --new-path P   (hard link)
+  --action fs   --op truncate --remote-path --size N
+  --action fs   --op realpath|statvfs  --remote-path
+
+--local-path and --remote-path are DIFFERENT HOSTS: which machine each one names
+depends on the direction, so read them as "the file on that side", not as a
+local file and a remote file. A path outside the session's whitelist is refused.
+Credentials are never echoed; a write reports bytes written, not content.`
+
+// extDetail is the extension directive's flag map and the two kinds that
+// actually need explaining.
+//
+// `ext` is how an agent ADDS to its own toolset, so a caller that cannot work out
+// the flags from a 42-byte usage line is missing the feature entirely: `help ext`
+// named six actions and none of the 17 fields, including --allow and --paths,
+// which are the whole point of a capability-trimmed window.
+const extDetail = `An extension is a pinned, capability-trimmed session that stays warm; it is not
+code. --kind picks the starting preset, every field stays editable afterwards.
+  --kind skill    a read-only window onto remote files (SFTP). REQUIRES --paths.
+  --kind mcp      an MCP server: --command with --args, or --url for HTTP.
+  --kind prompt   an interactive terminal with instructions attached (--notes).
+  --kind custom   everything by hand (the default when --kind is omitted).
+
+The action can be written either way: ext --action list, or ext list. The bare
+word is the same thing and is what the usage line shows; --action is the
+explicit form. Defaults to list.
+
+Which flags each action uses:
+  list|get             (list takes no flags; get takes --name)
+  create|update        --name --kind --target --description --notes --enabled
+                       --command --args --url --headers --mode --rows --cols
+                       --allow --paths --forwards
+  delete|retry         --name
+
+--target is the ssh_config the window opens against ("internal" = loopback).
+--allow is the capability whitelist, comma-separated, e.g. --allow file_read,file_stat.
+--paths is the path whitelist and is REQUIRED for a skill; a path outside it is
+refused even when the capability is allowed. --forwards declares tunnels that come
+up and go down with the session.
+
+--allow and --paths are the two gates that make a skill safe to hand to an agent:
+the first says WHAT it may do, the second says WHERE. Leaving both off is not
+"unrestricted" for a skill — validation refuses it, because a read-only window
+onto nothing has no purpose.
+
+create and update are gated by review mode (they change what the agent can reach
+from then on), so expect a 202 and wait rather than retrying.`
+
+// mcpDetail covers the two things `help mcp` cannot say in one line: that the
+// handle has two different sources (a shell for stdio servers, a token from `mcp
+// open` for HTTP ones), and that send/call take a raw JSON-RPC frame.
+//
+// Both are silent when got wrong. A frame sent to a stdio server goes through
+// the shell as bytes, so a malformed one produces no error — just an empty recv
+// later, which reads like the server ignoring the request.
+const mcpDetail = `Two kinds of handle, and the subcommands differ by kind.
+
+  stdio server: the handle is the SHELL running it.
+    mcp tools <shell>                    list its tools
+    mcp send  <shell> '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+    mcp recv  <shell>                    read one complete frame back
+    The send is 202, not 200: the frame is typed into the program and submitted,
+    and its answer arrives on the program's own stdout. recv consumes: each call
+    returns the NEXT frame, so two recvs are two answers, never the same one twice.
+    It is non-blocking — a frame still being written comes back as "no complete
+    frame yet", so poll rather than treating that as an error or an empty reply.
+
+  http endpoint: the handle is what mcp open returned.
+    mcp open https://host/mcp           -> Handle
+    mcp tools <handle>                   lists tools (sends tools/list itself)
+    mcp call  <handle> '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{}}}'
+    mcp recv  <handle>                   always 204: HTTP answers each send, so there is nothing to receive
+    mcp close <handle>
+
+send and call take a RAW JSON-RPC frame as the rest of the line. The frame starts
+immediately after the handle — do not put a placeholder word in front of it, and
+QUOTE IT. The terminal splits the line on whitespace before the handler sees it,
+so an unquoted frame reaches the parser as fragments and is refused as "the frame
+is not JSON" — with invalid character '\'' as the reason, which points at the
+quoting rather than at the frame.
+
+On an HTTP channel the initialize handshake is done for you on the first frame.
+An HTTP channel does not spend a shell channel: opening a dozen costs no shells.`
+
+// fwdDetail is the flag set per direction, which the one-line usage cannot show:
+// `fwd <session> --action …` does not say which of --remote-host / --local-port
+// belong to which direction, and a missing one is reported by the handler as a
+// generic requirement rather than as "this direction does not take that flag".
+const fwdDetail = `Directions and their flags:
+  --action local    --local-port [--local-host] --remote-host --remote-port
+                    termcp listens on local-port; the target dials remote-host:remote-port
+  --action remote   --local-port --remote-host --remote-port [--local-host]
+                    the TARGET listens on local-port and forwards to remote-host:remote-port
+                    from there; the reply echoes it as remote_port
+  --action dynamic  --local-port [--local-host]
+                    termcp listens as a SOCKS5 proxy; the target dials whatever is asked
+  --action list     no flags
+  --action close    --forward-id
+
+The session comes from the target position (fwd <session> --action …); --session
+is accepted as an alternative.
+
+--local-port 0 means "any free port" for local and dynamic only, and the reply's
+local_port is the one that was chosen. remote REJECTS 0 ("local_port required
+(1-65535)"): there the number is the port the TARGET binds, so the caller has to
+pick it. Listening addresses, measured rather than assumed: local and dynamic bind
+127.0.0.1, remote binds 0.0.0.0. Override either with --local-host.
+
+The reply differs by direction, which is easy to misread: local and dynamic report
+the listening address as local_port, while remote reports the port on the TARGET as
+remote_port. To see where a remote forward actually landed, list it — the create
+reply has no address for it.
+
+remote depends on the target's sshd: it asks the server to listen, so the address
+and port must be ones that server allows. A refusal comes back as
+"tcpip-forward request denied by peer" — that is the target's policy (GatewayPorts,
+AllowTcpForwarding), not a fault in the flags, and a privileged port needs the
+target's sshd to be root. This is why the same call succeeds against one host and
+fails against another.
+
+A forward dies with its session: the session's ResourceScope closes it, so there
+is no orphaned listener to remember. A listing is a read and is not reviewed;
+opening and closing are reviewed, so expect a 202 and wait rather than retrying.`
 
 // closeDetail states the kill deadline, which otherwise looks instantaneous.
 const closeDetail = `--force terminates a whole session; a channel closes with or without it. --grace N
@@ -276,6 +454,47 @@ whole argv in one pair of quotes makes it ONE program name
 (--argv 'go build ./...' runs a program with spaces in its name). --on-exit
 defaults to keep: the session survives its last shell; --on-exit close ends a
 one-shot session with it.`
+
+// profileFileFormat is the import/export file shape (Web UI batch import; HTTP
+// GET/POST /api/connections/batch). It is stated here, once, because the agent is
+// often the one asked to *produce* that text — a user pastes a list of hosts and
+// wants an importable file — and a format spec duplicated in prose would drift
+// from the parser the moment either is edited.
+// profileDetail documents the flag surface of the one directive whose usage line
+// names none of it: `profile list|create|edit|copy|delete …` says nothing about
+// how a host is described, and a caller that cannot find --host concludes remote
+// profiles cannot be created from here at all.
+//
+// The file format is a SEPARATE page (see help profile, which appends both)
+// because the two answer different questions: these flags act on one profile,
+// the file shape is for a batch import the caller is asked to produce.
+const profileDetail = `Actions and the flags each one uses.
+  list                      no flags
+  create                    --name and the connection fields below
+  edit                      --name plus whichever fields change
+  copy                      --source --name
+  delete                    --name
+
+There is no export/import ACTION. The file shape below is the shape of a batch
+import/export request (the Web UI's import, and POST /api/connections/batch),
+not something this directive runs. profile --action export is refused.
+
+--source is the copy source name (copy only); every other action ignores it.
+
+The connection fields, all optional except --name:
+  --host --user --port --password --private-key --key-passphrase
+  --known-hosts --trust-unknown-host --dial-timeout-seconds --proxy --description
+  --default-shell --default-mode --default-approval
+
+A bastion is described by --jump-host with --jump-user / --jump-port; deeper hops
+are NOT expressible as flags (a second bastion only exists in the file shape
+below, nested).
+
+The action can also be the first bare word: profile create …, or
+profile --action create …; both are the same.
+
+--trust-unknown-host and --default-approval take no value. A password or key set
+here is write-only: it is never echoed back by list or get.`
 
 // profileFileFormat is the import/export file shape (Web UI batch import; HTTP
 // GET/POST /api/connections/batch). It is stated here, once, because the agent is
