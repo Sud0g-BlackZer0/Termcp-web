@@ -6,7 +6,7 @@ Termcp 在同一个端口上同时提供四种入口，它们操作**同一批�
 | --- | --- | --- |
 | Web UI | 人 | 浏览器（`/`） |
 | MCP | AI Agent | Streamable HTTP（`/stream`）、SSE（`/sse`）、stdio 桥（本地子进程） |
-| Agent Skill | AI Agent（纯 curl，无需 MCP） | 实例自带的 `/skills.md` + REST |
+| Agent Skill | AI Agent（纯 curl，无需 MCP） | 实例自带的 `/SKILL.md` + REST |
 | REST + WebSocket | 脚本 / 程序 | `/api/*`、`/api/ui/ws` |
 
 四者共享一套会话内核，所以你在浏览器里看到的、Agent 正在驱动的、脚本在读的是同一条终端。工具面见 [`mcp-tools.md`](./mcp-tools.md)，端点见 [`api.md`](./api.md)。
@@ -104,7 +104,7 @@ Termcp 在同一个端口上同时提供四种入口，它们操作**同一批�
 
 ## 认证
 
-单个静态 token 保护整个 HTTP 面——Web UI、REST API、MCP SSE、MCP streamable HTTP 与浏览器 WebSocket。（只读文档 `/api.md` 与 `/skills.md` 保持公开，好让 Agent 在拿到 token 之前就能取到它们。）配置是可选的，仅限 loopback 绑定时保持免配置默认；非 loopback 绑定不带 token 是启动错误。
+单个静态 token 保护整个 HTTP 面——Web UI、REST API、MCP SSE、MCP streamable HTTP 与浏览器 WebSocket。（只读文档 `/api.md` 与 `/SKILL.md` 保持公开，好让 Agent 在拿到 token 之前就能取到它们。）配置是可选的，仅限 loopback 绑定时保持免配置默认；非 loopback 绑定不带 token 是启动错误。
 
 ```bash
 # 明文：flag 或环境变量
@@ -222,7 +222,7 @@ Web UI 的 **API / MCP / SKILLS** 页面（`/api.html`）给出两种 HTTP 传�
 
 ```bash
 # 公开端点：下载文档本身不需要 token
-curl -fsS http://<host>:18765/skills.md -o /tmp/termcp-SKILL.md
+curl -fsS http://<host>:18765/SKILL.md -o /tmp/termcp-SKILL.md
 
 # Claude Code 读取 ~/.claude/skills/<名字>/SKILL.md
 mkdir -p ~/.claude/skills/termcp && cp /tmp/termcp-SKILL.md ~/.claude/skills/termcp/SKILL.md
@@ -233,7 +233,7 @@ mkdir -p ~/.agents/skills/termcp && cp /tmp/termcp-SKILL.md ~/.agents/skills/ter
 
 安装后需重启 agent 会话（skill 在会话启动时加载）。Claude Code 没有单独的 skill 子命令：安装 = 放进目录，卸载 = `rm -rf ~/.claude/skills/termcp`（以 plugin 形式分发时用 `claude plugin install/uninstall`）。
 
-装好之后，一句“打开 termcp://rock64 并执行 `uname -a`”即可端到端完成：skill 会先用 `GET /api/resolve?url=...` 解析定位符，用解析出的 `ssh_config` 建会话，发送命令并轮询输出。同一份 skill 也注册为 MCP resource `<origin>/skills.md`，`/api.html` 会给出当前实例的准确安装命令。
+装好之后，一句“打开 termcp://rock64 并执行 `uname -a`”即可端到端完成：skill 会先用 `GET /api/resolve?url=...` 解析定位符，用解析出的 `ssh_config` 建会话，发送命令并轮询输出。同一份 skill 也注册为 MCP resource `<origin>/SKILL.md`，`/api.html` 会给出当前实例的准确安装命令。
 
 ## 接入脚本 / 程序（REST API）
 

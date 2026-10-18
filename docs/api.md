@@ -9,7 +9,7 @@ kinds of callers:
 |----------|------|--------|
 | Web UI | `/` + `/api.html` | Humans (browser) |
 | MCP | `/sse` + `/message` or `/stream` | AI agents with an MCP client |
-| Agent Skill + REST | `/skills.md` (install once) + `/api/*` | AI agents driving Termcp with `curl` |
+| Agent Skill + REST | `/SKILL.md` (install once) + `/api/*` | AI agents driving Termcp with `curl` |
 | REST + WebSocket | `/api/*` + `/api/ui/ws` | Scripts / programs |
 
 This document covers the REST surface (scripting). Real-time terminal I/O goes over
@@ -39,9 +39,9 @@ can learn the API without MCP and without version drift:
 | Document | Path | When to use it |
 |----------|------|----------------|
 | HTTP API reference (this file) | `/api.md` | You drive Termcp over HTTP yourself (REST/WebSocket): endpoints, bodies, output-cursor semantics |
-| HTTP skill (curl recipes) | `/skills.md` | Install once into a skills directory so the curl workflow is available on demand later |
+| HTTP skill (curl recipes) | `/SKILL.md` | Install once into a skills directory so the curl workflow is available on demand later |
 
-`/skills.md` is served flat (as guessable as `/api.md`) but is a real Agent Skill:
+`/SKILL.md` is served flat (as guessable as `/api.md`) but is a real Agent Skill:
 save it as `termcp/SKILL.md` in your agent's skills directory — the directory name
 is what a skill loader discovers. Claude Code reads `~/.claude/skills/termcp/SKILL.md`;
 agents following the shared convention read `~/.agents/skills/termcp/SKILL.md`
@@ -81,7 +81,7 @@ is handed the discovered bind address instead.
 
 Authentication does not apply to these two read-only documents: they carry no data
 and no secrets, and a fresh client (an agent before MCP setup, a script) has to be
-able to fetch them before it can use the API, so `/api.md` and `/skills.md` stay
+able to fetch them before it can use the API, so `/api.md` and `/SKILL.md` stay
 public even when a token is configured. Everything else — Web UI, REST, MCP, WebSocket
 — still requires credentials.
 
@@ -89,7 +89,7 @@ public even when a token is configured. Everything else — Web UI, REST, MCP, W
 curl -fsS "$BASE/api.md"                       # authoritative reference
 DIR=~/.claude/skills                           # Claude Code
 # DIR=~/.agents/skills                         # other agents
-mkdir -p "$DIR/termcp" && curl -fsS "$BASE/skills.md" -o "$DIR/termcp/SKILL.md"
+mkdir -p "$DIR/termcp" && curl -fsS "$BASE/SKILL.md" -o "$DIR/termcp/SKILL.md"
 ```
 
 ## 3. Authentication (optional, off by default)
@@ -143,7 +143,7 @@ Constraints:
   kept only the hash — `termcp daemon` management, `termcp stdio` — can
   still authenticate. The hash then doubles as a secret.
 - Tokens are never logged and must not go into URLs (query strings) — use headers.
-- Public exception: the two documentation endpoints `/api.md` and `/skills.md`
+- Public exception: the two documentation endpoints `/api.md` and `/SKILL.md`
   (GET/HEAD only, no data inside) are served **without** credentials, so agents
   and scripts can fetch the docs before they have a token. All other surfaces
   require the token.

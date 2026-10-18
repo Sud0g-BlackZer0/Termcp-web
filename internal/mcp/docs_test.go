@@ -119,7 +119,7 @@ func TestResourcesListAndRead(t *testing.T) {
 	}
 	want := map[string]bool{
 		"http://127.0.0.1:18765/api.md":    false,
-		"http://127.0.0.1:18765/skills.md": false,
+		"http://127.0.0.1:18765/SKILL.md": false,
 	}
 	for _, r := range list.Resources {
 		if _, ok := want[r.URI]; ok {
@@ -198,7 +198,7 @@ func TestLearnAPIPrompt(t *testing.T) {
 		t.Fatalf("prompts/get returned no messages: %s", get)
 	}
 	text := got.Messages[0].Content.Text
-	for _, want := range []string{"http://127.0.0.1:18765/api.md", "http://127.0.0.1:18765/skills.md", "restart nginx on prod"} {
+	for _, want := range []string{"http://127.0.0.1:18765/api.md", "http://127.0.0.1:18765/SKILL.md", "restart nginx on prod"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("learn-api prompt misses %q:\n%s", want, text)
 		}
@@ -901,7 +901,7 @@ func TestResourcesFollowRequestOrigin(t *testing.T) {
 		t.Fatalf("prompts/get returned nothing: %s", get)
 	}
 	text := got.Messages[0].Content.Text
-	for _, want := range []string{origin + "/api.md", origin + "/skills.md"} {
+	for _, want := range []string{origin + "/api.md", origin + "/SKILL.md"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("learn-api prompt misses %s:\n%s", want, text)
 		}

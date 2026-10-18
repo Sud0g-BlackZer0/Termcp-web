@@ -265,7 +265,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		// document it cannot fetch.
 		docs := embeddedStaticServer()
 		mux.Handle("/api.md", docs)
-		mux.Handle("/skills.md", docs)
+		mux.Handle("/SKILL.md", docs)
 		mux.Handle("/extensions.md", docs)
 	}
 }

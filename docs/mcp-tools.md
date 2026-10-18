@@ -138,17 +138,17 @@ drwxr-xr-x ...
 - SSE：`http://<host>:18765/sse`（Claude：`--transport sse` / `type: "sse"`）
 - Streamable HTTP：`http://<host>:18765/stream`（Claude：`--transport http` / `type: "http"`）
 
-可复制配置与 HTTP API 速查：Web UI **`/api.html`**。完整客户端样例见 `README.md` / `README.zh.md`。同一批会话也可用实例自带的 Agent Skill 驱动（`/skills.md` 安装一次，配 `GET /api/resolve` 解析 `termcp://` 定位符，纯 curl）。
+可复制配置与 HTTP API 速查：Web UI **`/api.html`**。完整客户端样例见 `README.md` / `README.zh.md`。同一批会话也可用实例自带的 Agent Skill 驱动（`/SKILL.md` 安装一次，配 `GET /api/resolve` 解析 `termcp://` 定位符，纯 curl）。
 
 ## Resources & Prompts
 
 Besides tools, the server publishes its own HTTP API reference and curl skill as
 MCP resources, and a `learn-api` prompt:
 
-- Resources: `<origin>/api.md` (REST reference) and `<origin>/skills.md` (curl skill).
+- Resources: `<origin>/api.md` (REST reference) and `<origin>/SKILL.md` (curl skill).
   URIs are the instance's real HTTP addresses, so the same string works for `curl`.
 - Prompt: `learn-api` (optional argument `task`) — primes an agent with `/api.md`
-  and `/skills.md` before it scripts against Termcp over REST.
+  and `/SKILL.md` before it scripts against Termcp over REST.
 
 What the `term` description advertises — which address, from what, and why not on the
 instructions or a resource — is documented once, in `docs/api.md` §2
