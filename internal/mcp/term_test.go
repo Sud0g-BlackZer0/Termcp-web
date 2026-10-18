@@ -628,7 +628,9 @@ func TestTermPayloadIsNotRewritten(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		text += termText(t, s, map[string]any{"cmd": "read " + h, "timeout": float64(2)})
-		if strings.Contains(text, "a  b") || strings.Contains(text, "exited") {
+		// Only the expected bytes end the loop: "Status: exited" can appear on a
+		// window that raced the exit, while the final line is still unread.
+		if strings.Contains(text, "a  b") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
