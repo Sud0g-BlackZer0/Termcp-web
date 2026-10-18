@@ -23,7 +23,7 @@ import (
 //
 // The channel forms use handles:
 //
-//	pipe mac --argv 'npx -y some-server'   → a stdio peer on a pipe channel
+//	pipe mac --argv npx -y some-server     → a stdio peer on a pipe channel
 //	mcp open https://host/mcp              → streamable HTTP, NO shell channel spent
 //	mcp tools|send|recv|call|close <handle>
 //

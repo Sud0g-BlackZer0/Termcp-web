@@ -4,9 +4,9 @@
 
 ### 变更
 
-- **MCP 工具面收成一个入口 `term`（#117）**。`tools/list` 从 32 个工具、约 22–25 KB 变成**一个**工具、约 2.0 KB，而且此后**不再随能力增长**：新增一种操作是在命令空间里加一条指令，不是在工具清单里加一行。`term` 只有 `cmd` 加九个窗口参数（`timeout` / `bytes_limit` / `lines_limit` / `total_bytes_limit` / `quiet_ms` / 三个 `on_*_overflow` / `pipe_to` / `learn_mode`），`cmd` **非必填** —— 空调用返回引导：用法摘要 + 现在有什么可操作。
+- **MCP 工具面收成一个入口 `term`（#117）**。`tools/list` 从 32 个工具、约 22–25 KB 变成**一个**工具、约 2.0 KB，而且此后**不再随能力增长**：新增一种操作是在命令空间里加一条指令，不是在工具清单里加一行。`term` 只有 `cmd` 加八个窗口参数（`timeout` / `bytes_limit` / `lines_limit` / `total_bytes_limit` / 三个 `on_*_overflow` / `pipe_to` / `learn_mode`），`cmd` **非必填** —— 空调用返回引导：用法摘要 + 现在有什么可操作。
 
-  返回值是 HTTP 风味的信封（`TERM/1 <code> <reason>` 状态行 + 只出现有意义的头部 + 原始 body），同一份值另有一个 JSON 投影在 `structuredContent` 里，键集与头部一一对应。`Content-Range` 用 RFC 9110 形式，`end` 包含在内，所以 `end+1` 就是下一次的游标；被 `total_bytes_limit` 截断的 slot 会同时改写它，因为一个声称了 body 已不再携带的字节的 range，比没有 range 更坏。
+  返回值是 HTTP 风味的信封（`TERM/1 <code> <reason>` 状态行 + 只出现有意义的头部 + 原始 body），同一份值另有一个 JSON 投影在 `structuredContent` 里，键集与头部一一对应，`body` 也原样包含在内。`Content-Range` 用 RFC 9110 形式，`end` 包含在内，所以 `end+1` 就是下一次的游标；被 `total_bytes_limit` 截断的 slot 会同时改写它，因为一个声称了 body 已不再携带的字节的 range，比没有 range 更坏。
 
   指令语法是 shell 风味的一行（`run a1f3:1 ls -la`），用 `mvdan.cc/sh/v3/syntax` 只解析不求值，payload 按源码切片取出，所以 `$HOME` / `$(cmd)` / `'a'"b"'c'` 逐字节原样进入 shell。`;` 分隔多条指令（一条一个 slot），`&&` / `|` 留在 payload 里（那是一条命令）。逗号目标是一整个词，即一次批量。
 
@@ -24,11 +24,13 @@
 
 - **`alias` 指令**：`alias look read a1f3:1` 之后 `look` 就是那条指令，`Path` 显示展开后的模样。运行时别名活在本进程里，重启即失。
 
-- **`mcp` 指令**：把任意第三方 MCP server 当成一条通道驱动（`pipe <entry> --argv 'npx -y some-server'` 之后 `mcp send` / `mcp recv` / `mcp tools` / `mcp call`），HTTP 端点则不消耗通道。
+- **`mcp` 指令**：把任意第三方 MCP server 当成一条通道驱动（`pipe <entry> --argv npx -y some-server` 之后 `mcp send` / `mcp recv` / `mcp tools` / `mcp call`），HTTP 端点则不消耗通道。
 
 - **`docs/mcp-tools.md` 重写**为 `term` 的指令参考（信封、三个窗口轴、指令表、错误码、能力层说明），`docs/api.md` 里指向 MCP 工具名的表述同步改为能力/指令。
 
 ### 修复
+
+- **只渲染 `structuredContent` 的 MCP 客户端看不到 body**。JSON 投影此前刻意不带 body（"text 里已经有了"），但客户端可以只渲染结构化结果——于是成功回复只剩状态行和头部，正文消失；报错反而正常，因为 `isError` 结果走文本。现在 `body` 同时放进结构化投影：两个投影各自完整，代价是正文在传输里各存一份。
 
 - **准入拒绝被当成成功吞掉了**。`callTool` 只看 transport error，不看 `res.IsError`，于是 namespace 隔离与模板白名单的拒绝（它们以 isError `result` 返回）被各指令渲染成 `204 No Content`/`200 OK`——命令**没有执行**，调用方却被告知执行了。修在源头：`callTool` 把 isError 结果转成同样的 `toolFailure`，二十多个调用点一次性修好。顺带修了状态码：`failureFromResult` 走 `extractErrorInfo` 取专用 `error_code`，否则每个拒绝都退化成 `operation_failed`(500) 而不是 403。
 
@@ -36,7 +38,15 @@
 
 - **`Content-Range` 在被总量上限截断后说了谎**。`total_bytes_limit` 只截 body 却留着原来的 range，于是调用方按 `end+1` 续读时会跳过被截掉的那一段。现在 `Slot.Cut` 让两者一起动，截到零字节时退化成 `bytes */total`。
 
-- **`pipe --argv` 的文档边界**：`--argv` 是 **argv**（按空格切分），不是命令行 —— 要多语句请 `sh -c` 或写脚本文件。`term` 的用法行与 `docs/mcp-tools.md` 都写明了这一点，因为它看起来像命令行而实际不是。
+- **窗口模型收成一个时间窗，`quiet_ms` 删除**。`run` 用位置读（`offset=start`）取命令输出，这条路径不阻塞；pty 又没有任何"命令结束"信号，于是快速命令经常先回 `204`，必须再补一次 `read`。现在按模式只用一个 `timeout`：pipe 等进程退出（提前返回），pty 等满时间窗再取（窗口就是采样时长），默认都是 **2s**。`quiet_ms` 从未被实现过，概念并入时间窗后直接删除。pty 是给人用的交互模式，一两秒的等待无感；多等一下能把回显、输出和提示符一次带回，省掉一次补读（对 AI 是一次完整的 turn）。
+
+- **默认值不再只藏在 schema 的 `default` 字段里**。窗口参数的默认值（`timeout` 2s、`bytes_limit` 8192、`lines_limit` 200、`total_bytes_limit` 32768、溢出策略 `truncate`）现在也写进参数描述本身：不同客户端对 `default` 字段的渲染并不一致，看不到就等于让调用方猜。`help <directive>` 里同样补上了行为性默认值：`read` 默认读新增字节/已关闭通道读尾部、`close --grace` 默认 5 秒、`watch` 默认 `--event output`/`--for 3`、`notify` 默认 `--level info`/toast 10 秒、`pipe --on-exit` 默认 `keep`。
+
+- **`exited` 在输出排空之前就发布了**。子通道的退出 watcher 先把状态置成 `exited`，再 `drainPipes`/`buf.Close`，于是"看到 exited 立刻 read"的命令会读到 `Content-Range: */0`——进程明明打印过，字节却还在传输缓冲里。现在先排空并封存缓冲区再置 `exited`：退出状态就是"输出已完整"的承诺，快速结束的管道命令也能读到尾巴。
+
+- **`watch` 省掉 `--channel` 不再报错**。文档一直说"省略由服务端决定"，handler 却直接拒绝。现在省略时按客户端能力选：声明 sampling 用 sampling，否则用任何客户端都能收的 resource。
+
+- **`pipe --argv` 在第一个词之后静默丢参数，引号也会被切坏**。flag 解析原来只取 `--argv` 后面的一个词，于是 `--argv echo hello` 只跑了 `echo`、`hello` 无声消失；`--argv 'sh -c "echo hi"'` 的分词又会把内层引号切碎，错误从 sh 冒出来而不是 termcp。现在 `--argv` 消费整行剩余部分，按 shell 引用规则分词（`--argv sh -c 'echo hi'` 是三个词），但不求值；`;`/`|`/`>` 这类命令行语法会被拒绝并给 `Usage`，而不是当文本塞给程序。其他 flag 必须写在 `--argv` 之前，裸 payload 也不再被静默忽略——两者都直接报 `400`，因为对 AI 来说"静默执行了错的命令"比报错难查得多。没有兼容特例：整段 argv 再包一层引号就是一个程序名，和终端里完全一样。
 
 - **连接者面板打开时是空的**。面板的列表只由「会话帧」驱动，而会话帧是**变更驱动**的：服务端在会话、连接者或标签页发生变化时才广播，静止的页面可能几分钟都不来一帧。于是打开面板时通常什么都没有发生 —— `renderClients` 在面板关着时直接返回（连签名都不记），打开面板又没有代码去画，`#clients-empty` 那句「还没有连接者」就单独留在空框里。**这看起来就是「没有连接者」，其实那个列表一直握在手上却被丢掉了**，而且你自己这个标签页本身就是一个 viewer，永远应该在列表里。现在帧到达时把两份列表记下来，面板的 `toggle` 事件用它们立即重画（`toggle` 而不是 click：`<details>` 也可能被键盘、页内查找、浏览器恢复状态打开，这三种都只发 `toggle`）。绘制与渲染路径拆成两个函数，所以「打开时画」与「帧来了才画」共用同一份签名去重，重复开合不会叠行。
 

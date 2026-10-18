@@ -642,7 +642,7 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolRe
 	var b strings.Builder
 	b.WriteString("termcp terminal. Syntax:\n")
 	b.WriteString("  pty internal                                  open an interactive shell  -> Handle\n")
-	b.WriteString("  pipe internal --argv 'sh -c …'                run a program to exit      -> Handle\n")
+	b.WriteString("  pipe internal --argv sh -c 'echo hi'          run a program to exit      -> Handle\n")
 	b.WriteString("  run a1f3:1 go build ./...                     one command, one call\n")
 	b.WriteString("  read a1f3:1 / ps / info a1f3:1                read, list, inspect\n")
 	b.WriteString("  help / help <directive>                       the full directive table\n")

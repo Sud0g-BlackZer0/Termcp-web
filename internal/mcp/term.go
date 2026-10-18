@@ -27,15 +27,17 @@ import (
 // docs/mcp-tools.md.
 const termToolName = "term"
 
-// window defaults. Time is cheap and space is not: a window that is too short
-// costs a second round trip, while a window that is too wide spends context that
-// is never recovered.
+// window defaults. Two seconds is the sampling window for a pty and the upper
+// bound for a pipe's exit wait. Space stays the scarce axis: a wide window
+// spends context that is never recovered.
 const (
-	defaultTimeoutSeconds  = 30
+	// One window for both modes. A pipe returns as soon as its process exits
+	// (early), a pty waits the window out; two seconds is long enough to catch
+	// a terminal's late chunks and short enough that a stuck wait is cheap.
+	defaultTimeoutSeconds  = 2
 	defaultBytesLimit      = 8192
 	defaultLinesLimit      = 200
 	defaultTotalBytesLimit = 32768
-	defaultQuietMillis     = 200
 )
 
 // termArgs is the parsed window of one term call: the parameters that decide how
@@ -52,7 +54,6 @@ type termArgs struct {
 	BytesLimit      int
 	LinesLimit      int
 	TotalBytesLimit int
-	QuietMillis     int
 	OnTimeOverflow  string
 	OnBytesOverflow string
 	OnLinesOverflow string
@@ -70,7 +71,6 @@ func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
 		BytesLimit:      int(getFloat64(args, "bytes_limit", defaultBytesLimit)),
 		LinesLimit:      int(getFloat64(args, "lines_limit", defaultLinesLimit)),
 		TotalBytesLimit: int(getFloat64(args, "total_bytes_limit", defaultTotalBytesLimit)),
-		QuietMillis:     int(getFloat64(args, "quiet_ms", defaultQuietMillis)),
 		OnTimeOverflow:  overflowPolicy(args, "on_time_overflow"),
 		OnBytesOverflow: overflowPolicy(args, "on_bytes_overflow"),
 		OnLinesOverflow: overflowPolicy(args, "on_lines_overflow"),
@@ -86,8 +86,6 @@ func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
 		return termArgs{}, &directive.Error{Msg: "lines_limit must be >= 0 (0 = no line limit)"}
 	case w.TotalBytesLimit <= 0:
 		return termArgs{}, &directive.Error{Msg: "total_bytes_limit must be > 0: it is the absolute cap for the whole reply"}
-	case w.QuietMillis < 0 || w.QuietMillis > 60000:
-		return termArgs{}, &directive.Error{Msg: "quiet_ms must be between 0 and 60000"}
 	}
 	return w, nil
 }
@@ -276,7 +274,6 @@ func defaultTermArgs() termArgs {
 		BytesLimit:      defaultBytesLimit,
 		LinesLimit:      defaultLinesLimit,
 		TotalBytesLimit: defaultTotalBytesLimit,
-		QuietMillis:     defaultQuietMillis,
 		OnTimeOverflow:  "truncate",
 		OnBytesOverflow: "truncate",
 		OnLinesOverflow: "truncate",

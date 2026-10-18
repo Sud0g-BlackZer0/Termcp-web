@@ -13,8 +13,12 @@
 //
 // Two shapes exist, and the difference is a property of the directive:
 //
-//	payload  (run, pipe --argv, alias): everything after the target is raw bytes
-//	flags    (key, read, file, …):      --name[=value] after the target
+//	payload  (run, alias):        everything after the target is raw bytes
+//	flags    (key, read, file, …): --name[=value] after the target
+//
+// `pipe`/`pty` are payload directives whose `--argv` flag takes the REST of the
+// statement: an argv is a word list (`--argv sh -c 'echo hi'`), and reading only
+// the word after the flag would silently drop the program's arguments.
 //
 // Flags go AFTER the target, never before: `key --repeat 3 a1f3:1 up` is
 // rejected, because a flag in second position breaks the one positional rule the
@@ -52,6 +56,11 @@ type Op struct {
 	Kind Kind
 	// Target says the second word names the object the directive acts on.
 	Target bool
+	// TargetOptional allows the flag-only forms of a targeted directive
+	// (`watch --off <rule>`, `watch --list`), where there is no object to name.
+	// Without it the positional rule ("word 2 is the target") would reject a
+	// leading flag, so the documented forms could never parse.
+	TargetOptional bool
 	// Flags lists the accepted option names (without the leading --).
 	Flags []string
 	// MinArgs is the minimum number of POSITIONAL arguments after the target,
@@ -63,6 +72,11 @@ type Op struct {
 	// not swallowed as one. Every other flag consumes the next word when it was
 	// not written as --name=value.
 	Valueless []string
+	// RestValue lists the flags whose value is the REST of the statement, not
+	// one word. An argv is a word list; stopping at the first word would drop
+	// the program's arguments without an error, which is the worst failure
+	// mode. These flags must come last: a known flag after one is refused.
+	RestValue []string
 	// Usage is the one-line template `help` and error replies print. Window
 	// parameters are deliberately absent: they are on the tool schema with
 	// self-explaining names, and repeating them 22 times would be noise.
@@ -135,13 +149,16 @@ var ops = []Op{
 	{Name: "read", Kind: KindFlags, Target: true,
 		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw", "timeout", "max-bytes"},
 		Valueless: []string{"raw"},
-		Usage:     "read <handle> [--cursor N|--from-line N|--tail N] [--stream o|e] [--raw]"},
+		Usage:     "read <handle> [--cursor N|--from-line N|--tail N] [--stream o|e] [--raw]",
+		Detail:    readDetail},
 	{Name: "pipe", Kind: KindPayload, Target: true,
-		Flags: []string{"argv", "name", "on-exit", "rows", "cols"},
-		Usage: "pipe <entry|session> [--argv 'cmd'] [--name ...] [--on-exit keep|close]"},
+		Flags: []string{"argv", "name", "on-exit", "rows", "cols"}, RestValue: []string{"argv"},
+		Usage:  "pipe <entry|session> [--name ...] [--on-exit keep|close] [--argv <command> [args…]]",
+		Detail: argvDetail},
 	{Name: "pty", Kind: KindPayload, Target: true,
-		Flags: []string{"argv", "name", "on-exit", "size"},
-		Usage: "pty <entry|session> [--argv 'cmd'] [--name ...] [--size 24x80]"},
+		Flags: []string{"argv", "name", "on-exit", "size"}, RestValue: []string{"argv"},
+		Usage:  "pty <entry|session> [--name ...] [--size 24x80] [--argv <command> [args…]]",
+		Detail: argvDetail},
 	{Name: "ps", Kind: KindFlags, Flags: []string{"shells", "all"}, Valueless: []string{"shells", "all"},
 		Usage: "ps [--shells] [--all]"},
 	{Name: "info", Kind: KindFlags, Target: true,
@@ -149,7 +166,8 @@ var ops = []Op{
 	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2,
 		Usage: "resize <handle> <rows> <cols>"},
 	{Name: "close", Kind: KindFlags, Target: true, Flags: []string{"force", "grace"}, Valueless: []string{"force"},
-		Usage: "close [--force] [--grace N] <handle|session>"},
+		Usage:  "close [--force] [--grace N] <handle|session>",
+		Detail: closeDetail},
 	{Name: "rm", Kind: KindFlags, Target: true,
 		Usage: "rm <session>"},
 	{Name: "span", Kind: KindFlags, Target: true,
@@ -157,7 +175,7 @@ var ops = []Op{
 		Detail: spanDetail},
 	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"},
 		Usage: "reader <handle>   |   reader <handle> --drop <id>"},
-	{Name: "watch", Kind: KindFlags, Target: true,
+	{Name: "watch", Kind: KindFlags, Target: true, TargetOptional: true,
 		Flags:     []string{"event", "for", "off", "list", "channel"},
 		Valueless: []string{"list"},
 		Usage:     "watch <handle> [--event output|exit|silence] [--for N] [--channel resource|sampling]   |   watch --off <rule>   |   watch --list",
@@ -208,7 +226,9 @@ watch wakes the Agent; notify reaches the human.
 
 --channel picks how the wake-up travels: resource (a resources/updated
 notification, which any client can receive) or sampling (a createMessage the
-client must have declared support for). Omit it and the server decides.`
+client must have declared support for). Omit it and the server decides.
+Defaults: --event output, --for 3 seconds (silence), --channel omitted = sampling
+when the client declared it, resource otherwise.`
 
 // spanDetail decodes the one-letter statuses, which are terse by design (they are
 // written to log.jsonl for every status change) and unreadable without this.
@@ -227,7 +247,35 @@ session's card. Call it BEFORE asking the human for anything — password, sudo,
 MFA, passphrase, confirmation, approval, a choice, interactive input — and when
 a long task ends or fails. Blocking asks: --level warn|error --sticky. Once you
 have asked, WAIT: never poll, guess or fake an answer. A reply with no open page
-was delivered to nobody, so say the ask in your own reply too.`
+was delivered to nobody, so say the ask in your own reply too. Defaults: --level
+info; the toast lasts 10 seconds unless --sticky.`
+
+// readDetail states the defaults because "read" without a selector is the
+// common call: whether that means "new bytes" or "everything" decides what the
+// caller does next, and guessing it from silence is how loops get written.
+const readDetail = `Defaults: the new bytes since the last read on a live channel; a closed channel
+returns its tail. --stream o keeps stdout only, e keeps stderr only; the default
+keeps both. --cursor N is a byte offset (end+1 from Content-Range), --from-line N
+a complete line, --tail N the last N lines.`
+
+// closeDetail states the kill deadline, which otherwise looks instantaneous.
+const closeDetail = `--force terminates a whole session; a channel closes with or without it. --grace N
+is how many seconds a process gets to exit before it is killed. Default: 5.`
+
+// argvDetail is the --argv contract: a word list, not a command line. It is
+// stated on `help pipe` because both failure modes are silent or come from the
+// wrong layer: a dropped argument looks like the program ignoring input, and a
+// shell operator in the value would be handed to the program as text.
+const argvDetail = `--argv is a word list (argv), not a shell command line. Words are split with the
+shell's quoting rules, but nothing is expanded: quote an argument that contains
+spaces, e.g. pipe internal --argv sh -c 'echo hi'. Shell operators are not
+interpreted — for 'cd /srv && make' pass a script: --argv sh -c 'cd /srv && make'.
+Put --argv LAST: every word after it belongs to the program, so --name, --on-exit
+and --size must come before it. Write it as you would in a terminal: wrapping the
+whole argv in one pair of quotes makes it ONE program name
+(--argv 'go build ./...' runs a program with spaces in its name). --on-exit
+defaults to keep: the session survives its last shell; --on-exit close ends a
+one-shot session with it.`
 
 // profileFileFormat is the import/export file shape (Web UI batch import; HTTP
 // GET/POST /api/connections/batch). It is stated here, once, because the agent is
@@ -385,25 +433,31 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 	// refused rather than read as a target: `key --repeat 3 a1f3:1 up` would
 	// otherwise silently target "--repeat", and the error has to say why.
 	if op.Target {
-		if len(rest) == 0 {
-			return Statement{}, false, &Error{Op: name, Msg: "directive " + name + " needs a target", Usage: op.Usage}
-		}
-		if strings.HasPrefix(rest[0].text, "--") {
-			return Statement{}, false, &Error{
-				Op:    name,
-				Msg:   "flags come after the target, not before it: " + name + " " + rest[0].text,
-				Usage: op.Usage,
+		switch {
+		case len(rest) == 0:
+			if !op.TargetOptional {
+				return Statement{}, false, &Error{Op: name, Msg: "directive " + name + " needs a target", Usage: op.Usage}
 			}
+		case strings.HasPrefix(rest[0].text, "--"):
+			if !op.TargetOptional {
+				return Statement{}, false, &Error{
+					Op:    name,
+					Msg:   "flags come after the target, not before it: " + name + " " + rest[0].text,
+					Usage: op.Usage,
+				}
+			}
+		default:
+			out.Target = rest[0].text
+			rest = rest[1:]
 		}
-		out.Target = rest[0].text
-		rest = rest[1:]
 	}
 
 	switch op.Kind {
 	case KindPayload, KindInterpreted:
-		// Leading --name flags belong to the directive (`pipe mac --argv 'go
-		// test'`); everything from the first non-flag word to the end of the
-		// statement is the payload, raw.
+		// Leading --name flags belong to the directive (`pipe mac --name x --argv
+		// go test`); everything from the first non-flag word to the end of the
+		// statement is the payload, raw — except a RestValue flag, whose value is
+		// the rest of the statement itself.
 		i := 0
 		for i < len(rest) && strings.HasPrefix(rest[i].text, "--") {
 			key, val := splitFlag(rest[i].text)
@@ -413,6 +467,36 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 					Msg:   "unknown flag for " + name + ": --" + key,
 					Usage: op.Usage,
 				}
+			}
+			if restValueFlag(op, key) {
+				if i+1 >= len(rest) || strings.HasPrefix(rest[i+1].text, "--") {
+					return Statement{}, false, &Error{
+						Op:    name,
+						Msg:   "--" + key + " needs a command, e.g. " + name + " <target> --" + key + " sleep 5",
+						Usage: op.Usage,
+					}
+				}
+				// A known flag after --argv is the caller's flag, not the
+				// program's argument. Feeding it to the program would be the
+				// silent drop this directive exists to avoid.
+				for _, w := range rest[i+1:] {
+					if k, _ := splitFlag(w.text); strings.HasPrefix(w.text, "--") && allowedFlag(op, k) {
+						return Statement{}, false, &Error{
+							Op:    name,
+							Msg:   "flags come before --" + key + ": --" + k + " would otherwise be passed to the program",
+							Usage: op.Usage,
+						}
+					}
+				}
+				tail := src[rest[i+1].start:stmt.End().Offset()]
+				if val != "" {
+					val += " " + tail
+				} else {
+					val = tail
+				}
+				out.Flags[key] = strings.TrimSpace(val)
+				i = len(rest)
+				break
 			}
 			if val == "" && !valuelessFlag(op, key) && i+1 < len(rest) && !strings.HasPrefix(rest[i+1].text, "--") {
 				val = rest[i+1].lit
@@ -426,6 +510,13 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 				return Statement{}, false, &Error{Op: name, Msg: "directive " + name + " needs a payload", Usage: op.Usage}
 			}
 			break
+		}
+		if len(op.RestValue) > 0 {
+			return Statement{}, false, &Error{
+				Op:    name,
+				Msg:   name + " takes its program via --" + op.RestValue[0] + ", not a bare payload: " + name + " <target> --" + op.RestValue[0] + " <command> [args…]",
+				Usage: op.Usage,
+			}
 		}
 		start, end := rest[i].start, stmt.End().Offset()
 		if op.Kind == KindInterpreted {
@@ -474,7 +565,7 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 //
 // lit is the shell's own reading of the word — unquoted, but NOT expanded (no
 // `$HOME`, no `$(cmd)`): the parser is forbidden from evaluating. A flag VALUE is
-// taken from lit, because `--argv 'go build ./...'` means the program name and its
+// taken from lit, because `--argv go build ./...` means the program name and its
 // arguments, not a string with quotes in it; a payload is taken from the slice,
 // because the shell downstream must see the quotes.
 type word struct {
@@ -569,6 +660,16 @@ func splitFlag(word string) (key, val string) {
 	return trimmed, ""
 }
 
+// restValueFlag reports whether a flag's value is the rest of the statement.
+func restValueFlag(op Op, key string) bool {
+	for _, f := range op.RestValue {
+		if f == key {
+			return true
+		}
+	}
+	return false
+}
+
 // valuelessFlag reports whether a flag takes no value.
 func valuelessFlag(op Op, key string) bool {
 	for _, f := range op.Valueless {
@@ -611,6 +712,54 @@ func literalWord(src string, w *syntax.Word) (string, bool) {
 		return "", false
 	}
 	return raw, true
+}
+
+// SplitArgv turns a --argv value into the executable and its arguments.
+//
+// Words are read with the shell's own grammar, so quoting groups the way a
+// caller expects (`sh -c "echo hi"` is three words, the third keeping its
+// space), but nothing is evaluated. There is no second rule for a value that is
+// one quoted word: `--argv 'go build ./...'` is ONE word, exactly as it would be
+// in a terminal.
+//
+// A value that is a command line rather than a word list — a second statement,
+// a pipeline, a redirection, an assignment — is an error, not something to feed
+// to the program as text.
+func SplitArgv(raw string) (string, []string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil, nil
+	}
+	words, err := shellWords(raw)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(words) == 0 {
+		return "", nil, nil
+	}
+	return words[0], words[1:], nil
+}
+
+// shellWords parses raw as a single simple command and returns each word's
+// literal, with quotes removed and expansions left unexpanded.
+func shellWords(raw string) ([]string, error) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(raw), "")
+	if err != nil {
+		return nil, fmt.Errorf("cannot read --argv: %v", err)
+	}
+	notArgv := fmt.Errorf("%q is a command line, not an argv: one program per --argv (use sh -c or a script for shell syntax)", raw)
+	if len(file.Stmts) != 1 || file.Stmts[0].Background {
+		return nil, notArgv
+	}
+	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 || len(call.Assigns) > 0 || len(file.Stmts[0].Redirs) > 0 {
+		return nil, notArgv
+	}
+	words := make([]string, 0, len(call.Args))
+	for _, w := range call.Args {
+		words = append(words, wordLiteral(w))
+	}
+	return words, nil
 }
 
 // Names lists the directive names, sorted, for a help listing that cannot drift

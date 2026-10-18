@@ -1,6 +1,8 @@
 package directive
 
 import (
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -149,6 +151,117 @@ func TestFlagsComeAfterTheTarget(t *testing.T) {
 	}
 }
 
+// TestArgvTakesTheRestOfTheStatement pins that --argv is a word list: the words
+// after it belong to the program, so flags must come before it and a bare
+// payload is refused rather than dropped.
+func TestArgvTakesTheRestOfTheStatement(t *testing.T) {
+	f, err := Parse(`pipe internal --name chat --argv sh -c 'echo hi'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := f.Statements[0]
+	if got, want := st.Flags["argv"], `sh -c 'echo hi'`; got != want {
+		t.Errorf("argv = %q, want %q", got, want)
+	}
+	if got := st.Flags["name"]; got != "chat" {
+		t.Errorf("name = %q", got)
+	}
+	if st.Payload != "" {
+		t.Errorf("payload = %q; --argv consumed it", st.Payload)
+	}
+
+	if _, err := Parse(`pipe internal --argv echo hi --name chat`); err == nil {
+		t.Fatal("a known flag after --argv must be refused, not passed to the program")
+	} else if !strings.Contains(err.Error(), "flags come before --argv") {
+		t.Errorf("error = %v", err)
+	}
+
+	if _, err := Parse(`pipe internal sleep 5`); err == nil {
+		t.Fatal("a bare payload must be refused, not silently dropped")
+	} else if !strings.Contains(err.Error(), "--argv") {
+		t.Errorf("error = %v, want it to name --argv", err)
+	}
+}
+
+// TestSplitArgvReadsWordsNotSpaces pins the --argv splitting rule: words are
+// read with the shell's quoting rules, exactly as a terminal would read them.
+// There is no compatibility rule for a whole-quoted value — quoting the whole
+// argv makes it one word, because that is what the terminal does.
+func TestSplitArgvReadsWordsNotSpaces(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantCmd string
+		want    []string
+	}{
+		{"unquoted words", "echo hello", "echo", []string{"hello"}},
+		{"a quoted argument keeps its space", `sh -c "echo hello"`, "sh", []string{"-c", "echo hello"}},
+		{"a quoted script is one word", `sh -c 'cd /srv && make'`, "sh", []string{"-c", "cd /srv && make"}},
+		{"the whole argv quoted is one word", `'go build ./...'`, "go build ./...", nil},
+		{"a quoted program name stays one word", `'sleep 5'`, "sleep 5", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, args, err := SplitArgv(tc.raw)
+			if err != nil {
+				t.Fatalf("SplitArgv(%q): %v", tc.raw, err)
+			}
+			if cmd != tc.wantCmd || !slices.Equal(args, tc.want) {
+				t.Errorf("SplitArgv(%q) = %q %v, want %q %v", tc.raw, cmd, args, tc.wantCmd, tc.want)
+			}
+		})
+	}
+}
+
+// TestSplitArgvRefusesACommandLine pins that shell syntax is an error rather
+// than text handed to the program: --argv is an argv, not a command line.
+func TestSplitArgvRefusesACommandLine(t *testing.T) {
+	for _, raw := range []string{
+		`echo hi; ls`,
+		`echo hi | wc`,
+		`echo hi > /tmp/x`,
+		`FOO=1 echo hi`,
+		`echo "unbalanced`,
+	} {
+		if _, _, err := SplitArgv(raw); err == nil {
+			t.Errorf("SplitArgv(%q) accepted a command line", raw)
+		}
+	}
+}
+
+// TestTargetOptionalFlagForms pins `watch --off <rule>` and `watch --list`:
+// the documented flag-only forms have no target, so the positional rule must
+// not read `--off` as one.
+func TestTargetOptionalFlagForms(t *testing.T) {
+	f, err := Parse(`watch --off notif_1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := f.Statements[0]
+	if st.Target != "" {
+		t.Errorf("target = %q, want empty for --off", st.Target)
+	}
+	if st.Flags["off"] != "notif_1" {
+		t.Errorf("off = %q", st.Flags["off"])
+	}
+
+	f, err = Parse(`watch --list`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.Statements[0].Flags["list"]; !ok {
+		t.Error("--list must be present")
+	}
+
+	f, err = Parse(`watch a1f3:1 --event output`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Statements[0].Target != "a1f3:1" || f.Statements[0].Flags["event"] != "output" {
+		t.Errorf("target/event = %q/%q", f.Statements[0].Target, f.Statements[0].Flags["event"])
+	}
+}
+
 // TestFlagWithValue pins both spellings of a valued flag.
 func TestFlagWithValue(t *testing.T) {
 	f, err := Parse(`read a1f3:1 --cursor 1024 --stream o --raw`)
@@ -246,43 +359,72 @@ func TestPathIsTheCommandEcho(t *testing.T) {
 	}
 }
 
-// TestEveryDirectiveParsesItsOwnUsage keeps the table honest: the usage line a
-// caller is shown must be a line this parser accepts, once its placeholders are
-// filled. A usage that does not parse teaches the wrong shape — which is exactly
-// what a `run #handle 'cmd'` example would do, since '#' is a comment.
+// TestEveryDirectiveParsesItsOwnUsage keeps the table honest: every FORM a usage
+// line documents must be a line this parser accepts. A usage that does not parse
+// teaches a shape the tool cannot run — which is how `watch --off <rule>` stayed
+// documented and unparseable until a live caller tried it.
 func TestEveryDirectiveParsesItsOwnUsage(t *testing.T) {
-	// Longest first: "<handle|session>" must be replaced before "<session>".
-	placeholders := []string{
-		"<entry|session>", "<session|handle>", "<handle|session>",
-		"<handle>", "<session>", "<key>", "<rows>", "<cols>", "<body>",
-		"<directive>", "<name>",
-	}
 	for _, op := range Ops() {
-		// The usage lines are documentation: they show alternatives with `|` and
-		// optional parts in brackets. Take the first alternative, drop the
-		// optional parts, and fill the placeholders — enough to prove that the
-		// directive name and the flag names are real and in a legal position.
-		first := strings.Split(op.Usage, "|")[0]
-		var line strings.Builder
-		for _, w := range strings.Fields(first) {
-			if strings.HasPrefix(w, "[") || strings.HasPrefix(w, "...") {
+		for _, form := range usageAlternatives.Split(op.Usage, -1) {
+			line := fillUsageStubs(stripOptionals(form))
+			if line == "" || strings.Contains(line, "…") {
+				continue // prose, not a template
+			}
+			// A documented form starts with the directive's own name; anything
+			// else after `|` is an explanation (`payload: …`, `只打字，不回车`).
+			if line != op.Name && !strings.HasPrefix(line, op.Name+" ") {
 				continue
 			}
-			line.WriteString(" ")
-			line.WriteString(w)
-		}
-		got := line.String()
-		for _, p := range placeholders {
-			got = strings.ReplaceAll(got, p, "x")
-		}
-		got = strings.TrimSpace(got)
-		if strings.Contains(got, "<") || strings.Contains(got, "…") || strings.HasSuffix(got, ":") {
-			continue // the first alternative is prose, not a template
-		}
-		if _, err := Parse(got); err != nil {
-			t.Errorf("%s: its own usage %q does not parse: %v", op.Name, got, err)
+			if _, err := Parse(line); err != nil {
+				t.Errorf("%s: usage form %q parses as %q, which fails: %v",
+					op.Name, strings.TrimSpace(form), line, err)
+			}
 		}
 	}
+}
+
+// usageAlternatives splits a usage line into its documented forms. The spaces
+// are load-bearing: `|` inside a placeholder (<handle|session>) is not an
+// alternative separator.
+var usageAlternatives = regexp.MustCompile(`\s+\|\s+`)
+
+// stripOptionals removes every bracketed group, nested ones included. Optional
+// parts may be omitted, so what remains must parse on its own.
+func stripOptionals(s string) string {
+	var b strings.Builder
+	depth := 0
+	for _, r := range s {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
+}
+
+// fillUsageStubs replaces every <placeholder> with a dummy word and normalizes
+// spaces, so the line is something the parser can read.
+func fillUsageStubs(s string) string {
+	for {
+		start := strings.IndexByte(s, '<')
+		if start < 0 {
+			break
+		}
+		end := strings.IndexByte(s[start:], '>')
+		if end < 0 {
+			break
+		}
+		s = s[:start] + "x" + s[start+end+1:]
+	}
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // asError is errors.As without the import, kept local so the test reads plainly.

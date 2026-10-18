@@ -46,10 +46,18 @@ func (s *Server) directiveOpen(ctx context.Context, stmt directive.Statement, wi
 	argv := strings.TrimSpace(stmt.Flags["argv"])
 	args := argsOf("mode", mode)
 	if argv != "" {
-		cmd, argvParts := splitArgv(argv)
+		cmd, argvParts, err := directive.SplitArgv(argv)
+		if err != nil {
+			usage := ""
+			if op, ok := directive.Lookup(stmt.Op); ok {
+				usage = "\n" + op.Usage
+			}
+			return []envelope.Slot{{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+				Body: err.Error() + usage}}
+		}
 		if cmd == "" {
 			return []envelope.Slot{{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-				Body: "--argv needs a command, e.g. pipe mac --argv 'go build ./...'"}}
+				Body: "--argv needs a command, e.g. pipe internal --argv sleep 5"}}
 		}
 		args["command"] = cmd
 		if len(argvParts) > 0 {
@@ -122,20 +130,6 @@ func shortHandle(doc map[string]any) string {
 		return handleOf(sessionID, index)
 	}
 	return shellID
-}
-
-// splitArgv splits a --argv payload into the executable and its arguments.
-//
-// It splits on spaces, which is what a shell would do for a single-quoted word —
-// and the alternative would be re-implementing the shell's quoting rules inside a
-// protocol that spends its whole design avoiding exactly that. A caller that needs
-// quoting should hand the shell a command line via `run`, not an argv.
-func splitArgv(raw string) (string, []string) {
-	fields := strings.Fields(raw)
-	if len(fields) == 0 {
-		return "", nil
-	}
-	return fields[0], fields[1:]
 }
 
 // parseSize reads the `--size 24x80` form: rows x cols, the order a terminal

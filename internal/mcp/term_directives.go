@@ -154,8 +154,7 @@ func (s *Server) sessionForStatement(stmt directive.Statement) *session.Session 
 // The completion rule differs by mode, and that difference is the whole reason
 // `run` exists: on a pipe channel the process exiting IS completion, so it
 // returns the moment the channel closes; on a pty there is no such signal, so it
-// returns when the output goes quiet for quiet_ms. `timeout` is an upper bound in
-// both cases, never a wait to be filled.
+// waits out the caller's time window and returns what the terminal produced.
 func (s *Server) directiveRun(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
 	if ids, isBatch := splitBatchIDs(stmt.Target); isBatch {
 		slots := make([]envelope.Slot, 0, len(ids))
@@ -294,17 +293,16 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 // readSlotAfter reads the window a command produced, starting where it was
 // submitted.
 //
-// Completion is what tells it how long to wait, and completion differs by mode:
+// Completion differs by mode:
 //
 //   - A PIPE channel's completion signal is its process exiting. When the program
 //     the channel runs is what the caller just ran, waiting IS the answer: the
 //     channel closes and the exit code arrives with the bytes.
 //   - A PTY channel has no such signal — a shell does not report that a command
-//     finished. There the window is "whatever arrived before it went quiet", which
-//     is why quiet_ms exists.
+//     finished. There the caller's time window is the window: wait it out, then
+//     read what the terminal produced.
 //
-// `timeout` bounds both. It is never a duration to fill, so a program that ends in
-// 2 seconds returns in 2 seconds even with the default 30.
+// `timeout` bounds both and defaults to two seconds.
 func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, win termArgs, start int64) envelope.Slot {
 	args := argsOf("shell_id", stmt.Target, "offset", float64(start))
 	// A byte limit of 0 means "hand back the handle, consume nothing": the
@@ -318,15 +316,45 @@ func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, wi
 	}
 	if wait := s.completionWait(stmt.Target); wait {
 		s.awaitExit(ctx, stmt.Target, win)
+	} else if s.ptyRunning(stmt.Target) {
+		s.awaitWindow(ctx, win)
 	}
 	return s.readSlot(ctx, stmt, win, args)
+}
+
+// ptyRunning reports whether the handle is a live pty channel. The handle may
+// be a shell id OR a session id naming its primary channel, so it resolves
+// through the same door every other directive uses.
+func (s *Server) ptyRunning(handle string) bool {
+	cs, bad := s.requireShell(handle)
+	if bad != nil {
+		return false
+	}
+	info := cs.Info()
+	return info.Mode == api.ModePTY && info.Status == api.SessionRunning
+}
+
+// awaitWindow waits out the caller's time window. A pty has no completion
+// signal, so the window is sampled rather than ended early; timeout=0 means a
+// snapshot, not a wait.
+func (s *Server) awaitWindow(ctx context.Context, win termArgs) {
+	limit := time.Duration(win.TimeoutSeconds * float64(time.Second))
+	if limit <= 0 {
+		return
+	}
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
 
 // completionWait reports whether this channel's completion is observable, which
 // is true exactly for a pipe channel that has not exited yet.
 func (s *Server) completionWait(handle string) bool {
-	cs := s.sessMgr.GetChildShell(handle)
-	if cs == nil {
+	cs, bad := s.requireShell(handle)
+	if bad != nil {
 		return false
 	}
 	info := cs.Info()
@@ -351,8 +379,8 @@ func (s *Server) awaitExit(ctx context.Context, handle string, win termArgs) {
 		case <-deadline:
 			return
 		case <-ticker.C:
-			cs := s.sessMgr.GetChildShell(handle)
-			if cs == nil || cs.Info().Status != api.SessionRunning {
+			cs, bad := s.requireShell(handle)
+			if bad != nil || cs.Info().Status != api.SessionRunning {
 				return
 			}
 		}

@@ -140,7 +140,7 @@ func TestTermSuccessIsSilentWithoutLearnMode(t *testing.T) {
 // learn_mode attaches the usage line, once per directive even across a batch.
 func TestTermLearnModeDeduplicatesUsage(t *testing.T) {
 	s := newTestServer(t)
-	h := openPipe(t, s, "'sleep 5'")
+	h := openPipe(t, s, "sleep 5")
 
 	text := termText(t, s, map[string]any{
 		"cmd":        "read " + h + "; read " + h,
@@ -155,7 +155,7 @@ func TestTermLearnModeDeduplicatesUsage(t *testing.T) {
 // A fresh pipe channel hands back a handle, which is news by definition.
 func TestTermPipeReturnsHandle(t *testing.T) {
 	s := newTestServer(t)
-	text := termText(t, s, map[string]any{"cmd": "pipe internal --argv 'sleep 5'"})
+	text := termText(t, s, map[string]any{"cmd": "pipe internal --argv sleep 5"})
 	if !strings.HasPrefix(text, "TERM/1 200 OK\n") {
 		t.Fatalf("status line = %q", strings.SplitN(text, "\n", 2)[0])
 	}
@@ -172,11 +172,50 @@ func TestTermPipeReturnsHandle(t *testing.T) {
 	}
 }
 
+// --argv is a word list: every word after it reaches the program, quoting groups
+// an argument, and a flag after it is refused rather than fed to the program.
+func TestTermArgvCarriesItsWords(t *testing.T) {
+	s := newTestServer(t)
+	for _, cmd := range []string{
+		"pipe internal --argv echo hello",
+		"pipe internal --argv sh -c 'echo hello'",
+		"pipe internal --argv sh -c \"echo hello\"", // a quoted argument keeps its space
+	} {
+		text := termText(t, s, map[string]any{"cmd": cmd})
+		if !strings.HasPrefix(text, "TERM/1 200 OK") {
+			t.Fatalf("%s:\n%s", cmd, text)
+		}
+		h := handleFrom(t, text)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, _, closed := s.channelExitState(h); closed {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		out := termText(t, s, map[string]any{"cmd": "read " + h, "timeout": float64(0)})
+		if !strings.Contains(out, "hello") {
+			t.Errorf("%s produced no hello:\n%s", cmd, out)
+		}
+	}
+
+	// A known flag after --argv would be handed to the program if accepted.
+	res := termCall(t, s, map[string]any{"cmd": "pipe internal --argv echo hi --name chat"})
+	if !res.IsError || !strings.Contains(toolResultText(res), "flags come before --argv") {
+		t.Errorf("a flag after --argv was not refused:\n%s", toolResultText(res))
+	}
+	// A bare payload used to be dropped without a word.
+	res = termCall(t, s, map[string]any{"cmd": "pipe internal sleep 5"})
+	if !res.IsError || !strings.Contains(toolResultText(res), "--argv") {
+		t.Errorf("a bare payload was not refused:\n%s", toolResultText(res))
+	}
+}
+
 // The mode is the directive: pipe builds a pipe, pty builds a pty, and there is no
 // way to ask for one and silently get the other.
 func TestTermModeIsTheDirective(t *testing.T) {
 	s := newTestServer(t)
-	pipeText := termText(t, s, map[string]any{"cmd": "pipe internal --argv 'sleep 5'"})
+	pipeText := termText(t, s, map[string]any{"cmd": "pipe internal --argv sleep 5"})
 	if !strings.Contains(pipeText, "pipe") {
 		t.Errorf("pipe reply = %q", pipeText)
 	}
@@ -192,22 +231,22 @@ func TestTermModeIsTheDirective(t *testing.T) {
 	}
 }
 
-// A pty channel on the internal loopback runs a login shell, so a command typed
-// into it produces output and comes back without waiting for the full timeout.
+// A pty has no completion signal, so `run` samples the caller's time window and
+// returns what the terminal produced in it.
 func TestTermRunOnPtyReadsTheWindow(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
 	start := time.Now()
 	text := termText(t, s, map[string]any{
 		"cmd":     "run " + h + " echo hi",
-		"timeout": float64(10),
+		"timeout": float64(2),
 	})
 	elapsed := time.Since(start)
 	if !strings.Contains(text, "hi") {
 		t.Errorf("the command's output is missing:\n%s", text)
 	}
 	if elapsed > 5*time.Second {
-		t.Errorf("run took %s; a pty returns when output goes quiet, not at the timeout", elapsed)
+		t.Errorf("run took %s; the caller's window is 2s", elapsed)
 	}
 	// A live pty channel has no exit code, because a shell does not report that a
 	// command inside it finished.
@@ -216,13 +255,29 @@ func TestTermRunOnPtyReadsTheWindow(t *testing.T) {
 	}
 }
 
+// A pty has no completion signal, so `run` must wait the caller's time window
+// rather than read the instant after typing. A command that prints after a
+// delay proves the wait happened — and a session-level handle must resolve to
+// the channel, or the wait branch is skipped entirely.
+func TestTermPtyRunWaitsTheWindow(t *testing.T) {
+	s := newTestServer(t)
+	h := openPty(t, s)
+	text := termText(t, s, map[string]any{
+		"cmd":     "run " + h + " sleep 1 && echo LATE",
+		"timeout": float64(3),
+	})
+	if !strings.Contains(text, "LATE") {
+		t.Fatalf("run returned before the command's output:\n%s", text)
+	}
+}
+
 // `run` reads from where it submitted, so a previous command's unread tail is not
 // delivered as if it belonged to this one.
 func TestTermRunStartsAtItsOwnOffset(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
-	termText(t, s, map[string]any{"cmd": "run " + h + " seq 1 500", "timeout": float64(5), "bytes_limit": float64(64)})
-	second := termText(t, s, map[string]any{"cmd": "run " + h + " echo SECOND", "timeout": float64(5)})
+	termText(t, s, map[string]any{"cmd": "run " + h + " seq 1 500", "timeout": float64(2), "bytes_limit": float64(64)})
+	second := termText(t, s, map[string]any{"cmd": "run " + h + " echo SECOND", "timeout": float64(2)})
 	if !strings.Contains(second, "SECOND") {
 		t.Fatalf("the second command's output is missing:\n%s", second)
 	}
@@ -237,7 +292,7 @@ func TestTermRunStartsAtItsOwnOffset(t *testing.T) {
 func TestTermExitCodeIsAFunctionOfTheChannel(t *testing.T) {
 	s := newTestServer(t)
 	script := writeScript(t, "exit 3")
-	text := termText(t, s, map[string]any{"cmd": "pipe internal --argv 'sh " + script + "'"})
+	text := termText(t, s, map[string]any{"cmd": "pipe internal --argv sh '" + script + "'"})
 	h := handleFrom(t, text)
 	// Wait for the process to end.
 	deadline := time.Now().Add(5 * time.Second)
@@ -269,11 +324,9 @@ func TestTermExitCodeIsAFunctionOfTheChannel(t *testing.T) {
 // what happened nor where to continue.
 func TestTermFailureKeepsTheBytes(t *testing.T) {
 	s := newTestServer(t)
-	// --argv is an argv, not a command line: it splits on spaces, so a shell one-liner
-	// with quoting has to be written out rather than quoted. That is the documented
-	// boundary between `pipe --argv` (a program) and `run` (a command line).
+	// A multi-statement program is a script file, not shell syntax in --argv.
 	script := writeScript(t, "echo boom >&2; exit 3")
-	text := termText(t, s, map[string]any{"cmd": "pipe internal --argv 'sh " + script + "'"})
+	text := termText(t, s, map[string]any{"cmd": "pipe internal --argv sh '" + script + "'"})
 	h := handleFrom(t, text)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -309,7 +362,7 @@ func TestTermPSLinesAreCopyable(t *testing.T) {
 	if strings.Contains(text, "{") || strings.Contains(text, "[") {
 		t.Errorf("ps must be terminal columns, not JSON:\n%s", text)
 	}
-	h := openPipe(t, s, "'sleep 5'")
+	h := openPipe(t, s, "sleep 5")
 	text = termText(t, s, map[string]any{"cmd": "ps"})
 	if !strings.Contains(text, h) {
 		t.Fatalf("ps does not list %s:\n%s", h, text)
@@ -334,7 +387,7 @@ func TestTermPSLinesAreCopyable(t *testing.T) {
 // info is `key: value`, one fact per line.
 func TestTermInfoIsKeyValueLines(t *testing.T) {
 	s := newTestServer(t)
-	h := openPipe(t, s, "'sleep 5'")
+	h := openPipe(t, s, "sleep 5")
 	text := termText(t, s, map[string]any{"cmd": "info " + h})
 	for _, key := range []string{"id: ", "status: ", "ssh_config: ", "shell: "} {
 		if !strings.Contains(text, key) {
@@ -351,7 +404,7 @@ func TestTermInfoIsKeyValueLines(t *testing.T) {
 func TestTermWindowAppliesToGeneratedReplies(t *testing.T) {
 	s := newTestServer(t)
 	for i := 0; i < 6; i++ {
-		openPipe(t, s, "'sleep 5'")
+		openPipe(t, s, "sleep 5")
 	}
 	text := termText(t, s, map[string]any{"cmd": "ps", "lines_limit": float64(2), "bytes_limit": float64(80)})
 	body := text[strings.Index(text, "\n\n")+2:]
@@ -363,7 +416,7 @@ func TestTermWindowAppliesToGeneratedReplies(t *testing.T) {
 // The total byte cap is a property of the reply, not of a slot.
 func TestTermTotalBytesLimitAcrossSlots(t *testing.T) {
 	s := newTestServer(t)
-	h := openPipe(t, s, "'seq 1 5000'")
+	h := openPipe(t, s, "seq 1 5000")
 	time.Sleep(300 * time.Millisecond)
 	cmd := "read " + h + "; read " + h + "; read " + h
 	res := termCall(t, s, map[string]any{"cmd": cmd, "total_bytes_limit": float64(64), "timeout": float64(1)})
@@ -405,7 +458,7 @@ func TestTermTotalBytesLimitAcrossSlots(t *testing.T) {
 // on a pipe stays there for `mcp recv`.
 func TestTermBytesLimitZeroConsumesNothing(t *testing.T) {
 	s := newTestServer(t)
-	h := openPipe(t, s, "'seq 1 100'")
+	h := openPipe(t, s, "seq 1 100")
 	text := termText(t, s, map[string]any{"cmd": "read " + h, "bytes_limit": float64(0), "timeout": float64(0)})
 	if !strings.Contains(text, "TERM/1 204 No Content") {
 		t.Fatalf("bytes_limit 0 must return no bytes:\n%s", text)
@@ -419,8 +472,8 @@ func TestTermBytesLimitZeroConsumesNothing(t *testing.T) {
 // A batch target produces one slot per entry: N questions, N answers.
 func TestTermBatchProducesOneSlotPerTarget(t *testing.T) {
 	s := newTestServer(t)
-	a := openPipe(t, s, "'sleep 5'")
-	b := openPipe(t, s, "'sleep 5'")
+	a := openPipe(t, s, "sleep 5")
+	b := openPipe(t, s, "sleep 5")
 	text := termText(t, s, map[string]any{
 		"cmd":     "read " + a + "," + b,
 		"timeout": float64(0),
@@ -433,7 +486,7 @@ func TestTermBatchProducesOneSlotPerTarget(t *testing.T) {
 // The structured projection mirrors the text one, slot for slot, key for key.
 func TestTermStructuredContentIsIsomorphic(t *testing.T) {
 	s := newTestServer(t)
-	h := openPipe(t, s, "'sleep 5'")
+	h := openPipe(t, s, "sleep 5")
 	res := termCall(t, s, map[string]any{"cmd": "read " + h + "; read " + h, "timeout": float64(0)})
 
 	if res.StructuredContent == nil {
@@ -478,9 +531,19 @@ func TestTermStructuredContentIsIsomorphic(t *testing.T) {
 				t.Errorf("slot %d: text has header %q that the structured twin lacks: %v", i, key, slot)
 			}
 		}
-		// And the body must not be duplicated into it.
-		if _, ok := slot["output"]; ok {
-			t.Errorf("slot %d duplicates the body in structuredContent", i)
+		// And the body travels in both projections: a client that renders only
+		// structuredContent must still see it. Reply.Text joins slots with one
+		// newline, so a non-last segment carries that separator extra.
+		seg := "TERM/1 " + texts[i]
+		if i < len(texts)-1 {
+			seg = strings.TrimSuffix(seg, "\n")
+		}
+		body := ""
+		if parts := strings.SplitN(seg, "\n\n", 2); len(parts) == 2 {
+			body = parts[1]
+		}
+		if slot["body"] != body {
+			t.Errorf("slot %d structured body = %v, want %q", i, slot["body"], body)
 		}
 	}
 }
@@ -489,7 +552,7 @@ func TestTermStructuredContentIsIsomorphic(t *testing.T) {
 // a caller sees what actually ran.
 func TestTermAliasExpands(t *testing.T) {
 	s := newTestServer(t)
-	h := openPipe(t, s, "'sleep 5'")
+	h := openPipe(t, s, "sleep 5")
 	if res := termCall(t, s, map[string]any{"cmd": "alias look read " + h}); res.IsError {
 		t.Fatalf("alias failed:\n%s", toolResultText(res))
 	}
@@ -549,7 +612,7 @@ func TestTermPayloadIsNotRewritten(t *testing.T) {
 	// A POSIX shell is named explicitly: the payload rule is about the bytes
 	// reaching the shell, not about which shell the profile happens to default to.
 	script := writeScript(t, `echo $((6*7)); echo "a  b"`)
-	h := openPipe(t, s, "'sh "+script+"'")
+	h := openPipe(t, s, "sh '"+script+"'")
 	// Read the whole stream, not a window of it: this test is about the bytes that
 	// reached the shell, and a window would only prove they appear early.
 	text := ""
@@ -623,8 +686,8 @@ func TestTermIsTheOnlyEntryAndFitsItsBudget(t *testing.T) {
 // --- fixtures ---
 
 // writeScript writes a shell script to a temp file and returns its path, so a
-// `pipe --argv` test can run a multi-statement program without fighting the fact
-// that --argv is an argv (split on spaces) and not a command line.
+// `pipe --argv` test can run a multi-statement program without putting shell
+// syntax into an argv.
 func writeScript(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "probe.sh")
@@ -651,10 +714,7 @@ func openPty(t *testing.T, s *Server) string {
 	if !strings.HasPrefix(text, "TERM/1 200 OK") {
 		t.Fatalf("pty failed:\n%s", text)
 	}
-	h := handleFrom(t, text)
-	// A login shell needs a moment before it reads anything.
-	time.Sleep(300 * time.Millisecond)
-	return h
+	return handleFrom(t, text)
 }
 
 // Isolation must hold on the single-entry surface too.
@@ -669,7 +729,7 @@ func TestTermNamespaceIsolationHoldsPerDirective(t *testing.T) {
 	alice := namespaceContext("alice")
 	bob := namespaceContext("bob")
 
-	created, err := s.call(alice, "term", map[string]any{"cmd": "pipe internal --argv 'sleep 30'"})
+	created, err := s.call(alice, "term", map[string]any{"cmd": "pipe internal --argv sleep 30"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +764,7 @@ func TestTermNamespaceIsolationHoldsPerDirective(t *testing.T) {
 
 	// And a batch is refused as a whole: running the entries bob may reach while
 	// skipping the ones it may not would make the outcome unknowable.
-	bobOwn, err := s.call(bob, "term", map[string]any{"cmd": "pipe internal --argv 'sleep 30'"})
+	bobOwn, err := s.call(bob, "term", map[string]any{"cmd": "pipe internal --argv sleep 30"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +795,7 @@ func TestTermRefusalIsNeverSuccessShaped(t *testing.T) {
 	alice := namespaceContext("alice")
 	bob := namespaceContext("bob")
 
-	created, err := s.call(alice, "term", map[string]any{"cmd": "pipe internal --argv 'sleep 30'"})
+	created, err := s.call(alice, "term", map[string]any{"cmd": "pipe internal --argv sleep 30"})
 	if err != nil {
 		t.Fatal(err)
 	}

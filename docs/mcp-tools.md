@@ -13,11 +13,10 @@ Termcp 通过 **SSE**、**Streamable HTTP** 与 **stdio 桥**三种方式暴露 
     "type": "object",
     "properties": {
       "cmd":        { "type": "string",  "description": "一条终端指令…留空 = 引导" },
-      "timeout":    { "type": "number",  "default": 30 },
+      "timeout":    { "type": "number",  "default": 2 },
       "bytes_limit":{ "type": "number",  "default": 8192 },
       "lines_limit":{ "type": "number",  "default": 200 },
       "total_bytes_limit": { "type": "number", "default": 32768 },
-      "quiet_ms":   { "type": "number",  "default": 200 },
       "on_time_overflow":  { "type": "string", "default": "truncate" },
       "on_bytes_overflow": { "type": "string", "default": "truncate" },
       "on_lines_overflow": { "type": "string", "default": "truncate" },
@@ -59,14 +58,14 @@ drwxr-xr-x ...
 
 - 状态行：`TERM/1 <code> <reason>`。`2xx` 成功、`4xx` 参数/状态错误、`5xx` 命令本身失败。`isError` 恰为 `code >= 400`。
 - 头部按固定顺序出现，**只出现有意义的**：`Path`（总是，显示实际执行的指令，别名已展开）、`Status`、`Exit-Code`、`Handle`、`Content-Range`、`Error-Code`、`Idempotent`、`Usage`。
-- body 是原始字节。**同一个值**的 JSON 投影在 `structuredContent`：`protocol` / `code` / `reason` 加每个头部同名键，body 不重复。
+- body 是原始字节。**同一个值**的 JSON 投影在 `structuredContent`：`protocol` / `code` / `reason` 加每个头部同名键，再加 `body`（原样，不省略）——只渲染结构化投影的客户端也不会丢字节。
 - 批量目标（`run a1f3:1,b7c2:1 …`）返回一个 slot per 目标，按顺序拼接。`isError` 是任一 slot 失败。
 
 `Content-Range` 用 RFC 9110 形式，`end` 包含在内，所以 `end+1` 就是下一次的 `--cursor`。被 `total_bytes_limit` 截断的 slot 会同时改写这个头——它必须描述 body **实际**携带的字节，否则下一次读会跳过一段。
 
 ### 学习与发现
 
-- `help` 列出全部指令；`help run` 给一条指令的一行用法。
+- `help` 列出全部指令；`help run` 给一条指令的一行用法，再加一段该指令的细节（含默认值，例如 `read`、`close`、`watch`、`notify`）。
 - 任何 `400` 都带 `Usage`（未知指令带整张表），因为出错正是调用方不知道形状的时刻。
 - `learn_mode=true` 把命中的指令用法附在 slot 上，**每条指令一次**（批量里不重复）。成功回复默认**不带** `Usage`：已经会了就不该付费。
 - `Usage` 从不说明状态，只说明语法：它回答"怎么用"，不回答"发生了什么"。
@@ -85,12 +84,12 @@ drwxr-xr-x ...
 
 | 指令 | 说明 |
 |------|------|
-| `pipe <entry\|session> [--argv 'cmd'] [--name …] [--on-exit keep\|close]` | 开一个 pipe 通道（无 TTY、无回显、跑完即退）。`--argv` 是 **argv**：按空格切分，不是命令行（要多语句请 `sh -c` 或写脚本文件）|
-| `pty <entry\|session> [--argv 'cmd'] [--name …] [--size 24x80]` | 开一个 pty 通道（交互式；不传 `--argv` 就是登录 shell）|
+| `pipe <entry\|session> [--name …] [--on-exit keep\|close] --argv <cmd> [args…]` | 开一个 pipe 通道（无 TTY、无回显、跑完即退）。`--argv` 是 **argv**（词表）不是命令行：按 shell 引用规则分词、不做展开，`;`/`\|`/`>` 不是运算符；整段再包一层引号就是一个程序名（和终端一致）。**`--argv` 必须放最后**，`--name`/`--on-exit` 写在它前面；要 shell 语法就 `--argv sh -c '…'` 或写脚本文件 |
+| `pty <entry\|session> [--name …] [--size 24x80] --argv <cmd> [args…]` | 开一个 pty 通道（交互式；不传 `--argv` 就是登录 shell）。`--argv` 规则同 `pipe` |
 | `ps [--shells] [--all]` | 当前有什么在跑。终端列格式，每行第一个字段就是可直接复制的 handle |
 | `info <session\|handle>` | `key: value` 一行一个事实 |
 | `resize <handle> <rows> <cols>` | 改 pty 尺寸 |
-| `close [--force] [--grace N] <handle\|session>` | 关通道或会话 |
+| `close [--force] [--grace N] <handle\|session>` | 关通道或会话。`--grace` 默认 5 秒（进程退出的等待时间）；`--force` 只对会话生效 |
 | `rm <session>` | 彻底删除会话 |
 | `detect` | 探测本机的交互式 shell |
 
@@ -101,9 +100,9 @@ drwxr-xr-x ...
 | `run <handle> <payload>` | 把 payload 送进 shell 并按回车，然后读窗口。**从提交点开始读**，不会把上一条命令未读的尾巴当成本次结果 |
 | `type <handle> <payload>` | 只打字，不回车 |
 | `key <handle> <key> [--repeat N]` | 按键（`enter` / `up` / `ctrl+c` …） |
-| `read <handle> [--cursor N\|--from-line N\|--tail N] [--stream o\|e] [--raw]` | 读一个窗口，不发送任何东西 |
+| `read <handle> [--cursor N\|--from-line N\|--tail N] [--stream o\|e] [--raw]` | 读一个窗口，不发送任何东西。默认：活通道读新增字节，已关闭通道读尾部；`--stream` 默认 stdout 与 stderr 都保留 |
 
-`run` 在 pty 上等输出**安静** `quiet_ms` 后返回（shell 不会汇报"命令结束"，沉默是唯一的完成信号）；在 pipe 上等进程退出。通道已关闭时，`Status` / `Exit-Code` 出现在**每一次**关于它的回复里（状态是状态，不是事件），非零退出让该回复成为 `500`，但**字节和 range 照旧返回**。
+`run` 在 pty 上等满时间窗 `timeout`（默认 2s）后返回窗口——shell 不会汇报"命令结束"，所以窗口就是采样时长；在 pipe 上等进程退出（`timeout` 是上限）。通道已关闭时，`Status` / `Exit-Code` 出现在**每一次**关于它的回复里（状态是状态，不是事件），非零退出让该回复成为 `500`，但**字节和 range 照旧返回**。
 
 ### 观察与等待
 
@@ -111,8 +110,8 @@ drwxr-xr-x ...
 |------|------|
 | `span <handle>` | 会话输出区段索引（时间、字节偏移、行号） |
 | `reader <handle>` / `reader <handle> --drop <id>` | 注册/释放输出游标 |
-| `watch <handle> [--event output\|exit\|silence] [--for N]` / `watch --off <rule>` / `watch --list` | 等一件事发生：输出、退出、或静默 N 秒 |
-| `notify [--level info\|success\|warn\|error] [--sticky] [--on <session>] <body>` | 通过 Web UI 通知人类（toast + 系统通知）。**问人类任何东西之前先调用它**，然后停下等，不要轮询 |
+| `watch <handle> [--event output\|exit\|silence] [--for N] [--channel resource\|sampling]` / `watch --off <rule>` / `watch --list` | 等一件事发生：输出、退出、或静默 N 秒。默认 `--event output`、`--for 3`；`--channel` 省略时客户端声明了 sampling 就用 sampling，否则 resource |
+| `notify [--level info\|success\|warn\|error] [--sticky] [--on <session>] <body>` | 通过 Web UI 通知人类（toast + 系统通知）。**问人类任何东西之前先调用它**，然后停下等，不要轮询。默认 `--level info`，toast 显示 10 秒（`--sticky` 常驻） |
 
 ### 远端面
 
@@ -244,7 +243,7 @@ shell "a1f3:9" not found
 
 ```
 ps                                  # 有什么可操作
-  → pipe internal --argv 'sh'        → Handle: a1f3:1
+  → pipe internal --argv sh          → Handle: a1f3:1
       → run a1f3:1 ls -la
       → type a1f3:1 echo hi
       → key a1f3:1 enter

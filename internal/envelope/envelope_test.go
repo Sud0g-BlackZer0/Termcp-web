@@ -33,6 +33,9 @@ func TestDualProjectionIsIsomorphic(t *testing.T) {
 	if !reflect.DeepEqual(textKeys, structKeys) {
 		t.Fatalf("key sets differ:\n text: %v\n json: %v", textKeys, structKeys)
 	}
+	if got := slot.Structured()["body"]; got != slot.Body {
+		t.Errorf("body = %v, want %q", got, slot.Body)
+	}
 	for _, key := range textKeys {
 		want := slot.Headers[key]
 		got := slot.Structured()[key]
@@ -69,15 +72,14 @@ func TestStatusLineIsStructured(t *testing.T) {
 	}
 }
 
-// TestBodyIsNotDuplicated pins that the structured projection carries no body:
-// the bytes are in the text, and copying them would double every reply.
-func TestBodyIsNotDuplicated(t *testing.T) {
+// TestBodyIsInBothProjections pins that the structured projection carries the
+// body too: a client that renders only structuredContent must still receive the
+// bytes. The text keeps them verbatim as well.
+func TestBodyIsInBothProjections(t *testing.T) {
 	const body = "hello"
 	slot := Slot{Code: 200, Headers: map[string]string{"Path": "run a1f3:1 echo hi"}, Body: body}
-	for key, value := range slot.Structured() {
-		if s, ok := value.(string); ok && strings.Contains(s, body) {
-			t.Errorf("structured key %q repeats the body", key)
-		}
+	if got := slot.Structured()["body"]; got != body {
+		t.Errorf("structured body = %v, want %q", got, body)
 	}
 	if !strings.HasSuffix(slot.Text(), body) {
 		t.Error("the text projection must end with the body verbatim")
@@ -204,12 +206,12 @@ func sortedCopy(keys []string) []string {
 }
 
 // structuredKeys returns the header keys of a structured value (everything but
-// the three status-line keys), sorted so the two sides compare.
+// the three status-line keys and the body), sorted so the two sides compare.
 func structuredKeys(m map[string]any) []string {
 	var keys []string
 	for k := range m {
 		switch k {
-		case "protocol", "code", "reason":
+		case "protocol", "code", "reason", "body":
 			continue
 		}
 		keys = append(keys, k)

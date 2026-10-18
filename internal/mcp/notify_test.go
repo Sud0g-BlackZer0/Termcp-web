@@ -255,8 +255,14 @@ func TestShellNotify_SamplingDispatchToRegisteringClient(t *testing.T) {
 
 	termCallTool(t, cli, ctx, "watch "+shellID+" --event output --channel sampling")
 
-	// Drive the terminal-output hook the session reader would normally call.
-	s.notifyMgr.OnOutput(shellID)
+	// The rule is keyed by the channel's shell id, not by the session-level
+	// handle `pipe` returned. Drive the hook with what the session reader would
+	// call it with: the shell id the rule was registered under.
+	rules := s.notifyMgr.List("")
+	if len(rules) != 1 {
+		t.Fatalf("registered rules = %d, want 1", len(rules))
+	}
+	s.notifyMgr.OnOutput(rules[0].ShellID)
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) && handler.count() == 0 {
@@ -541,7 +547,7 @@ func shellIDOf(t *testing.T, s *Server, handle string) string {
 	return sh.ID
 }
 
-// quoteArgv renders an argv as one shell word, so `pipe --argv` receives the
+// quoteArgv renders each argv word as a shell-quoted word, so `pipe --argv` receives the
 // program and its flags without the parser splitting them.
 func quoteArgv(argv []any) string {
 	parts := make([]string, 0, len(argv))

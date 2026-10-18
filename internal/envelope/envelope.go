@@ -9,8 +9,8 @@
 // Two projections of one value: Text for the model, Structured for a client that
 // wants to branch programmatically. Both are produced HERE, from one value, so
 // they cannot disagree about which keys exist — header key sets are compared in
-// the tests, and the body is deliberately absent from Structured (it is already in
-// Text, and copying it would double every byte).
+// the tests, and both carry the body verbatim. Omitting it from Structured would
+// lose the bytes for a client that renders only that projection.
 package envelope
 
 import (
@@ -236,11 +236,9 @@ func structValue(key, value string) any {
 }
 
 // Structured renders the slot as the JSON value that mirrors it: the status line
-// as three keys, then every header by its own name.
-//
-// The body is NOT included (see the package doc).
+// as three keys, then every header by its own name, then the body verbatim.
 func (s Slot) Structured() map[string]any {
-	out := make(map[string]any, len(s.Headers)+3)
+	out := make(map[string]any, len(s.Headers)+4)
 	out["protocol"] = Protocol
 	out["code"] = s.Code
 	reason := s.Reason
@@ -251,6 +249,7 @@ func (s Slot) Structured() map[string]any {
 	for _, key := range orderedKeys(s.Headers) {
 		out[key] = structValue(key, s.Headers[key])
 	}
+	out["body"] = s.Body
 	return out
 }
 
