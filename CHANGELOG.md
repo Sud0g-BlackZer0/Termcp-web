@@ -14,9 +14,9 @@
 
 - **准入判断收成一张能力表（#117 A 类，纯重构，行为可观测面为零变化）**。新建 `internal/capability`，每行一个能力（`id`、`approval.Kind`、`paths`、`gate`、`idempotent`）。此前同一批操作有三个名字、准入判断散在五处：`tools.go` 的工具名清单、`approval_gate.go` 的 `gatedTools`、`extensions/preset.go` 的 `mcpAllow`、`internal/webui/restriction.go` 里 12 个调用点的硬编码字符串，以及 `handlers_shell.go` 里两处 `if shell.RequiresApproval()`。现在白名单、命名空间、审阅门控、路径范围、幂等性都问同一张表：`internal/session` 的 `Restriction.allow` 存**能力 id**（旧 manifest 里的工具名在加载时转换，继续可用），`internal/mcp/admission.go` 的 `checkAdmission` 是 MCP 唯一的准入点，`internal/webui` 的拒绝渲染也按能力 id。于是「同一操作经 `term`、经特化工具、经 REST、经 WebSocket 产生相同状态」不是靠自律，而是因为判定只有一处。
 
-- **特化工具面仍然存在，默认不注册**。`--mcp-specialised-tools` 把 32 个工具重新挂上去（同一张能力表、同一批 handler），给偏好窄而固定 schema 的客户端。两者可同时暴露，同一操作的行为与结果一致（#117 33f）。
+- **32 个特化工具与它们的开关一并删除**。`tools.go`、`toolopts.go`（工具描述压缩表）、`--mcp-defer-tools` / `--mcp-defer-tools-level` / `--mcp-specialised-tools`、`RegisterSSHConfigWriteTools`（它只为改 schema 而存在，而 `term` 没有 schema 可改）全部移除。能力一个没少：handler 仍在，`term` 就是渲染它们的，所以「同一操作经 `term` 与经特化工具产生相同状态」这个要求退化成一句话——只有一条路径。
 
-- **`--mcp-defer-tools*` 只作用于特化工具面**。单工具下「按需加载一个工具的一部分」没有意义；开关、分类表与 `TestDeferLoadingPolicy` 都保留。
+  删掉的东西里有两段知识必须留下，它们搬到了 `help` 里（按需取，而不是每轮付账）：`profile` 导入文件的 TOML 形状与其陷阱（嵌套 `[connections.jump]` vs 被静默丢弃的扁平 `jump_host`）在 `help profile`；「问人类之前先 `notify`、然后等待而不是轮询」在 `help notify`；「人类在提示符前怎么等」在 `help watch`；`span` 的单字母状态在 `help span`。
 
 ### 新增
 
@@ -29,6 +29,10 @@
 - **`docs/mcp-tools.md` 重写**为 `term` 的指令参考（信封、三个窗口轴、指令表、错误码、能力层说明），`docs/api.md` 里指向 MCP 工具名的表述同步改为能力/指令。
 
 ### 修复
+
+- **准入拒绝被当成成功吞掉了**。`callTool` 只看 transport error，不看 `res.IsError`，于是 namespace 隔离与模板白名单的拒绝（它们以 isError `result` 返回）被各指令渲染成 `204 No Content`/`200 OK`——命令**没有执行**，调用方却被告知执行了。修在源头：`callTool` 把 isError 结果转成同样的 `toolFailure`，二十多个调用点一次性修好。顺带修了状态码：`failureFromResult` 走 `extractErrorInfo` 取专用 `error_code`，否则每个拒绝都退化成 `operation_failed`(500) 而不是 403。
+
+- **`term` 把目标藏在 `cmd` 里，外层闸门看不到它**。guard 从 `shell_id`/`session_id` 参数反推会话，而单入口的参数是一个字符串——于是外层放行一切。现在 `runDirective` 在派发前对每条语句做 namespace 可达性检查（批量逐项、整批拒绝），覆盖那些直接查管理层、不经过 handler 的指令（`info`、`ps`、`span`、`close`、`resize`）。没有这一层，声明了 namespace 的调用方能读、能写、能关别人的会话。
 
 - **`Content-Range` 在被总量上限截断后说了谎**。`total_bytes_limit` 只截 body 却留着原来的 range，于是调用方按 `end+1` 续读时会跳过被截掉的那一段。现在 `Slot.Cut` 让两者一起动，截到零字节时退化成 `bytes */total`。
 

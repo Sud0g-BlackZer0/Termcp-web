@@ -237,6 +237,9 @@ func (s *Server) directiveWatch(ctx context.Context, stmt directive.Statement, w
 		if v, ok := stmt.Flags["for"]; ok {
 			args["silence_seconds"] = flagNumber(v)
 		}
+		if v, ok := stmt.Flags["channel"]; ok {
+			args["channel"] = v
+		}
 	}
 	res, fail := s.callTool(ctx, "shell_notify", args)
 	if fail != nil {
@@ -612,7 +615,15 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 			return envelope.Slot{Code: 404, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "unknown_directive"},
 				Body: "unknown directive: " + stmt.Args[0]}
 		}
-		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: op.Usage + "\n"}
+		body := op.Usage + "\n"
+		if op.Detail != "" {
+			// The detail is a page, so it follows the one-line template instead of
+			// replacing it: the template is what a caller scans, the page is what it
+			// reads once it has decided to produce the thing.
+			body += "\n" + op.Detail + "\n"
+		}
+		capped, _ := capGenerated(body, win)
+		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: capped}
 	}
 	var b strings.Builder
 	for _, op := range directive.Ops() {
@@ -630,11 +641,13 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolResult, error) {
 	var b strings.Builder
 	b.WriteString("termcp terminal. Syntax:\n")
-	b.WriteString("  term(cmd: \"run a1f3:1 go build ./...\")       one command, one call\n")
-	b.WriteString("  term(cmd: \"ps\")                              what is running, one line each\n")
-	b.WriteString("  term(cmd: \"ext list\")                        what is installed\n")
-	b.WriteString("  term(cmd: \"help\") / help <directive>         the full directive table\n")
-	b.WriteString("Handles are <session>[:N]; copy one from ps or ext list into the next command.\n\n")
+	b.WriteString("  pty internal                                  open an interactive shell  -> Handle\n")
+	b.WriteString("  pipe internal --argv 'sh -c …'                run a program to exit      -> Handle\n")
+	b.WriteString("  run a1f3:1 go build ./...                     one command, one call\n")
+	b.WriteString("  read a1f3:1 / ps / info a1f3:1                read, list, inspect\n")
+	b.WriteString("  help / help <directive>                       the full directive table\n")
+	b.WriteString("Handles are <session>[:N]; copy one from ps or ext list into the next command.\n")
+	b.WriteString("Every reply is TERM/1 <code>: 2xx ok, 4xx bad request, 5xx the command failed.\n\n")
 
 	// What is running right now, in the same columns `ps` prints: the recovery path
 	// is "ask, then copy a handle", not "ask, then translate".

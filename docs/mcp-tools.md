@@ -32,7 +32,7 @@ Termcp 通过 **SSE**、**Streamable HTTP** 与 **stdio 桥**三种方式暴露 
 
 `cmd` **非必填**。空调用合法且便宜：返回用法摘要 + 当前有什么可操作（谁在跑、装了什么）。这是模型"第一次连上"和"迷路了"时的第一个动作。
 
-特化工具面仍然存在，只是**默认不注册**（`--mcp-specialised-tools`，见 `main.go` 的同名开关）。两种形状背后是同一张能力表，同一操作的行为与结果一致。
+**没有第二套工具面。** 32 个特化工具连同它们的 schema、描述、参数压缩表和 `--mcp-defer-tools*` / `--mcp-specialised-tools` 开关一并删除。能力全在指令里，handler 仍在（`term` 就是渲染它们的），所以能力一个没少。
 
 ### 三个窗口轴
 
@@ -177,11 +177,11 @@ X-Termcp-Namespace: alice
 
 名字限字母/数字/`-_.`，最长 64；非法值不会静默降级成"无命名空间"（那会反而拿到共享视图），而是拒绝一切会话。`ns:` 前缀是内部的，客户端只传裸名。stdio 桥默认不带头，要隔离就自己包一层 HTTP 客户端或在桥上加头（`Config.Headers` 已支持）。
 
-## 工具懒加载（deferred tool loading）
+## 工具懒加载：已删除
 
-单工具下 `defer_loading` 已经没有意义：一个工具没有"按需加载的一部分"。`--mcp-defer-tools*` 仍然保留，只作用于**特化工具面**（`--mcp-specialised-tools`），其分类由 `internal/mcp/toolopts.go` 的 `deferredTools` 与 `allLevelCore` 定义，`TestDeferLoadingPolicy` 校验三种级别并拦住"新工具未分类"与"僵尸条目"。
+`defer_loading` 存在的意义是「工具太多，先别给 schema」。现在只有一个工具，这个问题不存在了，所以 `--mcp-defer-tools` / `--mcp-defer-tools-level` 与其分类表（`deferredTools` / `allLevelCore`）一并删除——保留一个永远只有一个成员的分类体系是纯负债。
 
-默认关闭的原因很实际：不认识 `defer_loading` 的客户端、或经网关转发而被丢弃标记的链路（实测 **Codex 0.155.1 经 AxonHub** 会把带标记的工具整个吞掉，模型侧看到"零工具"），会让这些工具**从模型视野里直接消失**，而不是"稍后能搜到"。只有确认客户端支持按需拉取（mcp-go 系、Claude Code）时才建议开启。
+顺带说明它为什么本来就默认关闭：不认识 `defer_loading` 的客户端、或经网关转发而被丢弃标记的链路（实测 **Codex 0.155.1 经 AxonHub** 会把带标记的工具整个吞掉，模型侧看到「零工具」），会让这些工具**从模型视野里直接消失**。单工具面下这个问题彻底消失。
 
 ## 资源 URL 寻址（termcp://）
 

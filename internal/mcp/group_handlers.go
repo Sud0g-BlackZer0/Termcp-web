@@ -39,14 +39,15 @@ func (s *Server) handleForwardOps(ctx context.Context, request mcpgo.CallToolReq
 
 // handleSSHConfigOps dispatches profile listing and, when enabled, profile
 // management. The write-capable schema is installed by
-// RegisterSSHConfigWriteTools; the default schema exposes list only.
+// s.ManageSSHConfigs, which --mcp-manage-ssh-configs turns on: an instance that
+// does not manage profiles answers list only.
 func (s *Server) handleSSHConfigOps(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	action := getString(request.GetArguments(), "action", "")
 	switch action {
 	case "list":
 		return s.handleListSSHConfigs(ctx, request)
 	case "create", "edit", "copy", "delete":
-		if !s.sshConfigWrites {
+		if !s.ManageSSHConfigs {
 			return toolError(CodeOperationFailed, "%s", "SSH config write actions are disabled; start termcp with --mcp-manage-ssh-configs"), nil
 		}
 		switch action {

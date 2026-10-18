@@ -11,6 +11,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/envelope"
+	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
@@ -29,7 +30,18 @@ func jsonMarshalIndent(m map[string]any) (string, error) {
 // A directive that names a batch (a comma-separated target) produces one slot per
 // entry; everything else produces exactly one. That is the "slots are response
 // units" rule: N questions, N answers, each with its own status line.
+//
+// Namespace reachability is checked HERE, once, before dispatch. The outer tool
+// call cannot do it: `term` carries its target inside `cmd`, so the guard that
+// reads `shell_id`/`session_id` arguments sees nothing to resolve and admits
+// everything. Directives that reach a handler still get the full admission (the
+// handler path runs checkAdmission again); the ones that read a manager directly
+// — info, ps, span — would otherwise be reachable across namespaces, which is
+// exactly the isolation this feature promises.
 func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
+	if bad := s.refuseForeignTarget(ctx, stmt); bad != nil {
+		return []envelope.Slot{*bad}
+	}
 	switch stmt.Op {
 	case "run":
 		return s.directiveRun(ctx, stmt, win)
@@ -83,6 +95,35 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		Headers: map[string]string{"Error-Code": "unknown_directive"},
 		Body:    "unknown directive: " + stmt.Op,
 	}}
+}
+
+// refuseForeignTarget applies namespace isolation to every directive, including
+// the ones that never reach a handler.
+//
+// A batch is checked entry by entry and refused as a whole: running part of it
+// against somebody else's session would make the refusal partial and the outcome
+// unknowable.
+func (s *Server) refuseForeignTarget(ctx context.Context, stmt directive.Statement) *envelope.Slot {
+	callerNS := callerNamespace(ctx)
+	if callerNS == "" || stmt.Target == "" {
+		return nil // the operator, or a directive that names nothing
+	}
+	ids, _ := splitBatchIDs(stmt.Target)
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		single := stmt
+		single.Target = id
+		sess := s.sessionForStatement(single)
+		if sess == nil || ns.Reachable(sess.Namespace, callerNS) {
+			continue
+		}
+		slot := failureSlot(&toolFailure{code: CodeForbidden, msg: ns.ForbiddenForeign(callerNS)})
+		slot.Headers["Path"] = stmt.Path
+		return &slot
+	}
+	return nil
 }
 
 // sessionForStatement resolves the session a directive names, for the admission
@@ -547,18 +588,25 @@ func toolResultMap(res *mcpgo.CallToolResult) (map[string]any, bool) {
 }
 
 // failureFromResult turns a handler's error result into a toolFailure.
+// failureFromResult translates a failed tool result into envelope terms.
+//
+// It goes through extractErrorInfo rather than decoding Content directly, because
+// the error payload is a JSON envelope whose `error` field is what a caller
+// reads: decoding the raw content would return the envelope as if it were text,
+// and — worse — the dedicated error_code would be lost, turning every refusal
+// into a generic operation_failed (a 500) instead of the 403 it is.
 func failureFromResult(res *mcpgo.CallToolResult) *toolFailure {
 	if res == nil {
 		return &toolFailure{code: CodeOperationFailed, msg: "the operation failed without a reason"}
 	}
-	doc, ok := toolResultMap(res)
-	if !ok {
-		return &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)}
+	code, msg := extractErrorInfo(res)
+	if code == "" {
+		code = CodeOperationFailed
 	}
-	return &toolFailure{
-		code: getString(doc, "error_code", CodeOperationFailed),
-		msg:  getString(doc, "error", toolResultText(res)),
+	if msg == "" {
+		msg = toolResultText(res)
 	}
+	return &toolFailure{code: code, msg: msg}
 }
 
 // getFloatAny reads a number from a JSON document.

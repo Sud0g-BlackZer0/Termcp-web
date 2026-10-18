@@ -38,12 +38,6 @@ func ChildArgs(cfg *config.Config, idleTimeout string) []string {
 	if cfg.MCPManageSSHConfigs {
 		args = append(args, "--mcp-manage-ssh-configs")
 	}
-	if cfg.MCPDeferTools {
-		args = append(args, "--mcp-defer-tools")
-	}
-	if cfg.MCPSpecialisedTools {
-		args = append(args, "--mcp-specialised-tools")
-	}
 	if idleTimeout != "" {
 		args = append(args, "--idle-timeout", idleTimeout)
 	}

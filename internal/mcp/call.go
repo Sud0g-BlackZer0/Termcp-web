@@ -28,12 +28,12 @@ func (s *Server) call(ctx context.Context, tool string, args map[string]any) (*m
 	return withLogging(tool, h, s)(ctx, req)
 }
 
-// handlerFor is the tool name → handler map. It is the single registry: the
-// review executor replays through it, tests drive tools through it, and
-// registerTools declares the same set to the MCP server. Having one map means a
-// tool cannot be registered on the server and be unreplayable by the executor,
-// which is a class of bug review mode makes expensive — the human approves, and
-// the operation fails with "no handler".
+// handlerFor is the operation name → handler map: the implementation layer
+// behind the `term` directives and the single registry the review executor
+// replays through. Having one map means an operation cannot be reachable from a
+// directive and unreplayable by the executor, which is a class of bug review
+// mode makes expensive — the human approves, and the operation fails with "no
+// handler".
 func (s *Server) handlerFor(tool string) toolHandler {
 	switch tool {
 	case "term":

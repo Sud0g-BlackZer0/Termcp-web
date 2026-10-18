@@ -9,7 +9,10 @@ import (
 // default surface. Keep it that way: the tool listing is context the caller pays
 // for on every turn, and the capability count must not move it (issue #117 33b).
 func registerTermTools(mcpServer *mcpserver.MCPServer, s *Server) {
-	mcpServer.AddTool(s.newTool(termToolName,
+	mcpServer.AddTool(mcpgo.NewTool(termToolName,
+		// Four default booleans on every tool carry no termcp information and cost
+		// ~80 bytes; the annotation block is empty on purpose.
+		mcpgo.WithToolAnnotation(mcpgo.ToolAnnotation{}),
 		mcpgo.WithDescription(termDescription),
 		mcpgo.WithString("cmd", mcpgo.Description("One terminal line, e.g. `run a1f3:1 ls -la`. Empty = guide: usage summary plus what is available to act on now.")),
 		mcpgo.WithNumber("timeout", mcpgo.Description("Time axis: max seconds to wait. A command that ends early returns early; 0 = do not wait."), mcpgo.DefaultNumber(defaultTimeoutSeconds)),

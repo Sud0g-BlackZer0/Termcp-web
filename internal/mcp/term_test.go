@@ -534,7 +534,10 @@ func TestTermFwdAndProfileDirectives(t *testing.T) {
 		t.Errorf("profile list = %q", prof)
 	}
 	ext := termText(t, s, map[string]any{"cmd": "ext --action list"})
-	if !strings.Contains(ext, "TERM/1 200 OK") {
+	// The test server has no extension reconciler, so the honest answer is
+	// not_configured (422) — what matters is that the directive REACHES the
+	// extension layer and reports its state instead of failing to translate.
+	if !strings.Contains(ext, "TERM/1 422") || !strings.Contains(ext, "not_configured") {
 		t.Errorf("ext list = %q", ext)
 	}
 }
@@ -652,4 +655,105 @@ func openPty(t *testing.T, s *Server) string {
 	// A login shell needs a moment before it reads anything.
 	time.Sleep(300 * time.Millisecond)
 	return h
+}
+
+// Isolation must hold on the single-entry surface too.
+//
+// `term` carries its target inside `cmd`, so the outer admission check — which
+// resolves a session from `shell_id`/`session_id` arguments — has nothing to
+// resolve and admits everything. Without a per-statement check, a caller that
+// claimed a namespace could read, write to and close another caller's channel;
+// this is the regression test for that hole.
+func TestTermNamespaceIsolationHoldsPerDirective(t *testing.T) {
+	s, _, _, _ := newTestServerWithHistory(t)
+	alice := namespaceContext("alice")
+	bob := namespaceContext("bob")
+
+	created, err := s.call(alice, "term", map[string]any{"cmd": "pipe internal --argv 'sleep 30'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := toolResultText(created)
+	if !strings.HasPrefix(text, "TERM/1 200 OK") {
+		t.Fatalf("alice could not open a channel:\n%s", text)
+	}
+	handle := handleFrom(t, text)
+
+	// Every directive that names alice's channel must be refused for bob — not
+	// just the ones that reach a handler. info/span/close read the manager
+	// directly, which is exactly how they would slip through.
+	for _, cmd := range []string{
+		"type " + handle + " echo pwned",
+		"run " + handle + " echo pwned",
+		"key " + handle + " enter",
+		"read " + handle,
+		"info " + handle,
+		"span " + handle,
+		"close " + handle,
+		"resize " + handle + " 10 10",
+	} {
+		res, err := s.call(bob, "term", map[string]any{"cmd": cmd})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := toolResultText(res)
+		if !res.IsError || !strings.HasPrefix(out, "TERM/1 403 Forbidden") {
+			t.Errorf("%q was not refused with 403 for another namespace:\n%s", cmd, out)
+		}
+	}
+
+	// And a batch is refused as a whole: running the entries bob may reach while
+	// skipping the ones it may not would make the outcome unknowable.
+	bobOwn, err := s.call(bob, "term", map[string]any{"cmd": "pipe internal --argv 'sleep 30'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobHandle := handleFrom(t, toolResultText(bobOwn))
+	res, err := s.call(bob, "term", map[string]any{"cmd": "read " + bobHandle + "," + handle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := toolResultText(res); !strings.HasPrefix(out, "TERM/1 403 Forbidden") {
+		t.Errorf("a batch naming a foreign handle must be refused whole:\n%s", out)
+	}
+
+	// A listing must not reveal it either.
+	ps, err := s.call(bob, "term", map[string]any{"cmd": "ps"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(toolResultText(ps), handle) {
+		t.Errorf("bob's ps lists alice's channel %s:\n%s", handle, toolResultText(ps))
+	}
+}
+
+// An admission refusal is a FAILURE, never a success-shaped reply. Regression
+// test for the bug where a directive only inspected the transport error and
+// rendered a refused operation as 204/200 — the command had not run.
+func TestTermRefusalIsNeverSuccessShaped(t *testing.T) {
+	s, _, _, _ := newTestServerWithHistory(t)
+	alice := namespaceContext("alice")
+	bob := namespaceContext("bob")
+
+	created, err := s.call(alice, "term", map[string]any{"cmd": "pipe internal --argv 'sleep 30'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := handleFrom(t, toolResultText(created))
+
+	res, err := s.call(bob, "term", map[string]any{"cmd": "type " + handle + " echo pwned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatal("a refused directive reported success")
+	}
+	out := toolResultText(res)
+	if strings.Contains(out, "204") || strings.Contains(out, "200 OK") {
+		t.Errorf("a refusal was rendered with a success status:\n%s", out)
+	}
+	// The failure must name the reason a caller can act on, not a generic one.
+	if code, _ := headerValue(t, out, "Error-Code"); code != "forbidden" {
+		t.Errorf("Error-Code = %q, want forbidden:\n%s", code, out)
+	}
 }

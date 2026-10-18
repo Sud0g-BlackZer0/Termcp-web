@@ -67,6 +67,10 @@ type Op struct {
 	// parameters are deliberately absent: they are on the tool schema with
 	// self-explaining names, and repeating them 22 times would be noise.
 	Usage string
+	// Detail is the multi-line knowledge `help <directive>` adds on request: the
+	// shapes and traps a caller needs to produce something the server accepts,
+	// which do not fit a one-line usage template and would be noise in an error.
+	Detail string
 }
 
 // Statement is one directive after parsing.
@@ -149,15 +153,18 @@ var ops = []Op{
 	{Name: "rm", Kind: KindFlags, Target: true,
 		Usage: "rm <session>"},
 	{Name: "span", Kind: KindFlags, Target: true,
-		Usage: "span <handle>"},
+		Usage:  "span <handle>",
+		Detail: spanDetail},
 	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"},
 		Usage: "reader <handle>   |   reader <handle> --drop <id>"},
 	{Name: "watch", Kind: KindFlags, Target: true,
-		Flags:     []string{"event", "for", "off", "list"},
+		Flags:     []string{"event", "for", "off", "list", "channel"},
 		Valueless: []string{"list"},
-		Usage:     "watch <handle> [--event output|exit|silence] [--for N]   |   watch --off <rule>   |   watch --list"},
+		Usage:     "watch <handle> [--event output|exit|silence] [--for N] [--channel resource|sampling]   |   watch --off <rule>   |   watch --list",
+		Detail:    watchDetail},
 	{Name: "notify", Kind: KindPayload, Flags: []string{"level", "sticky", "on", "title", "for"}, Valueless: []string{"sticky"},
-		Usage: "notify [--level info|success|warn|error] [--sticky] [--on <session>] <body>"},
+		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] <body>",
+		Detail: notifyDetail},
 	{Name: "detect", Kind: KindFlags,
 		Usage: "detect"},
 	{Name: "fwd", Kind: KindFlags,
@@ -173,7 +180,8 @@ var ops = []Op{
 			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
 			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port", "source"},
 		Valueless: []string{"trust-unknown-host", "default-approval"},
-		Usage:     "profile list|create|edit|copy|delete …"},
+		Usage:     "profile list|create|edit|copy|delete …",
+		Detail:    profileFileFormat},
 	{Name: "ext", Kind: KindFlags,
 		Flags: []string{"action", "name", "kind", "target", "description", "command", "args", "url", "headers",
 			"mode", "rows", "cols", "allow", "paths", "notes", "enabled", "forwards"},
@@ -186,6 +194,63 @@ var ops = []Op{
 	{Name: "help", Kind: KindFlags,
 		Usage: "help [directive]"},
 }
+
+// watchDetail is the waiting rule, kept where a caller looks it up: the agent
+// that held a terminal at a sudo prompt polled read in a loop because nothing
+// told it waiting on a human is a supported move rather than a hang.
+const watchDetail = `Register an async wake-up rule on a handle and stop polling; you are woken when
+it fires. Events: output (any new bytes), exit (the process ended), silence (N
+seconds with no output). Human at a prompt (sudo, password, a confirmation):
+notify the human FIRST, then watch --event output on that handle — silence
+fires on nobody speaking, which is the state you are already in while you wait.
+One task's rule, not the handle's: watch --off <rule> when it is answered.
+watch wakes the Agent; notify reaches the human.
+
+--channel picks how the wake-up travels: resource (a resources/updated
+notification, which any client can receive) or sampling (a createMessage the
+client must have declared support for). Omit it and the server decides.`
+
+// spanDetail decodes the one-letter statuses, which are terse by design (they are
+// written to log.jsonl for every status change) and unreadable without this.
+const spanDetail = `Session output index: time, byte offset and line numbers per span, so a window
+can be read by position instead of by streaming. status: o output (the shell's
+own bytes), a AI input, i human input, q approval asked, A approved input. i/q
+mean a person operated; a means the agent did. Read a span's bytes with
+read <handle> --cursor <offset>, or its lines with --from-line <line>.`
+
+// notifyDetail is the rule for reaching the human, stated where a caller looks it
+// up. It used to be the notify_user tool's description; with one tool there is no
+// per-operation description to hang it on, and the rule is exactly the kind of
+// thing `help` exists for: needed at the moment of use, noise before it.
+const notifyDetail = `Toasts + a system notification on every open Web UI page; --on highlights that
+session's card. Call it BEFORE asking the human for anything — password, sudo,
+MFA, passphrase, confirmation, approval, a choice, interactive input — and when
+a long task ends or fails. Blocking asks: --level warn|error --sticky. Once you
+have asked, WAIT: never poll, guess or fake an answer. A reply with no open page
+was delivered to nobody, so say the ask in your own reply too.`
+
+// profileFileFormat is the import/export file shape (Web UI batch import; HTTP
+// GET/POST /api/connections/batch). It is stated here, once, because the agent is
+// often the one asked to *produce* that text — a user pastes a list of hosts and
+// wants an importable file — and a format spec duplicated in prose would drift
+// from the parser the moment either is edited.
+const profileFileFormat = `profile file format (the batch import/export shape):
+
+  [[connections]]
+  name = "prod"                 # letters/digits/_/- , max 64
+  kind = "remote"
+  host = "10.0.0.5"
+  user = "deploy"
+  password = "…"                # or private_key = "…"
+  # optional: port, key_passphrase, trust_unknown_host, known_hosts,
+  #           dial_timeout_seconds, proxy, description,
+  #           default_shell, default_mode, default_approval
+
+A bastion is NESTED — [connections.jump], and [connections.jump.jump] for a
+deeper hop. The flat --jump-host style flags of this directive are NOT file
+fields: a file using them parses cleanly and silently drops the bastion.
+Export emits this shape, so it re-imports unchanged. "internal" is reserved,
+an existing name becomes name-2, and credentials are write-only.`
 
 // byName indexes ops.
 var byName = func() map[string]Op {

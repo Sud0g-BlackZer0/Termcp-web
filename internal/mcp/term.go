@@ -354,6 +354,14 @@ func argsOf(pairs ...any) map[string]any {
 // specialized handler already takes, and the reply is re-rendered as an HTTP
 // response. So `run` is not a second implementation of shell_input + shell_key +
 // shell_output; it is those calls, in order, with one reply.
+// callTool invokes one operation and reports BOTH kinds of failure the same way:
+// a transport error and an isError result.
+//
+// The isError half is not a convenience. Admission refusals (namespace isolation,
+// a template's capability list) come back as an isError result, not as an error,
+// and a directive that only inspected the error would report the refusal as a
+// 204 success — the operation never ran, and the caller was told it did. Every
+// directive routes through here for exactly that reason.
 func (s *Server) callTool(ctx context.Context, tool string, args map[string]any) (*mcpgo.CallToolResult, *toolFailure) {
 	h := s.handlerFor(tool)
 	if h == nil {
@@ -365,6 +373,9 @@ func (s *Server) callTool(ctx context.Context, tool string, args map[string]any)
 	res, err := withLogging(tool, h, s)(ctx, req)
 	if err != nil {
 		return nil, &toolFailure{code: CodeOperationFailed, msg: err.Error()}
+	}
+	if res != nil && res.IsError {
+		return res, failureFromResult(res)
 	}
 	return res, nil
 }
