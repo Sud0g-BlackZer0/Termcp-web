@@ -44,10 +44,19 @@ type Server struct {
 	// connections tracks the MCP clients currently attached (see connections.go).
 	// It is fed by mcp-go's session hooks, which is the only place a client
 	// attaching or detaching is observable.
+	// currentReply is the reply being assembled by handleTerm, so a slot can
+	// consult the learn_mode de-duplication without threading the accumulator
+	// through every directive. It is set and cleared per call.
+	currentReply *termReply
+
 	connections *connRegistry
 	// connListener is called when that set changes, so the Web UI can refresh
 	// without polling. Set by main to the same broadcast the session list uses.
 	connListener func()
+
+	// specialisedTools exposes the per-operation tools alongside `term`. Off by
+	// default: see WithSpecialisedTools.
+	specialisedTools bool
 }
 
 // Option customizes a Server at construction time. Options keep New's signature
@@ -165,9 +174,15 @@ func (s *Server) RegisterSSHConfigWriteTools() {
 	extra = append(extra, fields()...)
 
 	// Apply the extra properties onto the existing registered tool schema.
+	// The default surface is `term` alone, where profile writes are the `profile`
+	// directive and the switch that enables them is --mcp-manage-ssh-configs. There
+	// is no ssh_config tool to widen, and that is not a misconfiguration.
 	tools := s.mcpServer.ListTools()
 	st, ok := tools["ssh_config"]
 	if !ok {
+		if !s.specialisedTools {
+			return
+		}
 		panic("ssh_config tool must be registered before RegisterSSHConfigWriteTools")
 	}
 	t := st.Tool
@@ -227,4 +242,12 @@ func (s *Server) Stop() error {
 		_ = s.streamServer.Shutdown(ctx)
 	}
 	return s.sseServer.Shutdown(ctx)
+}
+
+// specialisedTools turns the per-operation tool surface back on. It is off by
+// default: `term` is the surface, and the 32 tools are its implementation plus an
+// optional alternate shape for clients that prefer a narrow, fixed schema
+// (issue #117 33f).
+func WithSpecialisedTools() Option {
+	return func(s *Server) { s.specialisedTools = true }
 }

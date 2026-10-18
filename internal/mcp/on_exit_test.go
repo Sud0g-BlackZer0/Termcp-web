@@ -167,7 +167,7 @@ func TestSessionStartRejectsAnUnknownOnExit(t *testing.T) {
 // description declared at registration, so asserting on tools.go would pass while
 // the model saw nothing.
 func TestOnExitIsDiscoverableOnTheWire(t *testing.T) {
-	s := New(nil, nil, nil, nil, "test")
+	s := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
 	ctx := originContext("http://127.0.0.1:18765")
 
 	var start, oneShotDesc string

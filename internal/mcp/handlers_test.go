@@ -53,7 +53,9 @@ func newTestServer(t *testing.T) *Server {
 	msgMgr := message.NewManager(store)
 	sessMgr := session.NewManager(msgMgr, store, srv)
 	cleanupTestRuntime(t, sessMgr, srv)
-	s := New(sessMgr, msgMgr, sshconfig.NewStore(dir), nil, "test")
+	// The specialised surface is opt-in (issue #117); these tests drive its
+	// handlers directly, so they ask for it explicitly.
+	s := New(sessMgr, msgMgr, sshconfig.NewStore(dir), nil, "test", WithSpecialisedTools())
 	return s
 }
 

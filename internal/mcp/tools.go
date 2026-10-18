@@ -5,11 +5,24 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-// registerTools declares every MCP tool on the server. It is the whole tool
-// surface in one place: name, description, arguments and the handler each call
-// dispatches to. Split out of New so the surrounding function reads as
-// assembly (managers, transports) rather than as a 230-line table.
+// registerTools declares the MCP tool surface. The terminal entry `term` is
+// always registered; the specialised tools are registered only on request
+// (WithSpecialisedTools), because issue #117's whole point is that the surface
+// must not grow with the capability count: 32 tools cost ~24 KB of context every
+// turn, and every new capability would cost another thousand bytes.
+//
+// The specialised implementations are kept and still compile: they are the
+// execution layer `term` dispatches to, the "same operation, same state" half of
+// the design, and a build may expose them again (issue #117 33f).
 func registerTools(mcpServer *mcpserver.MCPServer, s *Server) {
+	registerTermTools(mcpServer, s)
+	if s.specialisedTools {
+		registerSpecialisedTools(mcpServer, s)
+	}
+}
+
+// registerSpecialisedTools declares the per-operation MCP tools.
+func registerSpecialisedTools(mcpServer *mcpserver.MCPServer, s *Server) {
 	mcpServer.AddTool(s.newTool("session_start",
 		mcpgo.WithDescription("Start a session (connection container) plus its primary shell. ssh_config REQUIRED: a profile name from ssh_config(action=list), \"internal\" for a local terminal on the termcp host itself (no SSH), or a termcp:// entry locator pasted by the user (e.g. \"termcp://mac\" — parsed directly, no lookup needed). Empty command/args = the profile's default_shell, else the target's own login shell (pty), else an error (pipe). WARNING: command/args = single run-and-exit program; for multi-step or stateful work omit them and drive an interactive shell instead. Returns session_id and shell_id."),
 		mcpgo.WithString("command", mcpgo.Description("Executable line; empty with no args = login shell / profile default_shell")),

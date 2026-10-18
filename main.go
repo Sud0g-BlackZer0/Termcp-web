@@ -100,6 +100,7 @@ func main() {
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log verbosity: debug|info|warn|error")
 	flag.BoolVar(&cfg.NoInternal, "no-internal", cfg.NoInternal, "Disable the built-in loopback SSH profile (no internal connection)")
 	flag.BoolVar(&cfg.MCPManageSSHConfigs, "mcp-manage-ssh-configs", cfg.MCPManageSSHConfigs, "Enable MCP tools to create/edit/delete SSH configs (off by default; passwords/keys are never exposed)")
+	flag.BoolVar(&cfg.MCPSpecialisedTools, "mcp-specialised-tools", cfg.MCPSpecialisedTools, "Also register the per-operation MCP tools alongside the single `term` entry. Same capabilities, wider surface: 32 tools cost ~24 KB of context every turn.")
 	flag.StringVar(&cfg.AuthToken, "auth-token", cfg.AuthToken, "HTTP authentication token (or $TERMCP_AUTH_TOKEN)")
 	flag.StringVar(&cfg.AuthHash, "auth-hash", cfg.AuthHash, "Salted SHA-256 HTTP token hash (or $TERMCP_AUTH_HASH; generate with 'termcp --gen-auth-hash')")
 	flag.BoolVar(&cfg.DisableAuth, "disable-auth", cfg.DisableAuth, "Disable HTTP authentication entirely, even on non-loopback binds (or TERMCP_DISABLE_AUTH_TOKEN=1). Errors out if a token or hash is also configured.")
@@ -390,6 +391,9 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	}
 	if deferLevel != "" && deferLevel != mcpmod.DeferOff {
 		mcpOpts = append(mcpOpts, mcpmod.DeferLevel(deferLevel))
+	}
+	if cfg.MCPSpecialisedTools {
+		mcpOpts = append(mcpOpts, mcpmod.WithSpecialisedTools())
 	}
 	mcpSrv := mcpmod.New(sessMgr, msgMgr, sshStore, forwardMgr, versionString(), mcpOpts...)
 	// Same embedded docs the Web UI serves over HTTP become MCP resources/prompts.

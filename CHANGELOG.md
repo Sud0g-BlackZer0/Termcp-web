@@ -2,7 +2,37 @@
 
 ## Unreleased
 
+### 变更
+
+- **MCP 工具面收成一个入口 `term`（#117）**。`tools/list` 从 32 个工具、约 22–25 KB 变成**一个**工具、约 2.0 KB，而且此后**不再随能力增长**：新增一种操作是在命令空间里加一条指令，不是在工具清单里加一行。`term` 只有 `cmd` 加九个窗口参数（`timeout` / `bytes_limit` / `lines_limit` / `total_bytes_limit` / `quiet_ms` / 三个 `on_*_overflow` / `pipe_to` / `learn_mode`），`cmd` **非必填** —— 空调用返回引导：用法摘要 + 现在有什么可操作。
+
+  返回值是 HTTP 风味的信封（`TERM/1 <code> <reason>` 状态行 + 只出现有意义的头部 + 原始 body），同一份值另有一个 JSON 投影在 `structuredContent` 里，键集与头部一一对应。`Content-Range` 用 RFC 9110 形式，`end` 包含在内，所以 `end+1` 就是下一次的游标；被 `total_bytes_limit` 截断的 slot 会同时改写它，因为一个声称了 body 已不再携带的字节的 range，比没有 range 更坏。
+
+  指令语法是 shell 风味的一行（`run a1f3:1 ls -la`），用 `mvdan.cc/sh/v3/syntax` 只解析不求值，payload 按源码切片取出，所以 `$HOME` / `$(cmd)` / `'a'"b"'c'` 逐字节原样进入 shell。`;` 分隔多条指令（一条一个 slot），`&&` / `|` 留在 payload 里（那是一条命令）。逗号目标是一整个词，即一次批量。
+
+  **上下文保护变成默认值**：历史上只有 `shell_output` 有字节上限，其余 31 个工具的返回值没有任何体积限制（`session_list` / `message` / `file_read` / `ext list` 都能一次吐出任意大）。现在三个窗口轴对**每一个**指令生效，包括 `ps`、`info` 这类生成式回复。
+
+- **准入判断收成一张能力表（#117 A 类，纯重构，行为可观测面为零变化）**。新建 `internal/capability`，每行一个能力（`id`、`approval.Kind`、`paths`、`gate`、`idempotent`）。此前同一批操作有三个名字、准入判断散在五处：`tools.go` 的工具名清单、`approval_gate.go` 的 `gatedTools`、`extensions/preset.go` 的 `mcpAllow`、`internal/webui/restriction.go` 里 12 个调用点的硬编码字符串，以及 `handlers_shell.go` 里两处 `if shell.RequiresApproval()`。现在白名单、命名空间、审阅门控、路径范围、幂等性都问同一张表：`internal/session` 的 `Restriction.allow` 存**能力 id**（旧 manifest 里的工具名在加载时转换，继续可用），`internal/mcp/admission.go` 的 `checkAdmission` 是 MCP 唯一的准入点，`internal/webui` 的拒绝渲染也按能力 id。于是「同一操作经 `term`、经特化工具、经 REST、经 WebSocket 产生相同状态」不是靠自律，而是因为判定只有一处。
+
+- **特化工具面仍然存在，默认不注册**。`--mcp-specialised-tools` 把 32 个工具重新挂上去（同一张能力表、同一批 handler），给偏好窄而固定 schema 的客户端。两者可同时暴露，同一操作的行为与结果一致（#117 33f）。
+
+- **`--mcp-defer-tools*` 只作用于特化工具面**。单工具下「按需加载一个工具的一部分」没有意义；开关、分类表与 `TestDeferLoadingPolicy` 都保留。
+
+### 新增
+
+- **`learn_mode` 与出错时的 `Usage`**。任何 `400` 都带 `Usage`（未知指令带整张指令表），因为出错正是调用方不知道形状的时刻；`learn_mode=true` 把命中的指令用法附在 slot 上，每条指令一次（批量里不重复）。成功回复默认**不带** `Usage`：已经会了就不该每轮付费。
+
+- **`alias` 指令**：`alias look read a1f3:1` 之后 `look` 就是那条指令，`Path` 显示展开后的模样。运行时别名活在本进程里，重启即失。
+
+- **`mcp` 指令**：把任意第三方 MCP server 当成一条通道驱动（`pipe <entry> --argv 'npx -y some-server'` 之后 `mcp send` / `mcp recv` / `mcp tools` / `mcp call`），HTTP 端点则不消耗通道。
+
+- **`docs/mcp-tools.md` 重写**为 `term` 的指令参考（信封、三个窗口轴、指令表、错误码、能力层说明），`docs/api.md` 里指向 MCP 工具名的表述同步改为能力/指令。
+
 ### 修复
+
+- **`Content-Range` 在被总量上限截断后说了谎**。`total_bytes_limit` 只截 body 却留着原来的 range，于是调用方按 `end+1` 续读时会跳过被截掉的那一段。现在 `Slot.Cut` 让两者一起动，截到零字节时退化成 `bytes */total`。
+
+- **`pipe --argv` 的文档边界**：`--argv` 是 **argv**（按空格切分），不是命令行 —— 要多语句请 `sh -c` 或写脚本文件。`term` 的用法行与 `docs/mcp-tools.md` 都写明了这一点，因为它看起来像命令行而实际不是。
 
 - **连接者面板打开时是空的**。面板的列表只由「会话帧」驱动，而会话帧是**变更驱动**的：服务端在会话、连接者或标签页发生变化时才广播，静止的页面可能几分钟都不来一帧。于是打开面板时通常什么都没有发生 —— `renderClients` 在面板关着时直接返回（连签名都不记），打开面板又没有代码去画，`#clients-empty` 那句「还没有连接者」就单独留在空框里。**这看起来就是「没有连接者」，其实那个列表一直握在手上却被丢掉了**，而且你自己这个标签页本身就是一个 viewer，永远应该在列表里。现在帧到达时把两份列表记下来，面板的 `toggle` 事件用它们立即重画（`toggle` 而不是 click：`<details>` 也可能被键盘、页内查找、浏览器恢复状态打开，这三种都只发 `toggle`）。绘制与渲染路径拆成两个函数，所以「打开时画」与「帧来了才画」共用同一份签名去重，重复开合不会叠行。
 

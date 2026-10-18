@@ -41,6 +41,9 @@ func ChildArgs(cfg *config.Config, idleTimeout string) []string {
 	if cfg.MCPDeferTools {
 		args = append(args, "--mcp-defer-tools")
 	}
+	if cfg.MCPSpecialisedTools {
+		args = append(args, "--mcp-specialised-tools")
+	}
 	if idleTimeout != "" {
 		args = append(args, "--idle-timeout", idleTimeout)
 	}

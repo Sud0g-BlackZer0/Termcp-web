@@ -400,7 +400,7 @@ func TestReviewPendingRepliesStateTheNextStep(t *testing.T) {
 // instructions, which are optional in MCP and routinely discarded.
 func TestToolListingCarriesInstanceAddress(t *testing.T) {
 	const origin = "http://10.1.2.3:18994"
-	s := New(nil, nil, nil, nil, "test")
+	s := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
 
 	for _, tool := range listTools(t, s, originContext(origin)) {
 		if tool.Name == "notify_user" {
@@ -418,7 +418,7 @@ func TestToolListingCarriesInstanceAddress(t *testing.T) {
 // The decoration must be computed per request and never accumulate: repeated
 // listings under different hosts each carry exactly their own address.
 func TestToolListingAddressIsPerRequestAndNotAccumulated(t *testing.T) {
-	s := New(nil, nil, nil, nil, "test")
+	s := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
 	for _, origin := range []string{"http://a.example:1", "http://b.example:2", "http://a.example:1"} {
 		notify := notifyDescription(t, s, originContext(origin))
 		if n := strings.Count(notify, "This instance's Web UI:"); n != 1 {
@@ -437,7 +437,7 @@ func TestToolListingAddressIsPerRequestAndNotAccumulated(t *testing.T) {
 // rather than a dangling label or an invented name. (An in-process call reaches
 // this path too, which is why the fallback exists at all.)
 func TestToolListingFallsBackToBindAddress(t *testing.T) {
-	s := New(nil, nil, nil, nil, "test")
+	s := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
 	s.baseURL = "http://127.0.0.1:18765"
 
 	if notify := notifyDescription(t, s, nil); !strings.Contains(notify, "http://127.0.0.1:18765/") {
@@ -448,7 +448,7 @@ func TestToolListingFallsBackToBindAddress(t *testing.T) {
 // No address at all (no host to answer, no bind address yet) must leave the
 // description exactly as written rather than gain a dangling label.
 func TestToolListingUnchangedWithoutOrigin(t *testing.T) {
-	s := New(nil, nil, nil, nil, "test")
+	s := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
 	if notify := notifyDescription(t, s, nil); strings.Contains(notify, "This instance's Web UI:") {
 		t.Errorf("description advertises an address that was never set:\n%s", notify)
 	}
@@ -470,7 +470,7 @@ func TestInstructionsDoNotCarryInstanceAddress(t *testing.T) {
 // hook hangs on. A transport that never installs it would keep every other test
 // green while no real client ever saw its own address.
 func TestStreamableTransportAdvertisesRequestHost(t *testing.T) {
-	s := New(nil, nil, nil, nil, "test")
+	s := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
 	ts := httptest.NewServer(s.StreamableHTTPHandler())
 	defer ts.Close()
 
@@ -734,7 +734,7 @@ func (c *mcpSession) listSessions(t *testing.T) map[string]bool {
 // name the same address. A transport that installed the origin hook for tools
 // only would leave resources pointing at the bind address.
 func TestStreamableTransportAdvertisesRequestHostInResources(t *testing.T) {
-	s := New(nil, nil, nil, nil, "test")
+	s := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
 	s.SetDocsFS(webui.Assets())
 	s.baseURL = "http://127.0.0.1:18765"
 	s.registerDocs()
@@ -784,7 +784,7 @@ func TestStreamableTransportAdvertisesRequestHostInResources(t *testing.T) {
 // collide with the namespace users paste into ssh_config args. The address is
 // published through the notify_user description instead — never as a locator.
 func TestNoLocatorShapedInstanceResource(t *testing.T) {
-	s := New(nil, nil, nil, nil, "test")
+	s := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
 	s.SetDocsFS(webui.Assets())
 	s.registerDocs()
 

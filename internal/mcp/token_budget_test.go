@@ -5,78 +5,81 @@ import (
 	"testing"
 )
 
-// TokenBudgetGuard prevents regression: the tools/list and instructions payloads
-// must stay within defined limits. These values are injected into the model
-// context every turn, so every byte matters.
+// TestTokenBudgetGuard prevents regression on the one payload every client pays
+// for on every turn.
+//
+// Issue #117 replaced a 32-tool, ~24 KB surface with a single `term` entry, so
+// the guard now measures the entry itself and the constant total: the budget is
+// a hard constraint, not a warning, because the whole point of the redesign is
+// that the surface stops growing with the capability count.
 func TestTokenBudgetGuard(t *testing.T) {
 	s := New(nil, nil, nil, nil, "test")
 	s.RegisterSSHConfigWriteTools()
 
-	// Measure the listing as the model receives it, decorated address included:
-	// that per-request decoration is part of the payload this guard protects.
 	tools := listTools(t, s, originContext("http://127.0.0.1:18765"))
-	if len(tools) != 32 {
-		t.Fatalf("expected 32 tools, got %d", len(tools))
-	}
-
-	total := 0
-	descBytes := 0
-	propDescBytes := 0
-	for _, st := range tools {
-		b, err := json.Marshal(st)
-		if err != nil {
-			t.Fatal(err)
+	if len(tools) != 1 {
+		names := make([]string, 0, len(tools))
+		for _, st := range tools {
+			names = append(names, st.Name)
 		}
-		total += len(b)
-		descBytes += len(st.Description)
-		props := st.InputSchema.Properties
-		for _, pv := range props {
-			pm, ok := pv.(map[string]any)
-			if !ok {
-				continue
-			}
-			if d, ok := pm["description"].(string); ok {
-				propDescBytes += len(d)
-			}
-		}
+		t.Fatalf("the default surface must be exactly one tool, got %d: %v", len(tools), names)
 	}
-	// Instructions are a fixed constant again: the address is not duplicated
-	// there, because `instructions` is optional and often dropped.
-	instructionsLen := len(mcpServerInstructions)
 
-	t.Logf("tools/list total: %d B", total)
-	t.Logf("tool descriptions: %d B", descBytes)
-	t.Logf("property descriptions: %d B", propDescBytes)
-	t.Logf("instructions: %d B", instructionsLen)
+	b, err := json.Marshal(tools[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("tools/list total: %d B", len(b))
+	t.Logf("instructions: %d B", len(mcpServerInstructions))
 
-	// Budgets (bytes, rough 4:1 B:tokl ratio for English text). The per-tool
-	// budgets scale with the tool count: they are averages over the whole
-	// surface, and a surface that grows past its headroom is expected to raise
-	// these rather than shed descriptions.
-	//
-	// The property budget was raised from 5000 to 5300 when the extension tool
-	// gained the endpoint form's two fields (url, headers): a template that names
-	// an HTTP MCP server is the shape most real servers have, and a field the
-	// model cannot read the meaning of is one it will set wrongly. The headroom is
-	// deliberate — 5167 B is what the surface measures, so a further addition has
-	// to be argued for rather than fit into the slack.
-	if total > 25000 {
-		t.Errorf("tools/list total %d B exceeds 25000 B budget", total)
+	// #117 33c: the schema budget is a hard constraint.
+	if len(b) >= 2500 {
+		t.Errorf("the %s schema serialises to %d B, over the 2500 B budget", tools[0].Name, len(b))
 	}
-	if descBytes > 5000 {
-		t.Errorf("tool descriptions %d B exceeds 5000 B budget", descBytes)
+	// The listing cannot grow with the capability count (33b): with a single
+	// entry the total must stay under a couple of kilobytes including the
+	// transport's own envelope.
+	if len(b) > 3000 {
+		t.Errorf("tools/list is %d B; a single-entry surface must stay small", len(b))
 	}
-	if propDescBytes > 5300 {
-		t.Errorf("property descriptions %d B exceeds 5300 B budget", propDescBytes)
-	}
-	if instructionsLen > 2600 {
-		t.Errorf("instructions %d B exceeds 2600 B budget", instructionsLen)
+	if n := len(mcpServerInstructions); n > 2600 {
+		t.Errorf("instructions %d B exceeds 2600 B budget", n)
 	}
 }
 
-// TestDeferLoadingPolicy locks the split between always-loaded core tools and
-// deferred (on-demand) tools, and the default that governs whether the marker
-// is emitted at all.
+// TestSpecialisedSurfaceIsOptIn locks the coexistence rule (issue #117 33f): the
+// same build can expose both surfaces, the specialised one is off unless asked
+// for, and asking for it changes nothing about how an operation behaves —
+// admission lives in the capability table, not in the shape.
+func TestSpecialisedSurfaceIsOptIn(t *testing.T) {
+	defaulted := New(nil, nil, nil, nil, "test")
+	if n := len(defaulted.mcpServer.ListTools()); n != 1 {
+		t.Errorf("default surface has %d tools, want 1", n)
+	}
+
+	full := New(nil, nil, nil, nil, "test", WithSpecialisedTools())
+	full.RegisterSSHConfigWriteTools()
+	tools := full.mcpServer.ListTools()
+	if len(tools) < 30 {
+		t.Errorf("the specialised surface has %d tools; it is the full per-operation set", len(tools))
+	}
+
+	// Every specialised tool must name a capability, and every capability must be
+	// reachable through `term`: the two surfaces are two shapes of one table.
+	for name := range tools {
+		if name == termToolName {
+			continue
+		}
+		var g = lookupGate(name)
+		if !g.known {
+			t.Errorf("specialised tool %q has no capability", name)
+		}
+	}
+}
+
+// TestDeferLoadingPolicy keeps the defer_loading classification honest for the
+// specialised surface, which is the only one whose listing can be large enough
+// for the marker to matter.
 //
 // The classification is a property of termcp; whether it reaches the wire is a
 // deployment choice. Both halves matter: a model that must search before it can
@@ -97,7 +100,7 @@ func TestDeferLoadingPolicy(t *testing.T) {
 
 	collect := func(t *testing.T, opts ...Option) map[string]bool {
 		t.Helper()
-		s := New(nil, nil, nil, nil, "test", opts...)
+		s := New(nil, nil, nil, nil, "test", append(opts, WithSpecialisedTools())...)
 		s.RegisterSSHConfigWriteTools()
 		byName := make(map[string]bool)
 		for _, st := range s.mcpServer.ListTools() {
@@ -141,7 +144,7 @@ func TestDeferLoadingPolicy(t *testing.T) {
 	// Every registered tool must be classified, so a new tool cannot silently
 	// default into the always-loaded set and inflate every client's context.
 	for name := range on {
-		if deferredTools[name] || isCore[name] {
+		if name == termToolName || deferredTools[name] || isCore[name] {
 			continue
 		}
 		t.Errorf("tool %q is neither in the core list nor deferredTools; classify it", name)
@@ -153,9 +156,10 @@ func TestDeferLoadingPolicy(t *testing.T) {
 	// level's whole point.
 	all := collect(t, DeferLevel(DeferAll))
 	for name := range all {
-		if !allLevelCore[name] && !deferredTools[name] && !isCore[name] {
-			t.Errorf("tool %q is neither all-level core nor classified; it would silently go eager under level=all", name)
+		if name == termToolName || allLevelCore[name] || deferredTools[name] || isCore[name] {
+			continue
 		}
+		t.Errorf("tool %q is neither all-level core nor classified; it would silently go eager under level=all", name)
 	}
 	for name := range allLevelCore {
 		deferred, ok := all[name]
