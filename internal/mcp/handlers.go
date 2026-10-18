@@ -95,8 +95,8 @@ func (s *Server) requireSession(sessionID string) (*session.Session, *mcpgo.Call
 	// The short handle `sid:N` names a session too (plus one of its channels),
 	// which is what makes `info`, `close` and the namespace check agree with
 	// `read` about a handle copied out of `ps`.
-	if id, index := locator.SplitHandle(sessionID); index > 0 {
-		if sess := s.sessMgr.Get(id); sess != nil {
+	if h := locator.SplitHandle(sessionID); h.Index > 0 {
+		if sess := s.sessMgr.Get(h.SessionID); sess != nil {
 			return sess, nil
 		}
 	}
@@ -246,26 +246,10 @@ func (s *Server) requireShell(shellID string) (*session.ChildShell, *mcpgo.CallT
 		}
 		return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Session '%s' has no shell", shellID))
 	}
-	// The short handle `sid:N` that ps/info/pty print. It is accepted HERE, at the
-	// one door every terminal directive goes through, so "copy the handle from ps
-	// into the next command" is true for all of them instead of only for the
-	// locator spelling. SplitHandle refuses locator syntax, so the `:` in
-	// `termcp://#sid:2` is still the locator's to consume below.
-	if id, index := locator.SplitHandle(shellID); index > 0 {
-		if sess := s.sessMgr.Get(id); sess != nil {
-			if sess.Info().Status != api.SessionRunning {
-				return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is read-only via shell_output", sess.ID, sess.Info().Status))
-			}
-			cs, err := s.shellFromIndex(sess, index)
-			if err != nil {
-				return nil, toolError(CodeShellNotFound, "%s", err.Error())
-			}
-			if cs == nil {
-				return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Session '%s' has no shell", sess.ID))
-			}
-			return cs, nil
-		}
-	}
+	// The locator branch runs BEFORE the short-handle branch, and must keep doing
+	// so: both spellings end in `:<N>`, and only this branch distinguishes a
+	// malformed locator (invalid_argument) from an unknown id. Its error messages
+	// are the ones the resource-URL contract pins.
 	if looksLikeResourceLocator(shellID) {
 		p, err := parseResourceURL(shellID)
 		if err != nil {
@@ -288,6 +272,25 @@ func (s *Server) requireShell(shellID string) (*session.ChildShell, *mcpgo.CallT
 			return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Session '%s' has no shell", sess.ID))
 		}
 		return cs, nil
+	}
+	// The short handle `sid:N` that ps/info/pty print, accepted at the one door
+	// every terminal directive goes through — so "copy the handle from ps into the
+	// next command" holds for all of them. Locators were consumed above, so the
+	// `:<N>` reaching this point belongs to a short handle.
+	if h := locator.SplitHandle(shellID); h.Index > 0 {
+		if sess := s.sessMgr.Get(h.SessionID); sess != nil {
+			if sess.Info().Status != api.SessionRunning {
+				return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is read-only via shell_output", sess.ID, sess.Info().Status))
+			}
+			cs, err := s.shellFromIndex(sess, h.Index)
+			if err != nil {
+				return nil, toolError(CodeShellNotFound, "%s", err.Error())
+			}
+			if cs == nil {
+				return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Session '%s' has no shell", sess.ID))
+			}
+			return cs, nil
+		}
 	}
 	return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Shell '%s' not found", shellID))
 }

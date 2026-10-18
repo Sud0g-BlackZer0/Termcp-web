@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -469,6 +470,45 @@ func TestTermBytesLimitZeroConsumesNothing(t *testing.T) {
 	after := termText(t, s, map[string]any{"cmd": "read " + h, "timeout": float64(1)})
 	if !strings.Contains(after, "1\n2\n3") {
 		t.Errorf("a bytes_limit 0 read consumed the stream; the bytes are gone:\n%s", after)
+	}
+}
+
+// TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt is the regression test for a recv
+// that could never return a frame.
+//
+// mcpRecvFrame passed the channel's current byte LENGTH as shell_output's offset.
+// That parameter is an absolute position, so it asked for the bytes just past the
+// end: recv answered "no complete frame yet" forever while the frame sat in the
+// channel, and `read` on the same handle showed it plainly. Two things are
+// asserted here because the old shape also made a second recv plausible as a fix:
+// the frame arrives, and a second recv does not deliver it again.
+func TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt(t *testing.T) {
+	s := newTestServer(t)
+	// cat echoes the frame back on the channel's own stdout, which is where recv
+	// reads. A one-shot producer would exit before the second read.
+	h := openPipe(t, s, "cat")
+
+	frame := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	if out := termText(t, s, map[string]any{"cmd": "mcp send " + h + " " + frame}); !strings.Contains(out, "202") {
+		t.Fatalf("mcp send did not accept the frame:\n%s", out)
+	}
+
+	// The peer is a process; poll a few times rather than assuming it has written.
+	var got string
+	for i := 0; i < 20; i++ {
+		got = termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)})
+		if strings.Contains(got, `"method":"tools/list"`) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(got, `"method":"tools/list"`) {
+		t.Fatalf("mcp recv never delivered a frame that was on the channel:\n%s", got)
+	}
+
+	twice := termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)})
+	if strings.Contains(twice, `"method":"tools/list"`) {
+		t.Errorf("a second recv re-delivered the same frame; the cursor did not advance:\n%s", twice)
 	}
 }
 
@@ -1093,5 +1133,105 @@ func TestMCPCallTakesTheFrameFirst(t *testing.T) {
 	out := termText(t, s, map[string]any{"cmd": `mcp call ` + h + ` {"jsonrpc":"2.0","id":7,"method":"tools/list"}`})
 	if !strings.Contains(out, `"name":"term"`) && !strings.Contains(out, `"name": "term"`) {
 		t.Fatalf("mcp call did not send the frame it was given:\n%s", out)
+	}
+}
+
+// TestMCPCallAcceptsEveryQuotingOfTheFrame is the regression test for a frame
+// whose quotes reached the JSON parser.
+//
+// The directive splits its payload with strings.Fields, which neither keeps the
+// frame whole nor strips the caller's quoting. A JSON body contains spaces of its
+// own (`"name": "term"`), so the bare spelling that happened to work for a
+// spaceless frame fell apart for a real one, and both quoted spellings failed
+// outright with "the frame is not JSON: invalid character '\”" — an error that
+// names the JSON parser for what is a word-splitting bug one layer up.
+//
+// A frame with spaces is used deliberately: it is the only shape that tells the
+// three spellings apart.
+func TestMCPCallAcceptsEveryQuotingOfTheFrame(t *testing.T) {
+	s := newTestServer(t)
+	ts := httptest.NewServer(s.StreamableHTTPHandler())
+	defer ts.Close()
+
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL}))
+	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
+
+	// Spaces in the params object are the point, not decoration.
+	frame := `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"term","arguments":{"cmd":"ps"}}}`
+	for name, cmd := range map[string]string{
+		"bare":   "mcp call " + h + " " + frame,
+		"single": "mcp call " + h + " '" + frame + "'",
+		"double": "mcp call " + h + ` "` + frame + `"`,
+	} {
+		out := termText(t, s, map[string]any{"cmd": cmd})
+		// Assert on the REPLY, not on the echo. The rendered slot repeats the
+		// request line under "Path:", so a Contains("jsonrpc") check passes even
+		// when the frame was refused — it matches the caller's own text. The
+		// reply is the only place the peer's answer appears, so the result id is
+		// what tells a parsed frame from a rejected one.
+		if !strings.Contains(out, `"result"`) {
+			t.Errorf("%s-quoted frame was refused:\n%s", name, out)
+		}
+	}
+}
+
+// TestFilePermChmodActuallyChangesTheMode is the regression test for a silently
+// destructive bug.
+//
+// `file --action perm --op chmod --mode 420` reported success and left the file at
+// mode 0000. The directive layer sent --mode as a STRING (it IS a string for
+// read/write: text|hex|file), while the chmod handler reads it with getFloat64,
+// which returns its DEFAULT for a non-number. The mode therefore became 0, the
+// call succeeded, and the file was left unreadable — even by its own owner, which
+// makes it look like a permissions problem on the target rather than a lost
+// argument here.
+//
+// The existing chmod tests call the tool handler directly with float64(493), so
+// the conversion in the directive layer was never exercised. This test enters where
+// a caller does, and checks the mode that actually landed on the file rather than
+// the fact that the call returned 200.
+func TestFilePermChmodActuallyChangesTheMode(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleStartSession(context.Background(), makeRequest(map[string]any{
+		"command":    testShell(),
+		"args":       testInteractiveShellArgs(),
+		"mode":       "pty",
+		"ssh_config": "internal",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := parseResult(t, res)["session_id"].(string)
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "mode-probe.txt")
+	if err := os.WriteFile(file, []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 420 decimal == 0644. The old bug set 0 and still answered 200.
+	out := termText(t, s, map[string]any{
+		"cmd": "file " + sid + " --action perm --op chmod --remote-path " + file + " --mode 420",
+	})
+	if !strings.Contains(out, "success") && !strings.Contains(out, "200") {
+		t.Fatalf("chmod did not report success: %s", out)
+	}
+
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the mode READS BACK as is platform-specific: Windows maps permissions
+	// onto the read-only bit, so 0644 comes back as 0666 and 0755 as 0666 too
+	// (measured). The bug this test exists for sent 0, which Windows reports as
+	// 0444 — a DIFFERENT value — so the two are distinguishable everywhere and
+	// the test does not need to skip. Asserting "not the zero-mode result" is what
+	// actually catches it; asserting the exact bits would only catch it on unix.
+	got := info.Mode().Perm()
+	if got == 0444 {
+		t.Fatalf("file mode = %#o: the mode reached chmod as 0, so the whole permission set was stripped (a string where a number was needed is silently read as the default)", got)
+	}
+	if runtime.GOOS != "windows" && got != 0644 {
+		t.Fatalf("file mode = %#o, want 0644", got)
 	}
 }

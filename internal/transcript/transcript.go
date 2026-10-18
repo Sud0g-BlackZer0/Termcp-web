@@ -121,9 +121,14 @@ func (o *Source) BaseOffset() int64 {
 // Resolution order: live shells → live registry sessions (incl. restored
 // DEAD). Every valid session lives in the registry; there is no hidden archive.
 func Resolve(sessMgr *session.Manager, msgMgr *message.Manager, id string) (*Source, error) {
-	// A termcp:// locator names a session (optionally one of its shell
-	// channels by channel index); it never names a raw shell id, so a locator
-	// always lands in a session-scoped branch below.
+	// One decomposition for every spelling a handle may take: a raw id, a
+	// `termcp://` locator, or the short `sid:N` form `ps` prints. Reading has to
+	// agree with writing — a `run` whose bytes reached channel N must not then be
+	// read back from the primary, or answer "not found" and drop the output it
+	// produced.
+	//
+	// The entry kind is the one handle that names no session, so it is reported
+	// here rather than silently treated as an id.
 	shellIdx := 0
 	if locator.LooksLike(id) {
 		p, perr := locator.Parse(id)
@@ -134,13 +139,8 @@ func Resolve(sessMgr *session.Manager, msgMgr *message.Manager, id string) (*Sou
 			return nil, errf(ErrInvalid, "resource URL %q names an entry, not a session or shell", id)
 		}
 		id, shellIdx = p.SessionID, p.Index
-	} else if shortID, index := locator.SplitHandle(id); index > 0 {
-		// The short handle from ps. Reading has to agree with writing: a `run`
-		// whose bytes reached the right channel must not then be read back from
-		// the primary, or answer "not found" and drop the output it produced.
-		// Recording a bare session id keeps the session fallback identical to the
-		// locator path above.
-		id, shellIdx = shortID, index
+	} else if h := locator.SplitHandle(id); h.Index > 0 {
+		id, shellIdx = h.SessionID, h.Index
 	}
 
 	// Locator channel form (:N): the target is that specific shell.

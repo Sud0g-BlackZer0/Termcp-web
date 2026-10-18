@@ -10,6 +10,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/capability"
 	"github.com/open-mcp-ai/termcp/internal/clock"
+	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshclient"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
@@ -616,6 +617,10 @@ func (s *Server) resolveShellIDForRead(sess *session.Session, shellID string) (s
 	if cs := sess.GetChildShell(shellID); cs != nil {
 		return cs.ID, nil
 	}
+	// A locator is the one spelling that can be MALFORMED (an entry name with a
+	// channel index), so it keeps its own diagnostics; every other spelling is
+	// decomposed by SplitHandle. Both end at the same index lookup below.
+	var h locator.Handle
 	if looksLikeResourceLocator(shellID) {
 		p, err := parseResourceURL(shellID)
 		if err != nil {
@@ -624,28 +629,42 @@ func (s *Server) resolveShellIDForRead(sess *session.Session, shellID string) (s
 		if p.Kind == resourceURLEntry {
 			return "", toolError(CodeInvalidArgument, "%s", fmt.Sprintf("resource URL %q names an entry, not a session or shell", shellID))
 		}
-		// A locator may name a different session than the session_id argument; the
-		// shell it resolves to is what the caller asked to read.
-		if p.SessionID != sess.ID {
-			target := s.sessMgr.Get(p.SessionID)
-			if target == nil {
-				return "", toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' not found", p.SessionID))
+		h = locator.Handle{SessionID: p.SessionID, Index: p.Index}
+	} else {
+		h = locator.SplitHandle(shellID)
+		if h.SessionID == shellID && h.Index == 0 {
+			// No channel named: this may still be a bare session id, which is legal
+			// here ("read the session's primary channel"). Only a value that names
+			// neither a known session nor a channel is unknown; the lookup below
+			// decides, and the SessionID stays as given.
+			if s.sessMgr.Get(h.SessionID) == nil {
+				if cs := sess.GetChildShell(h.SessionID); cs != nil {
+					return cs.ID, nil
+				}
+				return "", toolError(CodeShellNotFound, "%s", fmt.Sprintf("Shell '%s' not found", shellID))
 			}
-			sess = target
 		}
-		idx := p.Index
-		if idx == 0 {
-			idx = 1
-		}
-		if cs, ok := sess.ShellByIndex(idx); ok {
-			return cs.ID, nil
-		}
-		if sh, ok := sess.SnapshotShellByIndex(idx); ok {
-			return sh.ID, nil
-		}
-		return "", toolError(CodeShellNotFound, "%s", session.ShellIndexOutOfRangeError(sess.ID, idx, sess.LiveShellCount()).Error())
 	}
-	return "", toolError(CodeShellNotFound, "%s", fmt.Sprintf("Shell '%s' not found", shellID))
+	// A handle may name a different session than the shell_id argument; the shell it
+	// resolves to is what the caller asked to read.
+	if h.SessionID != sess.ID {
+		target := s.sessMgr.Get(h.SessionID)
+		if target == nil {
+			return "", toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' not found", h.SessionID))
+		}
+		sess = target
+	}
+	idx := h.Index
+	if idx == 0 {
+		idx = 1
+	}
+	if cs, ok := sess.ShellByIndex(idx); ok {
+		return cs.ID, nil
+	}
+	if sh, ok := sess.SnapshotShellByIndex(idx); ok {
+		return sh.ID, nil
+	}
+	return "", toolError(CodeShellNotFound, "%s", session.ShellIndexOutOfRangeError(sess.ID, idx, sess.LiveShellCount()).Error())
 }
 
 func (s *Server) handleRegisterReader(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

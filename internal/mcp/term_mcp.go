@@ -129,7 +129,7 @@ func (s *Server) mcpHTTP(ctx context.Context, stmt directive.Statement, sub stri
 			// so the frame starts at rest[0]. Skipping one more dropped the frame's
 			// first word: `mcp call h {"jsonrpc":…}` reported "needs a frame" and
 			// only worked with a junk word in front of it.
-			payload := strings.Join(rest, " ")
+			payload := unquoteWord(strings.TrimSpace(strings.Join(rest, " ")))
 			if payload == "" {
 				return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
 					Body: "mcp " + sub + " needs a JSON-RPC frame"}
@@ -292,7 +292,7 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 		case "tools":
 			frame = `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
 		default:
-			payload := strings.TrimSpace(strings.Join(rest, " "))
+			payload := unquoteWord(strings.TrimSpace(strings.Join(rest, " ")))
 			if payload == "" {
 				return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
 					Body: "mcp " + sub + " needs a JSON-RPC frame"}
@@ -320,15 +320,18 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 //
 // The "exactly one" part is the contract: a frame is complete when the bytes parsed
 // as JSON, and a partial one must be held rather than acted on. The read is
-// therefore a positional read from the stream end, retried while the buffer does
-// not yet parse — never a blocking read that may return half a message.
+// therefore retried while the buffer does not yet parse — never a blocking read
+// that may return half a message.
+//
+// No offset is passed, deliberately. The read tool's offset defaults to -1, which
+// means "carry on from where the last read stopped"; passing the stream SIZE
+// instead (which is what the old code did) asks for bytes after the end, so recv
+// answered "no complete frame yet" for a frame that was sitting right there in the
+// channel. A recv is a consumer, not a snapshot: it must advance the same cursor
+// every other read advances, or the second call re-delivers the first frame.
 func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, handle string) envelope.Slot {
-	start, ok := s.outputSizeFor(handle)
-	if !ok {
-		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeShellNotFound, msg: "handle " + handle + " not found"})
-	}
 	res, fail := s.callTool(ctx, "shell_output", argsOf(
-		"shell_id", handle, "offset", float64(start), "max_bytes", float64(defaultBytesLimit)))
+		"shell_id", handle, "max_bytes", float64(defaultBytesLimit), "timeout", float64(0)))
 	if fail != nil {
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
@@ -344,7 +347,8 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 			"Content-Range": envelope.UnsatisfiedRange(int64(getFloatAny(doc, "total_bytes", 0))),
 		}, Body: "no complete frame yet"}
 	}
-	end := int64(getFloatAny(doc, "start_offset", 0)) + int64(len(frame))
+	start := int64(getFloatAny(doc, "start_offset", 0))
+	end := start + int64(len(frame))
 	return envelope.Slot{
 		Code:    200,
 		Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.ContentRange(start, end-1, end)},

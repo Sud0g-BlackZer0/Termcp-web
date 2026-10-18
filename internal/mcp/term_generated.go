@@ -350,7 +350,18 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	setFlagString(args, stmt, "to-path", "to_path")
 	setFlagString(args, stmt, "local-path", "local_path")
 	setFlagString(args, stmt, "data", "data")
-	setFlagString(args, stmt, "mode", "mode")
+	// --mode is a STRING for read/write (text|hex|file) and a NUMBER for
+	// `perm --op chmod` (decimal permission bits). Sending it as a string in both
+	// cases is not a type error the handler can catch: chmod reads it with
+	// getFloat64, which returns its default for anything that is not a number, so
+	// the mode silently became 0 (---------- ) while the call reported success.
+	// A file the caller then could not read looked like a permissions problem on
+	// the target, not a lost argument here.
+	if action == "perm" {
+		setFlagNumber(args, stmt, "mode", "mode")
+	} else {
+		setFlagString(args, stmt, "mode", "mode")
+	}
 	setFlagString(args, stmt, "target", "target")
 	setFlagString(args, stmt, "link-path", "link_path")
 	setFlagString(args, stmt, "existing-path", "existing_path")
@@ -621,24 +632,65 @@ func (s *Server) directiveMCP(ctx context.Context, stmt directive.Statement, win
 	// `mcp open` relays an HTTP endpoint. It does not consume a shell channel: the
 	// bridge speaks HTTP, so a caller can hold a dozen of them without spending
 	// the shell budget.
-	words := strings.Fields(stmt.Payload)
-	if len(words) == 0 {
+	//
+	// The split is done by hand rather than with strings.Fields because the FRAME
+	// is the rest of the line, quotes included: Fields would split a JSON body on
+	// its own spaces (`"name": "x"` becomes two words), and the payload keeps the
+	// caller's quoting, so a quoted frame reached json.Unmarshal with its quotes
+	// still on and was refused as "not JSON". Both spellings are accepted here —
+	// quoted and bare — because a caller has no way to know which one this layer
+	// wanted.
+	payload := strings.TrimSpace(stmt.Payload)
+	if payload == "" {
 		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
 			Body: "mcp needs a subcommand: open|tools|send|recv|call|close"}
 	}
-	sub := words[0]
+	sub, rest := splitWord(payload)
 	switch sub {
 	case "open":
-		if len(words) < 2 {
+		url, _ := splitWord(rest)
+		if url == "" {
 			return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
 				Body: "mcp open needs a URL"}
 		}
-		return s.mcpOpen(ctx, stmt, words[1])
+		return s.mcpOpen(ctx, stmt, unquoteWord(url))
 	case "tools", "send", "recv", "call", "close":
-		return s.mcpChannel(ctx, stmt, sub, words[1:])
+		handle, tail := splitWord(rest)
+		args := []string{}
+		if handle != "" {
+			args = append(args, unquoteWord(handle))
+		}
+		if tail = strings.TrimSpace(tail); tail != "" {
+			args = append(args, tail)
+		}
+		return s.mcpChannel(ctx, stmt, sub, args)
 	}
 	return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
 		Body: "unknown mcp subcommand: " + sub}
+}
+
+// splitWord cuts the first whitespace-delimited word off s, returning it and the
+// rest. It is the one piece of word splitting `mcp` needs: the subcommand and the
+// handle are single words, and everything after them is a frame that must keep its
+// spaces.
+func splitWord(s string) (string, string) {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		return s[:i], strings.TrimSpace(s[i+1:])
+	}
+	return s, ""
+}
+
+// unquoteWord strips one layer of matching shell quotes, so `'{"a":1}'` and
+// `"{\"a\":1}"` both hand the same text to the JSON parser. An unquoted word is
+// returned unchanged.
+func unquoteWord(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 // directiveHelp prints the directive table, or one directive's syntax.
@@ -676,13 +728,34 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolResult, error) {
 	var b strings.Builder
 	b.WriteString("termcp terminal. Syntax:\n")
-	b.WriteString("  pty internal                                  open an interactive shell  -> Handle\n")
-	b.WriteString("  pipe internal --argv sh -c 'echo hi'          run a program to exit      -> Handle\n")
-	b.WriteString("  run a1f3:1 go build ./...                     one command, one call\n")
-	b.WriteString("  read a1f3:1 / ps / info a1f3:1                read, list, inspect\n")
-	b.WriteString("  help / help <directive>                       the full directive table\n")
+	// Two examples, and only two: the batching line says something the directive
+	// table below CANNOT express (that `;` runs several statements in one call and
+	// gives one slot each), and the pty line shows what a reply's handle is for.
+	// The other examples that used to sit here (`run … one command, one call`,
+	// `read … read, list, inspect`, the pty/pipe usage) repeated the table verbatim
+	// — 308 bytes of the same information written twice, which is what a caller
+	// pays for on every recovery call.
+	b.WriteString("  pty internal                                  open an interactive shell -> Handle\n")
+	b.WriteString("  ps; read a1f3:1; info a1f3:1                 several statements, one call: one slot each\n")
 	b.WriteString("Handles are <session>[:N]; copy one from ps or ext list into the next command.\n")
-	b.WriteString("Every reply is TERM/1 <code>: 2xx ok, 4xx bad request, 5xx the command failed.\n\n")
+	b.WriteString("Every reply is TERM/1 <code>: 2xx ok, 4xx bad request, 5xx the command failed.\n")
+
+	// The full directive table.
+	//
+	// A caller that does not know a directive exists will not use it and will not
+	// ask for it: `help` lists everything, but only to someone who already
+	// suspects there is more to see. The examples this replaced mentioned 7 of the
+	// 23 directives, so file/forward/extension work — a large part of what this
+	// instance can do — was invisible on the first call.
+	//
+	// It is generated from the same ops array `help` prints, so the two cannot
+	// disagree. Detail pages (the shapes and traps) stay lazy: `help <directive>`
+	// is where they belong, and this line is what tells a caller they exist.
+	b.WriteString("\ndirectives (help <directive> for detail):\n")
+	for _, op := range directive.Ops() {
+		b.WriteString("  " + op.Usage + "\n")
+	}
+	b.WriteString("\n")
 
 	// What is running right now, in the same columns `ps` prints: the recovery path
 	// is "ask, then copy a handle", not "ask, then translate".

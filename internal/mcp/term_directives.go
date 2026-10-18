@@ -11,6 +11,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/envelope"
+	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/pkg/api"
@@ -497,25 +498,29 @@ func (s *Server) channelExitState(handle string) (status string, exit *int, clos
 	if s.sessMgr == nil {
 		return "", nil, false
 	}
-	// A handle is a shell id, a session id, or a locator naming either — the same
-	// three spellings every other directive accepts. Resolving through the guard's
-	// own resolver (rather than a direct manager call) is what keeps this from
-	// answering "still running" for a channel it simply failed to find.
+	// A handle is a raw shell id, a session id, a locator naming either, or the
+	// short `sid:N` that ps prints — every spelling locator.SplitHandle knows,
+	// because a handle the caller had to copy out of a reply must not be silent
+	// here: returning "still running" for a channel this simply failed to find is
+	// how a dead channel keeps reporting itself alive.
+	h := locator.SplitHandle(handle)
+	if h.Index > 0 {
+		// A channel was named explicitly, so that channel IS the question — the
+		// session-level fallbacks below would answer about a different one.
+		if sess := s.sessMgr.Get(h.SessionID); sess != nil {
+			if cs, err := s.shellFromIndex(sess, h.Index); err == nil && cs != nil {
+				info := cs.Info()
+				if info.Status == "exited" || info.Status == "error" {
+					return string(info.Status), info.ExitCode, true
+				}
+			}
+		}
+		return "", nil, false
+	}
 	if cs := s.sessMgr.GetChildShell(handle); cs != nil {
 		info := cs.Info()
 		if info.Status == "exited" || info.Status == "error" {
 			return string(info.Status), info.ExitCode, true
-		}
-		return "", nil, false
-	}
-	if sess := s.sessMgr.GetByShellID(handle); sess != nil {
-		// The handle names a channel of this session, so the channel is what the
-		// caller is asking about.
-		if cs := sess.GetChildShell(handle); cs != nil {
-			info := cs.Info()
-			if info.Status == "exited" || info.Status == "error" {
-				return string(info.Status), info.ExitCode, true
-			}
 		}
 		return "", nil, false
 	}
