@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -748,7 +749,7 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 // A caller that has just been woken up knows nothing, so this call has to be legal,
 // cheap, and dense — never an error. It is the first move of every recovery, and
 // the recovery path must not depend on remembering anything.
-func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolResult, error) {
+func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	var b strings.Builder
 	b.WriteString("termcp terminal. Syntax:\n")
 	// Two examples, and only two: the batching line says something the directive
@@ -763,19 +764,27 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolRe
 	b.WriteString("Handles are <session>[:N]; copy one from ps or ext list into the next command.\n")
 	b.WriteString("Every reply is TERM/1 <code>: 2xx ok, 4xx bad request, 5xx the command failed.\n")
 
-	// The full directive table.
+	// The CORE directive table, plus the pointer to the rest.
 	//
-	// A caller that does not know a directive exists will not use it and will not
-	// ask for it: `help` lists everything, but only to someone who already
-	// suspects there is more to see. The examples this replaced mentioned 7 of the
-	// 23 directives, so file/forward/extension work — a large part of what this
-	// instance can do — was invisible on the first call.
+	// This reply is read by a caller that has not decided what to do yet, so the
+	// lines it needs come first and the other eighteen are one `help` away. Both
+	// halves matter:
 	//
-	// It is generated from the same ops array `help` prints, so the two cannot
-	// disagree. Detail pages (the shapes and traps) stay lazy: `help <directive>`
-	// is where they belong, and this line is what tells a caller they exist.
-	b.WriteString("\ndirectives (help <directive> for detail):\n")
+	//   - Listing all 24 here cost the recovery path ~900 bytes of capability the
+	//     caller has no use for at that moment, on every wake-up.
+	//   - Listing ONLY the core ones and stopping there would make file/forward/
+	//     extension work invisible to anyone who never suspects there is more —
+	//     the failure the old "7 of 23 examples" had, one layer down.
+	//
+	// The pointer line is what keeps both true. It names `help` in the same wording
+	// `help` uses for itself, so a caller that follows it lands on the full table
+	// rather than on a detail page, and it says how many are waiting. Generated
+	// from the same ops array `help` prints, so the two cannot disagree.
+	b.WriteString("\ndirectives (core; `help` lists all " + strconv.Itoa(len(directive.Ops())) + "):\n")
 	for _, op := range directive.Ops() {
+		if !op.Core {
+			continue
+		}
 		b.WriteString("  " + op.Usage + "\n")
 	}
 	b.WriteString("\n")
@@ -792,7 +801,7 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolRe
 		}
 	}
 	body, code := capGenerated(b.String(), win)
-	return termSlotResult(envelope.Slot{Code: code, Body: body}), nil
+	return termReply{win: win, slots: []envelope.Slot{{Code: code, Body: body}}}
 }
 
 // --- small helpers ---

@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
 )
 
@@ -95,12 +97,18 @@ func TestTermHelp(t *testing.T) {
 			t.Errorf("help misses directive %q:\n%s", op, text)
 		}
 	}
+	// The one-line template comes FIRST in the body and is not replaced by the page:
+	// a caller scanning for shape must still find it before it has to read prose.
+	// The page itself is allowed to be long -- most directives have one, and `run`
+	// joined them when it gained the pty-completion explanation. Asserting a fixed
+	// line count here only pinned that `run` happened to be the one without a page.
 	single := termText(t, s, map[string]any{"cmd": "help run"})
-	if !strings.Contains(single, "run <handle> <payload>") {
-		t.Errorf("help run = %q", single)
+	body := single
+	if _, rest, ok := strings.Cut(single, "\n\n"); ok {
+		body = rest // skip the envelope: status line and headers
 	}
-	if n := strings.Count(strings.TrimSpace(single), "\n"); n > 3 {
-		t.Errorf("help for one directive should be one line plus the envelope, got:\n%s", single)
+	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <handle> <payload>") {
+		t.Errorf("the body does not open with the usage template:\n%s", single)
 	}
 }
 
@@ -1233,5 +1241,156 @@ func TestFilePermChmodActuallyChangesTheMode(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && got != 0644 {
 		t.Fatalf("file mode = %#o, want 0644", got)
+	}
+}
+
+// TestGuideListsCoreAndPointsAtTheRest pins the shape of the recovery call.
+//
+// The empty call is read by a caller that has not decided what to do yet, so it
+// carries the directives needed to start — and a pointer to the rest. Both halves
+// are load-bearing:
+//
+//   - Listing all 23 here cost ~1.2 KB of capability the caller has no use for at
+//     that moment, on every wake-up (measured: 2187 → 953 bytes, −56%).
+//   - Listing ONLY the core ones would make file/forward/extension work invisible
+//     to anyone who never suspects there is more to see. That is the failure the
+//     old "7 of 23 examples" had, and this test refuses to reintroduce it.
+func TestGuideListsCoreAndPointsAtTheRest(t *testing.T) {
+	s := newTestServer(t)
+	body := termGuideBody(t, s)
+
+	// Every core directive is listed with its usage line.
+	var core int
+	for _, op := range directive.Ops() {
+		if !op.Core {
+			continue
+		}
+		core++
+		if !strings.Contains(body, op.Usage) {
+			t.Errorf("the guide omits the core directive %q", op.Name)
+		}
+	}
+	if core == 0 {
+		t.Fatal("no directive is marked Core: the guide would be empty")
+	}
+
+	// The pointer must be there, must name `help`, and must say how many there
+	// are — a caller that reads "core" with no count cannot tell whether it is
+	// looking at a subset or at everything.
+	if !strings.Contains(body, "help") {
+		t.Error("the guide does not mention `help`, so the rest is undiscoverable")
+	}
+	if !strings.Contains(body, strconv.Itoa(len(directive.Ops()))) {
+		t.Errorf("the guide does not say how many directives exist (%d)", len(directive.Ops()))
+	}
+
+	// And the non-core ones are NOT dumped here: the point of the split.
+	for _, op := range directive.Ops() {
+		if op.Core {
+			continue
+		}
+		if strings.Contains(body, "  "+op.Usage+"\n") {
+			t.Errorf("the guide lists the non-core directive %q; `help` is where it belongs", op.Name)
+		}
+	}
+}
+
+// TestHelpListsEveryDirective is the other half of the contract: whatever the
+// guide filters out, `help` must still list. A core-only guide with a lossy help
+// would hide capabilities rather than defer them.
+func TestHelpListsEveryDirective(t *testing.T) {
+	s := newTestServer(t)
+	body := termText(t, s, map[string]any{"cmd": "help"})
+
+	for _, op := range directive.Ops() {
+		if !strings.Contains(body, op.Usage) {
+			t.Errorf("`help` omits %q", op.Name)
+		}
+	}
+}
+
+// termGuideBody runs the empty call and returns its body.
+func termGuideBody(t *testing.T, s *Server) string {
+	t.Helper()
+	reply := s.Term(t.Context(), "", map[string]any{})
+	if len(reply.Slots) != 1 {
+		t.Fatalf("the guide returned %d slots, want 1", len(reply.Slots))
+	}
+	return reply.Slots[0].Body
+}
+
+// TestAParseFailureSaysNothingRan pins the one thing a caller cannot see.
+//
+// A cmd is parsed in full before the first statement runs. So one typo in a
+// batch means the statements before it did not run either — correct, because a
+// batch that half-ran reports a partial success nobody can read. But the reply
+// was a bare 400 with no slots, which is indistinguishable from a batch that ran
+// and produced nothing. This is the sentence that separates the two, and it only
+// appears when there WAS an earlier statement to be wrong about: on a single
+// broken statement there is nothing else that could have run.
+func TestAParseFailureSaysNothingRan(t *testing.T) {
+	s := newTestServer(t)
+
+	// A batch where the first statement parses: the note must name it.
+	reply := s.Term(t.Context(), "ps; definitely-not-a-directive x", map[string]any{})
+	if len(reply.Slots) != 1 {
+		t.Fatalf("got %d slots, want 1", len(reply.Slots))
+	}
+	slot := reply.Slots[0]
+	if slot.Code != 400 {
+		t.Fatalf("code = %d, want 400", slot.Code)
+	}
+	if !strings.Contains(slot.Body, "nothing was executed") {
+		t.Errorf("the batch failure does not say nothing ran: %q", slot.Body)
+	}
+	if !strings.Contains(slot.Body, "1 statement") {
+		t.Errorf("the note does not say how many parsed first: %q", slot.Body)
+	}
+
+	// A single broken statement: the note would be noise, and the body must stay
+	// the error alone. This is the common case and it must not grow.
+	reply = s.Term(t.Context(), "definitely-not-a-directive x", map[string]any{})
+	if got := reply.Slots[0].Body; strings.Contains(got, "nothing was executed") {
+		t.Errorf("a single broken statement got the batch note: %q", got)
+	}
+}
+
+// TestABatchIsNotPartlyExecuted is the property the note describes. It uses a
+// statement with an observable side effect (opening a session) so that a future
+// "run what parsed" change cannot pass by only editing the message.
+func TestABatchIsNotPartlyExecuted(t *testing.T) {
+	s := newTestServer(t)
+	const name = "must-not-exist-after-a-parse-failure"
+
+	reply := s.Term(t.Context(), "pty internal --name "+name+"; definitely-not-a-directive", map[string]any{})
+	if reply.Slots[0].Code != 400 {
+		t.Fatalf("the batch was not refused: %+v", reply.Slots[0])
+	}
+
+	ps := s.Term(t.Context(), "ps --all", map[string]any{})
+	if strings.Contains(ps.Slots[0].Body, name) {
+		t.Error("the statement before the parse failure ran: parsing must precede every statement")
+	}
+}
+
+// TestRunDetailStatesWhatAPtyCannotKnow pins the thing the reply cannot say.
+//
+// On a pty, `run` samples a window and returns; there is no completion signal to
+// report, so an empty reply is indistinguishable from a silent command. That is
+// invisible in the wire format, which makes `help run` the only place a caller
+// can find it — and a caller that guesses wrong reaches for `read`, which is a
+// consuming cursor and therefore the one thing that cannot help.
+func TestRunDetailStatesWhatAPtyCannotKnow(t *testing.T) {
+	s := newTestServer(t)
+	body := termText(t, s, map[string]any{"cmd": "help run"})
+
+	for _, want := range []string{"pty", "SAMPLES", "timeout", "pipe"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("`help run` does not mention %q:\n%s", want, body)
+		}
+	}
+	// The advice that actually rescues the caller: read cannot recover the bytes.
+	if !strings.Contains(body, "consuming cursor") {
+		t.Errorf("`help run` does not warn that read is a consuming cursor:\n%s", body)
 	}
 }

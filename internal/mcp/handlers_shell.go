@@ -120,7 +120,7 @@ func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequ
 			if bad != nil {
 				return nil, bad
 			}
-			res, bad := s.writeShellInput(shell, text)
+			res, bad := s.writeShellInput(ctx, shell, text)
 			return res, bad
 		}), nil
 	}
@@ -136,7 +136,7 @@ func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequ
 	// input's echo will begin — the one per-call anchor a line-protocol consumer
 	// needs to pair a later response with its request. A failed lookup only
 	// costs the field, never the write: the index is advisory, the send is not.
-	res, bad := s.writeShellInput(shell, text)
+	res, bad := s.writeShellInput(ctx, shell, text)
 	if bad != nil {
 		return bad, nil
 	}
@@ -146,7 +146,7 @@ func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequ
 // writeShellInput is the single-shell write shared by the one-id and batch
 // paths, so the two cannot drift: the offset/line bookkeeping, the review stage
 // and the AI tagging are identical whether one shell is addressed or ten.
-func (s *Server) writeShellInput(shell *session.ChildShell, text string) (map[string]any, *mcpgo.CallToolResult) {
+func (s *Server) writeShellInput(ctx context.Context, shell *session.ChildShell, text string) (map[string]any, *mcpgo.CallToolResult) {
 	result := map[string]any{"success": true}
 	sessID := shell.ParentSessionID()
 	if offset, err := s.sessMgr.OutputSize(sessID, shell.ID); err == nil {
@@ -173,7 +173,7 @@ func (s *Server) writeShellInput(shell *session.ChildShell, text string) (map[st
 	// two places where review was gated from inside a handler, so a new reviewable
 	// operation was covered only if someone remembered to add a third.
 	if s.reviewHolds(shell) {
-		if err := shell.StageForApproval("mcp", text); err != nil {
+		if err := shell.StageForApproval(callerSource(ctx), text); err != nil {
 			return nil, toolError(CodeOperationFailed, "%s", err.Error())
 		}
 		// The staged case is not a write that happened, so the reply is the
@@ -185,7 +185,7 @@ func (s *Server) writeShellInput(shell *session.ChildShell, text string) (map[st
 
 	// An agent's keystrokes are tagged as AI input, so a transcript can say who
 	// typed what. The bytes themselves reach the log through the terminal's echo.
-	if err := shell.SendTerminalBytesFrom([]byte(text), false, session.InputFromAI); err != nil {
+	if err := shell.SendTerminalBytesFrom([]byte(text), false, callerInputSource(ctx)); err != nil {
 		return nil, toolError(CodeOperationFailed, "%s", err.Error())
 	}
 	return result, nil
@@ -208,7 +208,7 @@ func (s *Server) handlePressKey(ctx context.Context, request mcpgo.CallToolReque
 			if bad != nil {
 				return nil, bad
 			}
-			return s.pressShellKey(shell, key, repeat)
+			return s.pressShellKey(ctx, shell, key, repeat)
 		}), nil
 	}
 
@@ -216,7 +216,7 @@ func (s *Server) handlePressKey(ctx context.Context, request mcpgo.CallToolReque
 	if bad != nil {
 		return bad, nil
 	}
-	res, bad := s.pressShellKey(shell, key, repeat)
+	res, bad := s.pressShellKey(ctx, shell, key, repeat)
 	if bad != nil {
 		return bad, nil
 	}
@@ -228,19 +228,19 @@ func (s *Server) handlePressKey(ctx context.Context, request mcpgo.CallToolReque
 
 // pressShellKey is the single-shell key press shared by the one-id and batch
 // paths.
-func (s *Server) pressShellKey(shell *session.ChildShell, key string, repeat int) (map[string]any, *mcpgo.CallToolResult) {
+func (s *Server) pressShellKey(ctx context.Context, shell *session.ChildShell, key string, repeat int) (map[string]any, *mcpgo.CallToolResult) {
 	if s.reviewHolds(shell) {
 		// The ending key commits whatever text this shell staged, so the queue holds
 		// one complete command line. With nothing staged the key alone is the unit:
 		// ctrl+c interrupts a running process, and a bare enter runs an empty line,
 		// either of which a reviewer must still see.
-		if _, err := shell.CommitStagedForApproval("mcp", key, repeat); err != nil {
+		if _, err := shell.CommitStagedForApproval(callerSource(ctx), key, repeat); err != nil {
 			return nil, toolError(CodeOperationFailed, "%s", err.Error())
 		}
 		return reviewFields(true), nil
 	}
 
-	if err := shell.PressKeyFrom(key, repeat, session.InputFromAI); err != nil {
+	if err := shell.PressKeyFrom(key, repeat, callerInputSource(ctx)); err != nil {
 		return nil, toolError(CodeOperationFailed, "%s", err.Error())
 	}
 	return map[string]any{"success": true}, nil

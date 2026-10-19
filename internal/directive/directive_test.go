@@ -99,6 +99,31 @@ func TestHashIsNotATargetPrefix(t *testing.T) {
 	}
 }
 
+// TestQuotedTargetNamesTheSameThing pins that quoting is not part of a target: it
+// is what the shell strips before the directive sees the word. Quoting is also the
+// only way to write a word-initial '#', so this is the spelling `info '#sid'` — the
+// one a caller reaches for when the target is a `#<session>` locator — must not
+// lose its target.
+//
+// The regression it locks: the quoted form used to parse to the EMPTY string (a
+// source-slice reader refused the quote, its caller dropped the refusal), so the
+// reply was `Session ” not found` with nothing pointing at the quotes.
+func TestQuotedTargetNamesTheSameThing(t *testing.T) {
+	for _, cmd := range []string{
+		`info a1f3:1`,
+		`info 'a1f3:1'`,
+		`info "a1f3:1"`,
+	} {
+		f, err := Parse(cmd)
+		if err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+		if got := f.Statements[0].Target; got != "a1f3:1" {
+			t.Errorf("%s: target = %q, want %q", cmd, got, "a1f3:1")
+		}
+	}
+}
+
 // TestLocatorSpellings pins both accepted target spellings: the short form
 // (which every reply emits) and the old termcp:// form (which the Web UI's copy
 // button still produces). The `#` inside a word is not a comment.

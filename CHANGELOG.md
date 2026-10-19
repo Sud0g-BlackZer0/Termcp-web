@@ -26,9 +26,15 @@
 
 - **`mcp` 指令**：把任意第三方 MCP server 当成一条通道驱动（`pipe <entry> --argv npx -y some-server` 之后 `mcp send` / `mcp recv` / `mcp tools` / `mcp call`），HTTP 端点则不消耗通道。
 
-- **`docs/mcp-tools.md` 重写**为 `term` 的指令参考（信封、三个窗口轴、指令表、错误码、能力层说明），`docs/api.md` 里指向 MCP 工具名的表述同步改为能力/指令。
+- **面向调用方的说明只剩一份**。`docs/mcp-tools.md`（269 行）、`internal/webui/assets/SKILL.md`（200 行）、`internal/webui/assets/extensions.md`（202 行）三份文档删除，因为它们教的是一个**能自己回答自己**的接口：`term()` 空调用给指令表、`help <directive>` 给形状和陷阱、`ext list` 给现有扩展、`tools/list` 给参数。文档里真正不可推导的事实搬进了代码而不是留在文件里——扩展的握手与终态语义进 `help ext`，`docs/api.md` 保留为**传输层**参考并在开头写明「只在基于它构建时才需要读」。`docs/api.md` 不能删：`internal/daemon/probe.go` 拿 `GET /api.md` 当存活指纹。
 
 ### 修复
+
+- **`help run` 不说 pty 没有「命令结束」信号**。这是 reply 里看不出来的那类事实：pipe 通道的进程是本服务启动的，退出可观测，`run` 随之返回；pty 里跑的是 shell 的子进程，终端不报告「里面那条命令结束了」，所以 `run` 在 pty 上是**采样**——读 `timeout` 秒内到达的字节就返回。于是空的 pty 回复既不证明命令没输出，也不证明命令失败，只证明窗口内没有字节到达。而调用方的直觉反应是补一次 `read`，那恰好是唯一没用的动作：`read` 是消耗型游标，采样已经取走的字节不会还在。现在 `help run` 写明这件事、该调 `timeout` 而不是 `read`，并指出需要完整输出时用 `pipe --argv`（它的退出可观测）。`TestRunDetailStatesWhatAPtyCannotKnow` 锁住这段。
+- **批量里一条写错，整批不执行，而回复不说这件事**。`term` 先把整个 cmd 解析完再执行第一条语句，所以一处 typo 意味着**前面已经解析成功的语句也没有跑**——这是对的（半跑的批量会报成部分成功，调用方读不出来），但回复是一个没有任何 slot 的裸 `400`，和「批量跑了、什么都没输出」完全无法区分。现在前面有语句解析成功时，body 会补一句 `nothing was executed, including the N statement(s) before this one`；单条语句写错时不加这句，因为那时不存在「其它的有没有跑」的问题，多一句就是噪音。`TestAParseFailureSaysNothingRan` 锁两种形态，`TestABatchIsNotPartlyExecuted` 用一个有可观测副作用的语句（开一个具名会话）确认它真的没跑，这样将来若有人把解析改成流式，不能只改文案就通过。
+- **写在引导里的指令表省掉一半**。空调用返回的指令表原本列全部 23 条，而读它的人还没决定要做什么——其中 `file`/`fwd`/`ext`/`mcp`/`alias` 对「开个终端跑条命令」这个最常见的开场毫无用处。现在只列开工必需的 10 条（`run`/`type`/`key`/`read`/`pipe`/`pty`/`ps`/`info`/`close`/`help`），并在表头写明 `help` 列出全部 23 条。**两半都是必需的**：只列全部会让每次醒来付 ~1.2 KB 用不上的能力（实测 2187 → 953 字节），而只列核心又不给指针，会让文件、转发、扩展这些能力对「压根不知道还有更多」的调用方彻底不可见——那正是旧版「23 条里只举例 7 条」犯过的错，只是低了一层。`TestGuideListsCoreAndPointsAtTheRest` 与 `TestHelpListsEveryDirective` 各锁一半：前者要求非核心不得出现，后者要求 `help` 少任何一条就失败。
+- **`info 'a1f3:1'` 这类带引号的目标会静默变成空串**。`literalWord` 从源码切片读目标，却又用 `ContainsAny("'\"")` 把任何带引号的写法拒掉——而它要的那段源码本来就**包含**引号。于是 `info '925a9abb-328:1'` 报的是 `Session '' not found`：不是因为找错了会话，是因为目标根本没读出来。`#` 作分隔符本身没问题（`termcp://#sid:1` 一直是通的），坏的只有引号这一种写法。修法是删掉那套自定义切片，改为委托给已有的 `wordLiteral`——它做的就是这件事，且已经处理了引号。净减 23 行。
+- **窗口参数的含义写在三个地方，而只有一处被执行**。默认值、取值范围、说明文字此前分别躺在 `parseTermArgs` 的代码、`tools/list` 的 schema、`docs/api.md` §16 的表格里，三份手抄。真的漂过：`structured_only` 上了 schema 却漏进文档。现在 `internal/mcp/term_args.go` 的 `termArgDecls` 是唯一真源，schema 由 `termArgToolOptions()` 生成，文档表格由 `cmd/termdoc` 写进 `<!-- BEGIN termdoc: args -->` 标记区，两者的默认值都从同一处读。`TestTermDocsAreGenerated` 做全等比较（手改一个格子就失败），`TestTermDocTableCoversTheSchema` 补另一个方向（表里有、schema 没有会指名报错）。此前那个只检查「名字是否出现过」的测试删掉了——我加的一段说明文字里也提到 `structured_only`，所以把表格行整行删掉它照样通过。
 
 - **对单入口做全功能黑盒测试后修掉的一批表示与交互问题**：多 slot 的 `structuredContent` 改为 `{"slots":[…]}`（客户端要求顶层是对象，裸数组会让整条回复被丢弃）；生成式回复（`help`/`ps`/`info`/`detect`/各列表）也遵守 `bytes_limit=0` 与 `lines_limit`（截断给 206）；`mcp` 指令补齐 streamable HTTP 的 initialize/session 握手，`close` 真正删除句柄，非法 URL 与旧的 `/sse` 在 `open` 时即被拒绝；`span` 接受 session 级 handle；`ext`/`profile` 的位置子命令（`ext delete x`）不再被静默当成 list；`learn_mode` 对成功回复也附 `Usage`；`on_*_overflow` 的非法枚举被拒绝；`close` 的 Usage 改为 target-first；profile 写门控返回 403 而不是 500；内部 profile 被禁用时返回 409。
 - **只渲染 `structuredContent` 的 MCP 客户端看不到 body**。JSON 投影此前刻意不带 body（"text 里已经有了"），但客户端可以只渲染结构化结果——于是成功回复只剩状态行和头部，正文消失；报错反而正常，因为 `isError` 结果走文本。现在 `body` 同时放进结构化投影：两个投影各自完整，代价是正文在传输里各存一份。
@@ -68,6 +74,10 @@
   **赛博朋克没样式**：`themes/cyberpunk/assets/static/css/` 里存着一份自己的 `base.css`，而主题目录的副本会盖住共享的同一份文件（这正是主题覆盖机制的意义）。问题是它是一份**陈旧的分叉** —— 它是在连接者面板（以及更新提示、命名空间胶囊）加入之前拷走的，于是这三样只在赛博朋克主题里没样式。`approval.css`/`terminal.css`/`timeline.css` 同样只有末尾一个空行的差别，一并删掉改为继承共享块；主题自己的外观仍写在 `theme.css`。新增一条测试：任何主题如果覆盖了**结构性**样式块（base/approval/terminal/timeline）却缺少共享副本里的行，就失败——调色板类块（tokens/theme/workspace）的主题差异是它们的本职，不检查。
 
 ### 新增
+
+- **`term` 可以用纯 HTTP 调，不必是 MCP 客户端**。`POST /api/term`，请求体就是工具的参数字典，回复是对应的 JSON 投影；单条语句是裸对象，批量是 `{"slots":[…]}`，渲染好的文本形态放在 `X-Termcp-Text` 头里，所以 `curl -f` 拿到的退出码回答的是「这条请求成不成」而不是「某个 slot 成不成」。handler 留在 `internal/mcp` 而不是 `internal/webui`：准入、命名空间、请求上下文都在这里，挪过去要么复制一份准入逻辑，要么绕开 `internal/webui` 不能导入 `internal/mcp` 这个既存约束。
+- **`structured_only`**（默认 `false`）：只渲染 `structuredContent` 的客户端不必再收一份等长的文本投影。客户端设了它，就说明这次调用是它自己觉得大——不自动探测客户端渲染偏好，那只是把同一件事换成更不可靠的猜测。实测真实 MCP 线上 `help` 3397 → 1741 字节、`read --tail 400` 2141 → 1114 字节。
+- **调用方身份进了回复的来源标注**。`withRequestContext` 之外新增一个 `callerSource` 上下文值（默认 `mcp`，HTTP 入口写 `rest`），把三处硬编码的 `"mcp"` 换掉——审计日志里从此分得出「这个动作来自 MCP 会话还是来自 curl」。
 
 - **配置导出可以设密码（#108 的第三项）**。`GET /api/connections/batch` 带上 `X-Termcp-Password` 头就导出一份加密文件（`TERMCP-ENC 1` 头 + base64 的 salt ‖ nonce ‖ AES-256-GCM 密文，按 64 列折行），导入时在同一个头里给密码就能打开。密码放**头**而不是 query：URL 会进 shell history、代理日志、浏览器历史，写在里面的密码和使用它的那一个动作就把它泄了。不带这个头就是原来那份明文 TOML，旧脚本与旧导出文件不受影响。
 
