@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"time"
+	"unicode/utf8"
 
 	"github.com/open-mcp-ai/termcp/internal/ansi"
 )
@@ -26,6 +27,26 @@ type Params struct {
 	// start) even on a live shell. The MCP tool derives it from tail_lines and
 	// the closed-shell default; the HTTP tail=1 parameter sets it directly.
 	TailBytes bool
+	// RequireUTF8 refuses a window whose bytes are not valid UTF-8 instead of
+	// returning a string that its transport will silently alter.
+	//
+	// It is opt-in because the two surfaces need opposite things. A reply that
+	// becomes JSON cannot carry arbitrary bytes — encoding/json substitutes U+FFFD,
+	// which shifts offsets and corrupts content invisibly — so the model-facing
+	// read wants to fail loudly. A terminal repaint (the Web UI, StripAnsi=false)
+	// is drawing the bytes it was given and is expected to be handed whatever is
+	// there; refusing its window would take the terminal down over output it can
+	// display perfectly well.
+	RequireUTF8 bool
+}
+
+// render turns this read's bytes into its output string, enforcing the
+// byte-fidelity contract only where the caller asked for it (see RequireUTF8).
+func (p Params) render(raw []byte) (string, error) {
+	if p.RequireUTF8 {
+		return Render(raw, p.StripAnsi)
+	}
+	return clean(raw, p.StripAnsi), nil
 }
 
 // ValidateParams checks the parts of the read contract both surfaces share.
@@ -74,7 +95,12 @@ func ValidateParams(p Params) error {
 // group is filled only by the from_line selector, which reads whole lines from
 // the line index.
 type Window struct {
-	Output      string
+	Output string
+	// Raw is the bytes Output was rendered from, byte-for-byte. Callers that page
+	// by offset need this rather than len(Output): rendering (ANSI stripping,
+	// escapes, and the U+FFFD JSON would otherwise substitute) changes the length,
+	// so an offset derived from the rendered string points at the wrong byte.
+	Raw         []byte
 	Start       int64
 	End         int64
 	Total       int64
@@ -153,8 +179,13 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		if err != nil {
 			return Window{}, err
 		}
+		rendered, err := p.render(filtered)
+		if err != nil {
+			return Window{}, err
+		}
 		w = Window{
-			Output:      clean(filtered, p.StripAnsi),
+			Output:      rendered,
+			Raw:         filtered,
 			Start:       start,
 			End:         end,
 			Total:       total,
@@ -174,7 +205,11 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		if err != nil {
 			return Window{}, err
 		}
-		w = Window{Output: clean(filtered, p.StripAnsi), Start: st, End: tot, Total: tot, PartialTail: rawPartialTail(raw)}
+		rendered, err := p.render(filtered)
+		if err != nil {
+			return Window{}, err
+		}
+		w = Window{Output: rendered, Raw: filtered, Start: st, End: tot, Total: tot, PartialTail: rawPartialTail(raw)}
 	case p.Offset >= 0:
 		total, err := src.Len()
 		if err != nil {
@@ -197,7 +232,11 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		if err != nil {
 			return Window{}, err
 		}
-		w = Window{Output: clean(filtered, p.StripAnsi), Start: p.Offset, End: end, Total: total, HasMore: end < total, PartialTail: rawPartialTail(raw)}
+		rendered, err := p.render(filtered)
+		if err != nil {
+			return Window{}, err
+		}
+		w = Window{Output: rendered, Raw: filtered, Start: p.Offset, End: end, Total: total, HasMore: end < total, PartialTail: rawPartialTail(raw)}
 	default:
 		// Live streaming cursor path (unchanged semantics).
 		pre := src.Live.ReaderCursor(p.ReaderID)
@@ -210,6 +249,15 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		}
 		end := src.Live.ReaderCursor(p.ReaderID)
 		total := src.Live.BufferLen()
+		// The browser path strips ANSI inside ReadTerminalStream, so `out` is the
+		// rendered form and `raw` is what it was rendered from. Checking the RAW
+		// bytes is what makes the refusal honest: a stripped string could pass
+		// utf8.Valid while the stream it came from was binary.
+		if p.RequireUTF8 {
+			if err := RenderCheck(raw); err != nil {
+				return Window{}, err
+			}
+		}
 		output := out
 		if p.Stream != "" && p.Stream != "all" {
 			filtered, ferr := filterStream(raw, pre, src, p.Stream)
@@ -218,7 +266,7 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 			}
 			output = clean(filtered, p.StripAnsi)
 		}
-		w = Window{Output: output, Start: pre, End: end, Total: total, HasMore: end < total, PartialTail: partial}
+		w = Window{Output: output, Raw: raw, Start: pre, End: end, Total: total, HasMore: end < total, PartialTail: partial}
 	}
 	return w, nil
 }
@@ -230,6 +278,48 @@ func clean(raw []byte, stripAnsi bool) string {
 		return string(raw)
 	}
 	return ansi.Compact(ansi.Strip(string(raw)))
+}
+
+// Render turns raw window bytes into the string a caller receives.
+//
+// It refuses to hand back a string that cannot survive the trip: a Go string can
+// hold arbitrary bytes, but every consumer of this value re-encodes it as JSON,
+// and encoding/json REPLACES invalid UTF-8 with U+FFFD instead of failing. That
+// substitution is silent and irreversible, and it is not cosmetic — it shifts
+// byte offsets, so a caller that pages by offset (mcp recv) reads from the wrong
+// place, and a caller that inspects magic bytes sees \ufffd where 0x89 was.
+//
+// So the loss is refused here, where the raw bytes are still available to name
+// the offending offset, rather than reported as mojibake three layers up. The
+// caller's remedy is a byte-oriented read: text mode renders escapes, and the
+// window boundaries stay byte-exact.
+func renderInvalidUTF8(raw []byte) error {
+	i := invalidUTF8Index(raw)
+	return errf(ErrInvalid, "the window contains bytes that are not valid UTF-8 "+
+		"(first at byte %d of %d); a JSON reply would replace them with U+FFFD and silently "+
+		"shift every offset after them. Read this range byte-wise instead "+
+		"(mode=hex or mode=file) or ask for a narrower window", i, len(raw))
+}
+
+// Render applies clean and enforces the byte-fidelity contract above.
+func Render(raw []byte, stripAnsi bool) (string, error) {
+	out := clean(raw, stripAnsi)
+	if !utf8.ValidString(out) {
+		return "", renderInvalidUTF8(raw)
+	}
+	return out, nil
+}
+
+// invalidUTF8Index reports where the first invalid sequence starts, for the error.
+func invalidUTF8Index(b []byte) int {
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && size == 1 {
+			return i
+		}
+		i += size
+	}
+	return -1
 }
 
 // filterStream keeps only the bytes of raw (which sits at stream offset start)
@@ -428,4 +518,16 @@ func takeLastLines(raw []byte, n int64) []byte {
 		}
 	}
 	return raw
+}
+
+// RenderCheck refuses raw bytes that no JSON consumer can reproduce.
+//
+// It is separate from Render because one path (the live cursor) has the rendered
+// string built by the shell rather than here: there the assertion has to be made
+// about the RAW bytes the renderer consumed, not about its output.
+func RenderCheck(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return renderInvalidUTF8(raw)
+	}
+	return nil
 }

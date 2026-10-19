@@ -451,14 +451,24 @@ type readParams = transcript.Params
 func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
 	p := readParams{
 		StripAnsi: getBool(args, "strip_ansi", true),
-		Timeout:   getFloat64(args, "timeout", 3.0),
-		MaxLines:  int(getFloat64(args, "max_lines", 0)),
-		MaxBytes:  int(getFloat64(args, "max_bytes", 8192)),
-		ReaderID:  int(getFloat64(args, "reader_id", 0)),
-		Offset:    int64(getFloat64(args, "offset", -1)),
-		TailLines: int(getFloat64(args, "tail_lines", 0)),
-		FromLine:  int64(getFloat64(args, "from_line", 0)),
-		Stream:    getString(args, "stream", ""),
+		// This surface's reply becomes JSON, and encoding/json replaces bytes it
+		// cannot decode with U+FFFD instead of reporting them. That substitution
+		// shifts every offset after it, so a caller paging the stream reads from the
+		// wrong byte while being told the read succeeded. Ask the shared reader to
+		// refuse such a window instead; it names the offending offset, and
+		// `mode=hex`/`mode=file` on file_read remain the byte-exact route.
+		//
+		// The Web UI (handler_shell.go) deliberately does NOT set this: it repaints
+		// raw bytes into a terminal, where non-UTF-8 output is normal and lossless.
+		RequireUTF8: true,
+		Timeout:     getFloat64(args, "timeout", 3.0),
+		MaxLines:    int(getFloat64(args, "max_lines", 0)),
+		MaxBytes:    int(getFloat64(args, "max_bytes", 8192)),
+		ReaderID:    int(getFloat64(args, "reader_id", 0)),
+		Offset:      int64(getFloat64(args, "offset", -1)),
+		TailLines:   int(getFloat64(args, "tail_lines", 0)),
+		FromLine:    int64(getFloat64(args, "from_line", 0)),
+		Stream:      getString(args, "stream", ""),
 	}
 	if p.Timeout < 0 || p.Timeout > 60 {
 		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("timeout must be between 0 and 60, got %v", p.Timeout))

@@ -59,7 +59,10 @@ func TestParseReadParamsValues(t *testing.T) {
 	if bad != nil {
 		t.Fatalf("valid arguments were rejected: %s", bad.Content[0].(mcpgo.TextContent).Text)
 	}
-	want := readParams{StripAnsi: false, Timeout: 1.5, MaxLines: 7, MaxBytes: 1234, ReaderID: 9, Offset: 42, TailLines: 3}
+	// RequireUTF8 is set by the parser, not by the caller: this surface's reply is
+	// JSON, and encoding/json would otherwise substitute U+FFFD for bytes it cannot
+	// decode. See readoutput_utf8_test.go for the behaviour it buys.
+	want := readParams{StripAnsi: false, RequireUTF8: true, Timeout: 1.5, MaxLines: 7, MaxBytes: 1234, ReaderID: 9, Offset: 42, TailLines: 3}
 	if p != want {
 		t.Errorf("parsed %+v, want %+v", p, want)
 	}

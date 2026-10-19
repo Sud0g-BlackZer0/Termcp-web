@@ -56,6 +56,10 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 	case "recv":
 		return s.mcpRecvFrame(ctx, stmt, handle)
 	case "close":
+		// The cursor has to go with the handle: handles are minted monotonically
+		// (jrpcHandleSeq), so a reopened channel never reuses this key and the map
+		// would grow by one entry per channel the process ever opened.
+		s.dropRecvCursor(handle)
 		return envelope.Slot{Code: 204, Headers: headers}
 	}
 	return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
@@ -104,6 +108,11 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
 	}
 	body := getString(doc, "output", "")
+	// rawLen, not len(body): the window's byte span is what the next read's offset
+	// is measured in. len(body) counts the RENDERED string, which differs whenever
+	// the reply was ANSI-stripped or escaped, so advancing by it lands mid-frame.
+	// windowResult names this quantity raw_bytes for exactly this reason.
+	rawLen := int64(getFloatAny(doc, "raw_bytes", 0))
 	frame, complete := firstJSONValue(body)
 	total := int64(getFloatAny(doc, "total_bytes", 0))
 	if !complete {
@@ -118,7 +127,7 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 		}
 		return envelope.Slot{Code: 204, Headers: map[string]string{
 			"Path":          stmt.Path,
-			"Content-Range": envelope.ContentRange(from, from+int64(len(body))-1, total),
+			"Content-Range": envelope.ContentRange(from, from+rawLen-1, total),
 		}, Body: "no complete frame yet"}
 	}
 	start := from + int64(strings.Index(body, frame))
@@ -126,7 +135,7 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 	// Advance past the frame, and past the whitespace that separated it from the
 	// next one, so a resumed read starts on a value rather than on a newline.
 	next := end
-	for next < from+int64(len(body)) && strings.IndexByte(" \t\r\n", body[next-from]) >= 0 {
+	for next < from+rawLen && int(next-from) < len(body) && strings.IndexByte(" \t\r\n", body[next-from]) >= 0 {
 		next++
 	}
 	s.setRecvCursor(handle, next)
@@ -154,6 +163,13 @@ func (s *Server) recvCursor(handle string) int64 {
 	s.recvCursorMu.Lock()
 	defer s.recvCursorMu.Unlock()
 	return s.recvCursors[handle]
+}
+
+// dropRecvCursor forgets a closed handle's read position.
+func (s *Server) dropRecvCursor(handle string) {
+	s.recvCursorMu.Lock()
+	defer s.recvCursorMu.Unlock()
+	delete(s.recvCursors, handle)
 }
 
 func (s *Server) setRecvCursor(handle string, at int64) {

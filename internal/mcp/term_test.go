@@ -520,6 +520,78 @@ func TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt(t *testing.T) {
 	}
 }
 
+// TestMCPRecvCursorIsDroppedOnClose pins that a closed handle does not keep a
+// read position.
+//
+// Handles are minted monotonically (jrpcHandleSeq), so close-and-reopen never
+// reuses a key: without the delete, the cursor map grows by one entry per channel
+// the process ever opened and nothing reclaims them. An unnoticed leak in a
+// long-lived instance is the worst kind, because the workaround is a restart.
+func TestMCPRecvCursorIsDroppedOnClose(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "cat")
+
+	// Give the handle a cursor by consuming one frame through recv.
+	if out := termText(t, s, map[string]any{"cmd": `mcp send ` + h + ` {"jsonrpc":"2.0","id":1,"method":"x"}`}); !strings.Contains(out, "202") {
+		t.Fatalf("mcp send: %s", out)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)}); strings.Contains(got, "200") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, ok := s.recvCursors[h]; !ok {
+		t.Fatalf("no cursor recorded for %s after a recv; the rest of this test proves nothing", h)
+	}
+
+	if out := termText(t, s, map[string]any{"cmd": "mcp close " + h}); !strings.Contains(out, "204") {
+		t.Fatalf("mcp close: %s", out)
+	}
+	if _, ok := s.recvCursors[h]; ok {
+		t.Errorf("handle %s still has a recv cursor after close; the map grows for the life of the process", h)
+	}
+}
+
+// TestMCPRecvCursorUsesRawByteSpan pins that the cursor advances by the RAW
+// window length, not by the length of the rendered string.
+//
+// windowResult reports raw_bytes alongside the text precisely for this: ANSI
+// stripping and escaping change a window's rendered length, so an offset derived
+// from the text lands somewhere other than where the next frame begins. The
+// steady-state symptom is the one this whole fix exists to remove — a frame that
+// is present but reported as absent, because the read resumed past it.
+func TestMCPRecvCursorUsesRawByteSpan(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "cat")
+
+	frame := `{"jsonrpc":"2.0","id":7,"method":"ping"}`
+	if out := termText(t, s, map[string]any{"cmd": "mcp send " + h + " " + frame}); !strings.Contains(out, "202") {
+		t.Fatalf("mcp send: %s", out)
+	}
+
+	var got string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		got = termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)})
+		if strings.Contains(got, `"id":7`) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !strings.Contains(got, `"id":7`) {
+		t.Fatalf("recv never delivered the frame: %s", got)
+	}
+
+	// The cursor must sit at or before the stream length, and the next recv must
+	// not re-deliver this frame.
+	next := termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)})
+	if strings.Contains(next, `"id":7`) {
+		t.Errorf("the frame was delivered twice; the cursor did not advance past it: %s", next)
+	}
+}
+
 // TestMCPRecvDrainsEveryQueuedFrame pins that recv is a QUEUE, not a snapshot.
 //
 // A resident peer answers every request it has been given, so by the time the
