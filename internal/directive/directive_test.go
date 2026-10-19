@@ -576,3 +576,62 @@ func TestValuelessFlagsAreReal(t *testing.T) {
 		}
 	}
 }
+
+// TestExtArgsTakesTheRestOfTheLine pins --args to the same grammar --argv uses,
+// and pins that it takes the rest of the statement.
+//
+// --args used to be comma-split by the server, which cannot express an argv: an
+// argument may contain a comma, and `sh -c 'a,b'` became two arguments. The
+// failure was silent — the extension started with a mangled argv and reported a
+// startup error that named no flag — so the shape is pinned here, where the
+// parser can refuse it before anything runs.
+func TestExtArgsTakesTheRestOfTheLine(t *testing.T) {
+	f, err := Parse(`ext create srv --kind mcp --target internal --mode pipe --command node --args /srv/mcp.js --stdio --label 'a,b'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := f.Statements[0]
+	want := `/srv/mcp.js --stdio --label 'a,b'`
+	if got := st.Flags["args"]; got != want {
+		t.Errorf("args = %q, want %q (the rest of the line, quoting intact)", got, want)
+	}
+	// The other flags still parsed: --args stops the scan, it does not swallow
+	// what came before it.
+	for k, want := range map[string]string{"kind": "mcp", "target": "internal", "mode": "pipe", "command": "node"} {
+		if got := st.Flags[k]; got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+
+	// A known flag after --args is the caller's mistake, not a program argument.
+	if _, err := Parse(`ext create srv --args mcp --name srv`); err == nil {
+		t.Fatal("a flag after --args must be refused, not handed to the program")
+	} else if !strings.Contains(err.Error(), "flags come before --args") {
+		t.Errorf("error = %v, want it to name the ordering rule", err)
+	}
+}
+
+// TestExtensionsIsABuiltinSpellingOfExt pins the synonym.
+//
+// A caller reaches for `extensions` before reading help — it is the tool's own
+// name for the thing — and an unknown-directive error at that moment is the
+// documentation failing, not the caller. The synonym resolves to the canonical
+// name, so every downstream lookup (dispatch, capability) sees one spelling.
+func TestExtensionsIsABuiltinSpellingOfExt(t *testing.T) {
+	if _, ok := Lookup("extensions"); !ok {
+		t.Fatal("`extensions` must resolve; it is the tool's own name for `ext`")
+	}
+	f, err := Parse(`extensions list`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Statements[0].Op; got != "ext" {
+		t.Errorf("op = %q, want the canonical %q", got, "ext")
+	}
+	// help lists canonical names only: a synonym is a way in, not a second entry.
+	for _, name := range Names() {
+		if name == "extensions" {
+			t.Error("`extensions` must not appear as its own help entry")
+		}
+	}
+}

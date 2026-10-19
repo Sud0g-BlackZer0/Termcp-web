@@ -120,7 +120,7 @@ drwxr-xr-x ...
 | `fwd --action local\|remote\|dynamic\|list\|close … <session>` | SSH 端口转发 |
 | `file <session> --action read\|write\|stat\|delete\|rename\|mkdir\|urls\|perm\|link\|fs\|getwd …` | SFTP 操作 |
 | `profile list\|create\|edit\|copy\|delete …` | SSH 连接配置 |
-| `ext list\|get\|create\|update\|delete\|retry …` | 扩展层（MCP server / 技能窗口 / prompt 终端） |
+| `ext list\|get\|create\|update\|delete\|retry …` | 扩展层（MCP server / 技能窗口 / prompt 终端）。`extensions` 是内置同义词。`--args` 是 **argv 词表**（和 `--argv` 同一套 shell 引用规则），因为它取本行剩余部分，所以必须放最后；`--headers` 是 JSON 对象，`--forwards` 是 JSON 数组 |
 | `mcp open <url>` / `mcp tools\|send\|recv\|call\|close <handle> …` | 把任意第三方 MCP server 当成一条通道驱动。会做 initialize/会话握手；支持 streamable HTTP（`/stream`），不支持旧的 `/sse` 传输。HTTP 端点不消耗通道 |
 | `alias <name> <directive>` / `alias` / `alias <name> --off` | 给指令起名字。展开一次，`Path` 显示展开后的模样 |
 | `help [directive]` | 指令表 / 单条用法 |

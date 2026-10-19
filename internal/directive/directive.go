@@ -77,6 +77,16 @@ type Op struct {
 	// the program's arguments without an error, which is the worst failure
 	// mode. These flags must come last: a known flag after one is refused.
 	RestValue []string
+	// AlsoKnownAs lists extra spellings that resolve to this directive.
+	//
+	// They exist for the names a caller reaches for before reading `help` — the
+	// tool's own name for what a directive wraps (`extensions` for `ext`) — and
+	// they are built in rather than aliases because an alias is a runtime
+	// registration: a caller who has not registered one gets "unknown directive"
+	// for the obvious word, which is exactly the moment the spelling is being
+	// guessed. `help` prints only the canonical name, so the surface stays one
+	// short list; a synonym is a way in, not a second entry.
+	AlsoKnownAs []string
 	// Usage is the one-line template `help` and error replies print. Window
 	// parameters are deliberately absent: they are on the tool schema with
 	// self-explaining names, and repeating them 22 times would be noise.
@@ -205,9 +215,11 @@ var ops = []Op{
 	{Name: "ext", Kind: KindFlags,
 		Flags: []string{"action", "name", "kind", "target", "description", "command", "args", "url", "headers",
 			"mode", "rows", "cols", "allow", "paths", "notes", "enabled", "forwards"},
-		Valueless: []string{"enabled"},
-		Usage:     "ext list|get|create|update|delete|retry …",
-		Detail:    extDetail},
+		Valueless:   []string{"enabled"},
+		RestValue:   []string{"args"},
+		AlsoKnownAs: []string{"extensions"},
+		Usage:       "ext list|get|create|update|delete|retry …",
+		Detail:      extDetail},
 	{Name: "mcp", Kind: KindPayload,
 		Usage:  "mcp open <url>   |   mcp tools|send|recv|call|close <handle> …",
 		Detail: mcpDetail},
@@ -342,15 +354,23 @@ explicit form. Defaults to list.
 Which flags each action uses:
   list|get             (list takes no flags; get takes --name)
   create|update        --name --kind --target --description --notes --enabled
-                       --command --args --url --headers --mode --rows --cols
-                       --allow --paths --forwards
+                       --command --url --headers --mode --rows --cols
+                       --allow --paths --forwards --args
   delete|retry         --name
 
 --target is the ssh_config the window opens against ("internal" = loopback).
 --allow is the capability whitelist, comma-separated, e.g. --allow file_read,file_stat.
 --paths is the path whitelist and is REQUIRED for a skill; a path outside it is
 refused even when the capability is allowed. --forwards declares tunnels that come
-up and go down with the session.
+up and go down with the session, as a JSON array of {kind, local_port,
+remote_host, remote_port}.
+
+--args is an ARGV WORD LIST, the same grammar --argv uses for pipe/pty: quoting is
+the shell's, and an argument may contain a comma or a space. It takes the REST of
+the line, so it goes LAST:
+  ext create srv --kind mcp --target internal --mode pipe \
+      --command node --args /srv/mcp.js --stdio
+--headers is a JSON object for an HTTP template, e.g. --headers '{"X-Api-Key":"k"}'.
 
 --allow and --paths are the two gates that make a skill safe to hand to an agent:
 the first says WHAT it may do, the second says WHERE. Leaving both off is not
@@ -519,11 +539,18 @@ fields: a file using them parses cleanly and silently drops the bastion.
 Export emits this shape, so it re-imports unchanged. "internal" is reserved,
 an existing name becomes name-2, and credentials are write-only.`
 
-// byName indexes ops.
+// byName indexes ops, under their canonical name and every synonym.
+//
+// One map rather than a second lookup: a synonym has to be indistinguishable
+// from the real name everywhere a directive is resolved, and the parse, the
+// capability check and the alias expansion all go through Lookup.
 var byName = func() map[string]Op {
 	m := make(map[string]Op, len(ops))
 	for _, op := range ops {
 		m[op.Name] = op
+		for _, alt := range op.AlsoKnownAs {
+			m[alt] = op
+		}
 	}
 	return m
 }()
@@ -531,7 +558,8 @@ var byName = func() map[string]Op {
 // Ops returns the table, in help order.
 func Ops() []Op { return ops }
 
-// Lookup returns a directive's grammar.
+// Lookup returns a directive's grammar, under its canonical name or any of its
+// synonyms (`extensions` for `ext`).
 func Lookup(name string) (Op, bool) {
 	op, ok := byName[name]
 	return op, ok
@@ -653,7 +681,11 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 	bodyEnd := commandEnd(stmt)
 
 	out := Statement{
-		Op:    name,
+		/* The CANONICAL name, not the word the caller typed: a synonym is a way in,
+		   and everything downstream (the dispatch switch, the capability lookup,
+		   the reply's op) keys on the canonical one. `extensions list` therefore
+		   runs `ext` with no special case anywhere below this line. */
+		Op:    op.Name,
 		Flags: map[string]string{},
 		Path:  strings.TrimSpace(src[stmt.Pos().Offset():bodyEnd]),
 	}
@@ -781,6 +813,38 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 					Msg:   "unknown flag for " + name + ": --" + key,
 					Usage: op.Usage,
 				}
+			}
+			/* A RestValue flag takes the REST of the line, exactly as it does for
+			   the payload kinds: its value is a word list (`--args sh -c 'a,b'`),
+			   and stopping at the first word would drop the program's arguments
+			   without an error — the silent drop this flag list exists to avoid.
+			   It must come last, and a known flag after it is refused rather than
+			   handed to the program. */
+			if restValueFlag(op, key) {
+				if i+1 >= len(rest) || strings.HasPrefix(rest[i+1].text, "--") {
+					return Statement{}, false, &Error{
+						Op:    name,
+						Msg:   "--" + key + " needs arguments, e.g. " + name + " … --" + key + " mcp",
+						Usage: op.Usage,
+					}
+				}
+				for _, later := range rest[i+1:] {
+					if k, _ := splitFlag(later.text); strings.HasPrefix(later.text, "--") && allowedFlag(op, k) {
+						return Statement{}, false, &Error{
+							Op:    name,
+							Msg:   "flags come before --" + key + ": --" + k + " would otherwise be passed as an argument",
+							Usage: op.Usage,
+						}
+					}
+				}
+				tail := src[rest[i+1].start:bodyEnd]
+				if val != "" {
+					val += " " + tail
+				} else {
+					val = tail
+				}
+				out.Flags[key] = strings.TrimSpace(val)
+				break
 			}
 			if val == "" && !valuelessFlag(op, key) && i+1 < len(rest) && !strings.HasPrefix(rest[i+1].text, "--") {
 				val = rest[i+1].lit

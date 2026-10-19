@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -563,9 +564,31 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	setFlagString(args, stmt, "notes", "notes")
 	setFlagNumber(args, stmt, "rows", "rows")
 	setFlagNumber(args, stmt, "cols", "cols")
-	setFlagList(args, stmt, "args", "args")
+	/* --args carries a program's argv, so it is an ARGV WORD LIST — the same
+	   grammar --argv uses for pipe/pty — and not a comma list: an argument may
+	   contain a comma, and the split mangled it silently. Its value is the rest
+	   of the line, so it must come last. */
+	if err := setFlagArgvList(args, stmt, "args", "args"); err != nil {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+			Body: err.Error()}
+	}
+	/* --headers is the JSON object an HTTP MCP template sends on every relay
+	   request, so it takes the same treatment. It used to be in the parser's
+	   flag list and read by nobody at all, which is worse than not accepting it:
+	   the caller saw success and the header was never sent. */
+	if err := setFlagJSONObject(args, stmt, "headers", "headers"); err != nil {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+			Body: err.Error()}
+	}
 	setFlagList(args, stmt, "allow", "allow")
 	setFlagList(args, stmt, "paths", "paths")
+	/* --forwards declares tunnels, and a tunnel is a structure rather than a
+	   word: it takes a JSON array of declarations. It also used to be accepted
+	   and ignored, so a template's tunnels never came up. */
+	if err := setFlagJSONList(args, stmt, "forwards", "forwards"); err != nil {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+			Body: err.Error()}
+	}
 	if boolFlag(stmt, "enabled") {
 		args["enabled"] = true
 	}
@@ -989,6 +1012,11 @@ func setFlagNumber(args map[string]any, stmt directive.Statement, flag, arg stri
 }
 
 // setFlagList copies a comma-separated flag into a handler's array argument.
+//
+// This is right for a flag whose VALUES cannot contain a comma — a capability
+// name, a path (comma is legal in a path, but a path list written on one line is
+// the caller's own choice), an extension name. It is WRONG for a flag carrying a
+// command line, which is why --args does not use it: see setFlagJSONList.
 func setFlagList(args map[string]any, stmt directive.Statement, flag, arg string) {
 	v, ok := stmt.Flags[flag]
 	if !ok || v == "" {
@@ -1002,4 +1030,77 @@ func setFlagList(args map[string]any, stmt directive.Statement, flag, arg string
 		}
 	}
 	args[arg] = out
+}
+
+// setFlagArgvList copies a flag written as an ARGV WORD LIST into a handler's
+// array argument, and refuses a value that is not one.
+//
+// The WHOLE word list is the value: in `--command node --args /srv/mcp.js mcp`,
+// --command names the program and --args carries the server script and its
+// arguments, so the first word is not dropped. The grammar is --argv's (the
+// shell's quoting, no expansion), because a program's arguments are a word list
+// everywhere else in this protocol and a second grammar here would be a trap.
+//
+// It replaced a comma split, which could not express an argument containing a
+// comma (`sh -c 'a,b'` became two arguments) and failed SILENTLY: the extension
+// started with a mangled argv and reported a startup error that named no flag.
+//
+// Empty is "not set" rather than an error: a caller clearing args on update
+// sends no flag at all, and an empty --args value is the same intent.
+func setFlagArgvList(args map[string]any, stmt directive.Statement, flag, arg string) error {
+	v, ok := stmt.Flags[flag]
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	// SplitArgv gives the command and the rest separately; both belong here, so
+	// the command goes back in front. Reading the two halves apart is still right:
+	// it is what refuses a command LINE (shell syntax) instead of a word list.
+	cmd, rest, err := directive.SplitArgv(v)
+	if err != nil {
+		return fmt.Errorf("--%s: %v", flag, err)
+	}
+	out := make([]any, 0, len(rest)+1)
+	if cmd != "" {
+		out = append(out, cmd)
+	}
+	for _, w := range rest {
+		out = append(out, w)
+	}
+	args[arg] = out
+	return nil
+}
+
+// setFlagJSONObject copies a flag written as a JSON object into a handler's map
+// argument (--headers). An HTTP template's headers are a map with caller-chosen
+// keys, which neither a comma list nor an argv can express.
+func setFlagJSONObject(args map[string]any, stmt directive.Statement, flag, arg string) error {
+	v, ok := stmt.Flags[flag]
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		return fmt.Errorf("--%s must be a JSON object, e.g. --%s '%s' (got %q)",
+			flag, flag, `{"X-Api-Key":"..."}`, v)
+	}
+	args[arg] = out
+	return nil
+}
+
+// setFlagJSONList copies a flag written as a JSON array into a handler's array
+// argument, and refuses anything else. For a value that is a STRUCTURE rather
+// than a command line (--forwards: a list of tunnel declarations), where an argv
+// word list has no shape to describe it.
+func setFlagJSONList(args map[string]any, stmt directive.Statement, flag, arg string) error {
+	v, ok := stmt.Flags[flag]
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	var out []any
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		return fmt.Errorf("--%s must be a JSON array, e.g. --%s '%s' (got %q)",
+			flag, flag, `[{...}]`, v)
+	}
+	args[arg] = out
+	return nil
 }
