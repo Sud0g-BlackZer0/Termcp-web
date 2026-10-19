@@ -1815,7 +1815,7 @@ Response 200:
 | `on_lines_overflow` | `truncate` (default) or `fold` (return no bytes this time) |
 | `pipe_to` | A handle whose stdin receives this reply's bytes; they leave the body |
 | `learn_mode` | Attach each directive's usage line once per reply |
-| `structured_only` | Send only the JSON projection, dropping the rendered text. Both carry the same bytes, so this halves a large reply's cost (measured: −49%); a client that renders text sees none. Default `false` |
+| `structured_content` | Also send the JSON projection as `structuredContent`. **Off by default**: the two projections carry the same bytes, so the JSON copy is a duplicate a human sees on every call. Pass `true` for a client that reads structured content |
 <!-- END termdoc: args -->
 
 The window parameters are identical to the tool's, with the same names and the

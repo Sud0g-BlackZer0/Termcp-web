@@ -313,90 +313,99 @@ func TestHTTPTermAdmitsThroughTheCapabilityTable(t *testing.T) {
 	}
 }
 
-// TestStructuredOnlyHalvesTheReply pins the switch that declines the second copy
-// of a body.
+// TestStructuredContentIsOffByDefault pins the default that removes the duplicate.
 //
-// The defect it exists for: a reply sends its bytes twice — once as the rendered
-// text, once in structuredContent — so a caller reading a large log pays for it
-// twice. Measured on `help` that is +25%, on a 200-line read +57%. The window
-// parameters exist to stop a caller paying for output it did not ask for, and a
-// duplicate of output it DID ask for is the same waste through another door.
+// A tool result has two projections and they carry the SAME bytes: the rendered
+// text in `content`, and the envelope again as `structuredContent`. Sending both
+// bills every reply twice, and a client that prints what it receives shows a human
+// the same answer in two dialects on every call — measured +25% on `help`, +57% on
+// a 200-line read.
 //
-// Two things have to be true, and the test pins both: the structured projection
-// still carries everything (so a JSON-only client loses nothing), and the text
-// projection is actually gone (so the bytes are actually saved).
-func TestStructuredOnlyHalvesTheReply(t *testing.T) {
+// The first attempt at this was two switches that both pointed the wrong way:
+// `structured_only` was meant to turn structuredContent off but kept the JSON and
+// dropped the text; `content_only` was the same intent spelled backwards, making
+// "no duplicate" the thing a caller had to ask for. One positive flag with the
+// quiet default says what it does.
+//
+// So the default is text only, the bytes are saved, and `structured_content: true`
+// is how a JSON client asks for the twin.
+func TestStructuredContentIsOffByDefault(t *testing.T) {
 	s := newTestServer(t)
 
-	both := s.Term(t.Context(), "help", map[string]any{})
-	if both.Text() == "" {
-		t.Fatal("the default reply must keep the text projection")
+	// The default: content only, no JSON twin.
+	def := termCall(t, s, map[string]any{"cmd": "help"})
+	if len(def.Content) == 0 {
+		t.Fatal("the default result must carry content: it is the projection that survives")
 	}
-	if len(both.Structured()) != 1 || both.Structured()[0]["body"] == "" {
-		t.Fatal("the default reply must keep the structured projection")
+	if def.StructuredContent != nil {
+		t.Error("the default result must NOT carry structuredContent: that is the duplicate being paid for")
+	}
+	if def.IsError {
+		t.Error("a successful reply must not be flagged as an error")
 	}
 
-	only := s.Term(t.Context(), "help", map[string]any{"structured_only": true})
-	if only.Text() != "" {
-		t.Errorf("structured_only left a text projection of %d bytes", len(only.Text()))
+	// Asked for: the JSON twin appears, and carries the same bytes as the text.
+	both := termCall(t, s, map[string]any{"cmd": "help", "structured_content": true})
+	if both.StructuredContent == nil {
+		t.Fatal("structured_content:true must send structuredContent")
 	}
-	// The bytes are not lost, they are simply carried once.
-	if got := only.Structured()[0]["body"]; got != both.Structured()[0]["body"] {
-		t.Errorf("structured_only changed the body:\n%v\n%v", got, both.Structured()[0]["body"])
+	if len(both.Content) == 0 {
+		t.Error("structured_content adds the JSON twin; it must not drop the content projection")
 	}
-	// Status and headers survive too: the projection is the same value. The code
-	// is an int here, not the float64 a JSON round-trip would give, because this
-	// reads the value the server built rather than a decoded reply.
-	if got := only.Structured()[0]["code"]; got != 200 {
+	if got, want := toolResultText(both), toolResultText(def); got != want {
+		t.Errorf("asking for the twin changed the content projection:\n got %q\nwant %q", got, want)
+	}
+
+	// The envelope itself is unchanged either way: this is a wire switch, not a
+	// change of content. Read at the value level, where the projection is built.
+	withTwin := s.Term(t.Context(), "help", map[string]any{"structured_content": true})
+	plain := s.Term(t.Context(), "help", map[string]any{})
+	if withTwin.Text() != plain.Text() {
+		t.Error("structured_content changed the body; it must only add the JSON projection")
+	}
+	if len(withTwin.Structured()) != 1 || withTwin.Structured()[0]["body"] == "" {
+		t.Fatal("the reply must always build its structured form: the switch is about the wire")
+	}
+	if got := withTwin.Structured()[0]["code"]; got != 200 {
 		t.Errorf("code = %v (%T), want 200", got, got)
 	}
-	if got := only.Structured()[0]["Path"]; got != "help" {
+	if got := withTwin.Structured()[0]["Path"]; got != "help" {
 		t.Errorf("Path = %v, want help", got)
 	}
 }
 
-// TestStructuredOnlyOmitsTextContent pins the wire consequence on the tool
-// result: the mode must produce no text content block, not an empty one. A client
-// that renders text should be told "nothing here" by absence, and an empty string
-// would still cost its framing.
-func TestStructuredOnlyOmitsTextContent(t *testing.T) {
+// TestStructuredContentOverHTTP pins the same switch on the REST entrance.
+//
+// The two entrances differ in which projection is primary, and that is why the
+// switch means the mirror image of itself here. Over MCP the `content` field is
+// mandatory, so the text is the default and structuredContent is the optional
+// twin. Over REST the BODY is the JSON projection and the rendered form rides
+// along as the optional X-Termcp-Text header — so on this entrance the default
+// already omits the text, and `structured_content` only ever adds the copy that
+// is already the body.
+//
+// What both entrances must agree on is the rule, not the field: the duplicate is
+// opt-in, and asking for it never changes the bytes, only whether they are sent a
+// second time.
+func TestStructuredContentOverHTTP(t *testing.T) {
 	s := newTestServer(t)
 
-	full := termCall(t, s, map[string]any{"cmd": "help"})
-	if len(full.Content) == 0 {
-		t.Fatal("the default result must carry a text content block")
+	def := postTerm(t, s, `{"cmd":"help"}`)
+	if def.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", def.Code)
+	}
+	// The body is the contract and is always present.
+	if got := termSlots(t, def)[0]["body"]; got == nil || got == "" {
+		t.Error("the JSON body must always carry the bytes")
 	}
 
-	lean := termCall(t, s, map[string]any{"cmd": "help", "structured_only": true})
-	if len(lean.Content) != 0 {
-		t.Errorf("structured_only result carries %d content block(s), want 0", len(lean.Content))
+	// Asking for the twin does not remove the body: on REST the body IS the twin.
+	asked := postTerm(t, s, `{"cmd":"help","structured_content":true}`)
+	if asked.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", asked.Code)
 	}
-	if lean.StructuredContent == nil {
-		t.Error("structured_only result has no structuredContent: the caller would get nothing at all")
-	}
-	if lean.IsError {
-		t.Error("a successful reply must not be flagged as an error")
-	}
-}
-
-// TestStructuredOnlyOverHTTP pins that the REST entrance takes the same switch.
-// The saving is largest exactly where REST is most likely to be used (a big read),
-// and a flag that exists on one entrance and not the other is two protocols.
-func TestStructuredOnlyOverHTTP(t *testing.T) {
-	s := newTestServer(t)
-
-	rec := postTerm(t, s, `{"cmd":"help","structured_only":true}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	// REST already sends the rendered form only as an optional header, so the
-	// switch's job here is to stop paying for that header too.
-	if got := rec.Header().Get("X-Termcp-Text"); got != "" {
-		t.Errorf("X-Termcp-Text is %d bytes, want none under structured_only", len(got))
-	}
-	slots := termSlots(t, rec)
-	if got := slots[0]["body"]; got == nil || got == "" {
-		t.Error("the JSON body must still carry the bytes")
+	if got := termSlots(t, asked)[0]["body"]; got == nil || got == "" {
+		t.Error("structured_content must not empty the REST body: it is the JSON projection")
 	}
 }
 

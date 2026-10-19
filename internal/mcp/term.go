@@ -61,11 +61,11 @@ type termArgs struct {
 	PipeTo          string
 	LearnMode       bool
 
-	// StructuredOnly sends the reply as its JSON projection only, dropping the
-	// rendered text one. The two carry the same bytes, so a reply that sends both
-	// bills its body twice; this is the switch that declines the second copy (see
-	// envelope.Reply.StructuredOnly).
-	StructuredOnly bool
+	// StructuredContent also sends the reply as the JSON projection, on top of the
+	// rendered text. It is off by default because the two carry the SAME bytes and
+	// the text is the copy a caller usually reads, so the JSON twin is a duplicate
+	// paid for on every call. See envelope.Reply.StructuredContent.
+	StructuredContent bool
 }
 
 // handleTerm is the MCP entrance: a thin wrapper that hands the command line to
@@ -99,7 +99,7 @@ func (s *Server) Term(ctx context.Context, cmd string, args map[string]any) enve
 	t := s.executeTerm(ctx, cmd, win)
 	// The total cap is a property of the REPLY, not of one slot: ten slots each
 	// within their own byte limit still add up to a context nobody budgeted for.
-	return envelope.Reply{Slots: t.applyTotalCap(t.slots), StructuredOnly: win.StructuredOnly}
+	return envelope.Reply{Slots: t.applyTotalCap(t.slots), StructuredContent: win.StructuredContent}
 }
 
 // executeTerm parses cmd and runs it, accumulating the reply.
@@ -275,18 +275,20 @@ type termReply struct {
 // empty, and every field the caller needs is in structuredContent.
 func toolResult(reply envelope.Reply) *mcpgo.CallToolResult {
 	result := mcpgo.NewToolResultText(reply.Text())
-	if reply.StructuredOnly {
-		result.Content = nil
-	}
 	result.IsError = reply.IsError()
-	structured := reply.Structured()
-	if len(structured) == 1 {
-		result.StructuredContent = structured[0]
-	} else {
-		// structuredContent must be a JSON object. A batch is several slots, so
-		// it is wrapped rather than sent as a bare array, which clients reject
-		// against the object-shaped result schema.
-		result.StructuredContent = map[string]any{"slots": structured}
+	/* The JSON twin is built only when it was asked for. Structured() renders every
+	   slot a second time, and on a large reply that render is the cost the default
+	   exists to avoid — cheaper to skip than to build and drop. */
+	if reply.StructuredContent {
+		structured := reply.Structured()
+		if len(structured) == 1 {
+			result.StructuredContent = structured[0]
+		} else {
+			// structuredContent must be a JSON object. A batch is several slots, so
+			// it is wrapped rather than sent as a bare array, which clients reject
+			// against the object-shaped result schema.
+			result.StructuredContent = map[string]any{"slots": structured}
+		}
 	}
 	return result
 }

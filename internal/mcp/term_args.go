@@ -13,9 +13,11 @@ import (
 // One declaration per argument, and every place that publishes an argument reads
 // it: the tool schema (term_register.go), docs/api.md's parameter table (§16, via
 // cmd/termdoc), and the tests that check the two agree. Before this file they were
-// three hand-kept copies, and they had already drifted: `structured_only` shipped
+// three hand-kept copies, and they had already drifted: a projection switch shipped
 // in the schema and was missing from the doc, so a caller reading the REST
-// reference could not discover the switch that halves a large reply.
+// reference could not discover it. That argument has since been replaced (see
+// structured_content below), but the drift is why this table exists — any name
+// would have done, and one did.
 //
 // The rule this encodes is the same one the command space already follows — the
 // directive table is the single source `help` renders from — extended to the
@@ -149,16 +151,25 @@ var termArgDecls = []termArgDecl{
 		DefText: "false",
 	},
 	{
-		Name: "structured_only",
+		Name: "structured_content",
 		Kind: argBool,
-		// The body is the one part of a reply billed twice when both projections
-		// go out (the rendered text and structuredContent carry the same bytes).
-		// The switch is explicit rather than automatic because a model reads the
-		// text form most comfortably, and the redundancy only hurts when the
-		// payload is large — a judgment the caller is making anyway when it sets a
-		// window on this very call.
-		Desc:    "Send only the JSON projection, dropping the rendered text. Both carry the same bytes, so this halves a large reply's cost; a client that renders text will see none. Default: false.",
-		DocNote: "Send only the JSON projection, dropping the rendered text. Both carry the same bytes, so this halves a large reply's cost (measured: −49%); a client that renders text sees none. Default `false`",
+		// OFF by default, and that is the whole point of the argument.
+		//
+		// A tool result has two projections and they carry the SAME bytes: the
+		// rendered text in `content`, and the envelope again as `structuredContent`.
+		// Sending both bills every reply twice, and a client that prints what it
+		// receives shows a human the same answer in two dialects on every call. That
+		// is not a corner case — it is the normal case, because the text form is what
+		// a model reads most comfortably, so the duplicate is the copy almost nobody
+		// consumes.
+		//
+		// This replaced two switches that both pointed the wrong way. `structured_only`
+		// was meant to turn structuredContent off but kept the JSON and dropped the
+		// text instead; `content_only` was the same intent spelled backwards, which
+		// made "no duplicate" the thing you had to ask for. One positive flag with the
+		// quiet default says what it does: pass true and you get the JSON twin.
+		Desc:    "Also send the JSON twin (structuredContent). Default: false — the rendered text alone, since both carry the same bytes.",
+		DocNote: "Also send the JSON projection as `structuredContent`. **Off by default**: the two projections carry the same bytes, so the JSON copy is a duplicate a human sees on every call. Pass `true` for a client that reads structured content",
 		Def:     false,
 		DefText: "false",
 	},
@@ -185,16 +196,16 @@ func termArgDeclFor(name string) (termArgDecl, bool) {
 // expressible.
 func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
 	w := termArgs{
-		TimeoutSeconds:  getFloat64(args, "timeout", numDefault("timeout")),
-		BytesLimit:      int(getFloat64(args, "bytes_limit", numDefault("bytes_limit"))),
-		LinesLimit:      int(getFloat64(args, "lines_limit", numDefault("lines_limit"))),
-		TotalBytesLimit: int(getFloat64(args, "total_bytes_limit", numDefault("total_bytes_limit"))),
-		OnTimeOverflow:  overflowPolicy(args, "on_time_overflow"),
-		OnBytesOverflow: overflowPolicy(args, "on_bytes_overflow"),
-		OnLinesOverflow: overflowPolicy(args, "on_lines_overflow"),
-		PipeTo:          strings.TrimSpace(getString(args, "pipe_to", "")),
-		LearnMode:       getBool(args, "learn_mode", false),
-		StructuredOnly:  getBool(args, "structured_only", false),
+		TimeoutSeconds:    getFloat64(args, "timeout", numDefault("timeout")),
+		BytesLimit:        int(getFloat64(args, "bytes_limit", numDefault("bytes_limit"))),
+		LinesLimit:        int(getFloat64(args, "lines_limit", numDefault("lines_limit"))),
+		TotalBytesLimit:   int(getFloat64(args, "total_bytes_limit", numDefault("total_bytes_limit"))),
+		OnTimeOverflow:    overflowPolicy(args, "on_time_overflow"),
+		OnBytesOverflow:   overflowPolicy(args, "on_bytes_overflow"),
+		OnLinesOverflow:   overflowPolicy(args, "on_lines_overflow"),
+		PipeTo:            strings.TrimSpace(getString(args, "pipe_to", "")),
+		LearnMode:         getBool(args, "learn_mode", false),
+		StructuredContent: getBool(args, "structured_content", false),
 	}
 	switch {
 	case w.TimeoutSeconds < 0 || w.TimeoutSeconds > 3600:

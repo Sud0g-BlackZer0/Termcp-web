@@ -535,13 +535,22 @@ func TestTermBatchProducesOneSlotPerTarget(t *testing.T) {
 }
 
 // The structured projection mirrors the text one, slot for slot, key for key.
+//
+// It is requested explicitly because it is off by default: the two projections
+// carry the same bytes, so the JSON twin is a duplicate a caller opts into. The
+// switch is about the WIRE, not about the value — the reply builds both either
+// way, which is what this test can therefore check on one call.
 func TestTermStructuredContentIsIsomorphic(t *testing.T) {
 	s := newTestServer(t)
 	h := openPipe(t, s, "sleep 5")
-	res := termCall(t, s, map[string]any{"cmd": "read " + h + "; read " + h, "timeout": float64(0)})
+	res := termCall(t, s, map[string]any{
+		"cmd":                "read " + h + "; read " + h,
+		"timeout":            float64(0),
+		"structured_content": true,
+	})
 
 	if res.StructuredContent == nil {
-		t.Fatal("no structuredContent")
+		t.Fatal("structured_content:true produced no structuredContent")
 	}
 	raw, err := json.Marshal(res.StructuredContent)
 	if err != nil {
