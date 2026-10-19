@@ -652,33 +652,29 @@ func (s *Server) refuseAction(ctx context.Context, stmt directive.Statement, cap
 	}, true
 }
 
-// directiveMCP handles the JSON-RPC entry point.
-func (s *Server) directiveMCP(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	// `mcp open` relays an HTTP endpoint. It does not consume a shell channel: the
-	// bridge speaks HTTP, so a caller can hold a dozen of them without spending
-	// the shell budget.
-	//
-	// The split is done by hand rather than with strings.Fields because the FRAME
-	// is the rest of the line, quotes included: Fields would split a JSON body on
-	// its own spaces (`"name": "x"` becomes two words), and the payload keeps the
-	// caller's quoting, so a quoted frame reached json.Unmarshal with its quotes
-	// still on and was refused as "not JSON". Both spellings are accepted here —
-	// quoted and bare — because a caller has no way to know which one this layer
-	// wanted.
+// directiveJRPC handles the three frame-channel entries.
+//
+// One function, because the doors differ only in what they do to the channel
+// after opening it (see term_jrpc.go): the subcommand split, the handle
+// registry and the reply shapes are identical, and three copies of them would be
+// three places for `recv` to disagree with itself.
+//
+// The split is done by hand rather than with strings.Fields because the FRAME is
+// the rest of the line, quotes included: Fields would split a JSON body on its
+// own spaces (`"name": "x"` becomes two words), and the payload keeps the
+// caller's quoting, so a quoted frame reached json.Unmarshal with its quotes
+// still on and was refused as "not JSON".
+func (s *Server) directiveJRPC(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	payload := strings.TrimSpace(stmt.Payload)
 	if payload == "" {
 		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: "mcp needs a subcommand: open|tools|send|recv|call|close"}
+			Body: stmt.Op + " needs a subcommand: open|tools|send|recv|call|close"}
 	}
 	sub, rest := splitWord(payload)
 	switch sub {
 	case "open":
 		url, _ := splitWord(rest)
-		if url == "" {
-			return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-				Body: "mcp open needs a URL"}
-		}
-		return s.mcpOpen(ctx, stmt, unquoteWord(url))
+		return s.jrpcOpen(ctx, stmt, stmt.Op, unquoteWord(url))
 	case "tools", "send", "recv", "call", "close":
 		handle, tail := splitWord(rest)
 		args := []string{}
@@ -688,10 +684,10 @@ func (s *Server) directiveMCP(ctx context.Context, stmt directive.Statement, win
 		if tail = strings.TrimSpace(tail); tail != "" {
 			args = append(args, tail)
 		}
-		return s.mcpChannel(ctx, stmt, sub, args)
+		return s.jrpcChannel(ctx, stmt, win, stmt.Op, sub, args)
 	}
 	return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-		Body: "unknown mcp subcommand: " + sub}
+		Body: "unknown " + stmt.Op + " subcommand: " + sub}
 }
 
 // splitWord cuts the first whitespace-delimited word off s, returning it and the

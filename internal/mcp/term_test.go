@@ -807,15 +807,28 @@ func TestTermMCPStreamableHandshakeAndClose(t *testing.T) {
 	}
 }
 
+// A URL this layer cannot speak is refused with the schemes it CAN speak, not
+// with a dial failure three layers down.
+//
+// The second half used to assert the opposite — that `mcp open .../sse` was
+// refused as the legacy transport. That refusal is gone: the frame channel reads
+// whichever shape the endpoint answers with (a JSON body or one event on a
+// stream), so an endpoint carrying an /sse path is a URL like any other. What
+// was actually unsupported was the SHAPE, and the shape is now handled.
 func TestTermMcpOpenValidatesURL(t *testing.T) {
 	s := newTestServer(t)
 	res := termCall(t, s, map[string]any{"cmd": "mcp open not-a-url"})
-	if !res.IsError || !strings.Contains(toolResultText(res), "http(s) URL") {
-		t.Fatalf("mcp open accepted a non-URL:\n%s", toolResultText(res))
+	body := toolResultText(res)
+	if !res.IsError || !strings.Contains(body, "http(s)") || !strings.Contains(body, "ws(s)") {
+		t.Fatalf("mcp open refused a non-URL without naming what works:\n%s", body)
 	}
-	res = termCall(t, s, map[string]any{"cmd": "mcp open http://127.0.0.1:18765/sse"})
-	if !res.IsError || !strings.Contains(toolResultText(res), "streamable HTTP") {
-		t.Fatalf("mcp open accepted the unsupported SSE transport:\n%s", toolResultText(res))
+
+	// A URL with a scheme but no listener is a connection failure, which is a
+	// different reply from a refusal: the caller has to be able to tell a typo
+	// from a dead endpoint.
+	res = termCall(t, s, map[string]any{"cmd": "mcp open ftp://example.com"})
+	if !res.IsError || !strings.Contains(toolResultText(res), "unsupported scheme") {
+		t.Fatalf("an unknown scheme was not explained:\n%s", toolResultText(res))
 	}
 }
 
