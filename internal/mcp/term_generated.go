@@ -298,6 +298,7 @@ func (s *Server) directiveForward(ctx context.Context, stmt directive.Statement,
 	if stmt.Target != "" {
 		args["session_id"] = stmt.Target
 	}
+	setFlagString(args, stmt, "bind-host", "bind_host")
 	setFlagString(args, stmt, "remote-host", "remote_host")
 	setFlagNumber(args, stmt, "remote-port", "remote_port")
 	setFlagNumber(args, stmt, "local-port", "local_port")

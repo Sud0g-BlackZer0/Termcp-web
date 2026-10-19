@@ -977,16 +977,24 @@ Request:
   "direction": "local",      // "local" | "remote" | "dynamic"
   "remote_host": "localhost",
   "remote_port": 80,
-  "local_host": "0.0.0.0",   // required for remote mode
-  "local_port": 8080          // 0 = auto-assign
+  "bind_host":  "",          // local: what THIS host listens on (default 127.0.0.1)
+  "local_host": "0.0.0.0",   // remote: what the TARGET listens on
+  "local_port": 8080          // 0 = auto-assign (local/dynamic only)
 }
 ```
 
 | direction | Required fields |
 |-----------|-----------------|
-| `local` | `remote_host`, `remote_port` (1-65535) |
+| `local` | `remote_host`, `remote_port` (1-65535); `bind_host` optional |
 | `remote` | `local_host`, `local_port`, `remote_host`, `remote_port` (1-65535) |
-| `dynamic` | none |
+| `dynamic` | `local_port` optional; `bind_host` is refused unless loopback |
+
+`bind_host` and `local_host` name two different machines, which is why they are two
+fields: `local` and `dynamic` listen here, `remote` listens on the target. Setting
+`bind_host` to `0.0.0.0` (or `*`) publishes the tunnel to every interface, and the
+review prompt says so before the forward is created. A `dynamic` forward refuses any
+non-loopback `bind_host`: its SOCKS5 handshake performs no authentication, so it
+would be an open proxy for anything that can reach the port.
 
 Errors: `404` unknown session, `409` the session is closed (DEAD — a closed
 session is read-only and accepts no new forwards).

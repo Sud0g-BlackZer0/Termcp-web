@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **本地转发可以绑定非回环地址（`--bind-host`）**。`-L` / `-D` 此前把监听地址写死成 `127.0.0.1`，而 `--local-host` 这个 flag 从语法到文档都说支持覆盖、实际没有任何一个 local/dynamic 调用点读它——设了也照旧只绑回环。现在监听地址有自己的名字（`bind_host`，`--bind-host`），与 `-R` 的 `local_host`（目标机器绑哪里）分开：`0.0.0.0` 或 `*` 表示发布到本机所有接口。默认仍是回环，因为转发承载的是一条已认证的隧道。扩展模板同理，`bind_host` 是新字段，写在 local/dynamic 声明上的旧 `local_host` 按原意生效而不是继续被忽略。
+
+- **`-D`（SOCKS5）拒绝非回环绑定**。这套 SOCKS5 握手不带认证（与 `ssh -D` 一致），绑到别的接口就等于给能连上它的人一个开放代理。要发布一个具体服务请用 `-L`：它承载一个固定目标，而不是「随便拨」。
+
+- **审阅提示会说出转发绑在哪**。此前 local 分支渲染成 `open local forward :8080 -> …`（冒号前是空的，因为地址恒为回环），把「只在本机」和「开给整个网段」显示成同一句话。现在地址一定出现，非回环还附一句「reachable from the network」。
+
+- **内置回环上的 `-R` 现在能用**。`charmbracelet/ssh` 自带 `ForwardedTCPHandler`，但默认不装进 `RequestHandlers`，且 `ReversePortForwardingCallback` 为 nil 时拒绝一切——两道门都没开，客户端拿到的是 `tcpip-forward request denied by peer`，而文档把这句解释成目标的 GatewayPorts 策略。现在装配好并把绑定地址限制在回环（这条请求的地址来自客户端）。顺带修掉 `-R` 把请求值当 `ListenAddr` 上报的 bug：目标 sshd 答复的真实端口此前被丢弃，`local_port 0` 时报告的是一个拨不通的 `:0`。
+
+- **内置回环握手快了一倍**。临时主机密钥从 RSA-2048 换成 ed25519（客户端必须验 KEX 签名，RSA 约 845µs、ed25519 约 59µs）：每连接 1.55ms → 0.72ms，进程启动的密钥生成 22.7ms → 0.6ms。密钥每次进程启动重新生成、从不用于校验任何东西，RSA 的长度在这里只买成本。
+
 
 ## v0.2.8-rc.2 — 2026-10-19
 

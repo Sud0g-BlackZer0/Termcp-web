@@ -216,7 +216,7 @@ var ops = []Op{
 	{Name: "detect", Kind: KindFlags,
 		Usage: "detect"},
 	{Name: "fwd", Kind: KindFlags, Target: true, TargetOptional: true,
-		Flags:  []string{"action", "session", "remote-host", "remote-port", "local-port", "local-host", "forward-id"},
+		Flags:  []string{"action", "session", "bind-host", "remote-host", "remote-port", "local-port", "local-host", "forward-id"},
 		Usage:  "fwd <session> --action local|remote|dynamic|list|close …",
 		Detail: fwdDetail},
 	{Name: "file", Kind: KindFlags, Target: true,
@@ -505,12 +505,12 @@ An HTTP channel does not spend a shell channel: opening a dozen costs no shells.
 // belong to which direction, and a missing one is reported by the handler as a
 // generic requirement rather than as "this direction does not take that flag".
 const fwdDetail = `Directions and their flags:
-  --action local    --local-port [--local-host] --remote-host --remote-port
+  --action local    --local-port [--bind-host] --remote-host --remote-port
                     termcp listens on local-port; the target dials remote-host:remote-port
   --action remote   --local-port --remote-host --remote-port [--local-host]
                     the TARGET listens on local-port and forwards to remote-host:remote-port
                     from there; the reply echoes it as remote_port
-  --action dynamic  --local-port [--local-host]
+  --action dynamic  --local-port
                     termcp listens as a SOCKS5 proxy; the target dials whatever is asked
   --action list     no flags
   --action close    --forward-id
@@ -521,13 +521,23 @@ is accepted as an alternative.
 --local-port 0 means "any free port" for local and dynamic only, and the reply's
 local_port is the one that was chosen. remote REJECTS 0 ("local_port required
 (1-65535)"): there the number is the port the TARGET binds, so the caller has to
-pick it. Listening addresses, measured rather than assumed: local and dynamic bind
-127.0.0.1, remote binds 0.0.0.0. Override either with --local-host.
+pick it.
+
+Two different addresses, because the side that listens differs:
+  --bind-host   what THIS host listens on for local. Default 127.0.0.1.
+                "0.0.0.0" (or "*") publishes the tunnel to everything that can
+                reach this machine — that is a deliberate act, and the review
+                prompt says so.
+  --local-host  what the TARGET listens on for remote. Default 0.0.0.0.
+
+dynamic has no --bind-host on purpose: the SOCKS5 proxy this server runs performs
+no authentication (same as "ssh -D"), so on any other interface it would be an open
+proxy for whoever can reach it. Use --action local to publish one service instead.
 
 The reply differs by direction, which is easy to misread: local and dynamic report
 the listening address as local_port, while remote reports the port on the TARGET as
-remote_port. To see where a remote forward actually landed, list it — the create
-reply has no address for it.
+remote_port. When the target picks the port for you, the reply carries the number it
+chose, so no second call is needed to find it.
 
 remote depends on the target's sshd: it asks the server to listen, so the address
 and port must be ones that server allows. A refusal comes back as
@@ -535,6 +545,11 @@ and port must be ones that server allows. A refusal comes back as
 AllowTcpForwarding), not a fault in the flags, and a privileged port needs the
 target's sshd to be root. This is why the same call succeeds against one host and
 fails against another.
+
+On the built-in "internal" target a remote forward listens on this same machine
+(termcp itself runs the sshd), so remote and local reach the same place by
+different routes. There --local-host must stay loopback: the in-memory peer is a
+session on this host and is not allowed to ask the server to listen for the network.
 
 A forward dies with its session: the session's ResourceScope closes it, so there
 is no orphaned listener to remember. A listing is a read and is not reviewed;
