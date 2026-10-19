@@ -4,10 +4,9 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/ssh"
 
 	"github.com/open-mcp-ai/termcp/internal/forward"
 )
@@ -92,11 +91,21 @@ func TestRemoteForwardOnInternalEndpoint(t *testing.T) {
 	}
 }
 
-// TestRemoteForwardRefusesNonLoopback pins the other half of the wiring: the
-// bind address arrives in the client's request, so it is checked rather than
-// trusted. An in-memory peer is a session on this host and has no business
-// asking the server to listen for the network.
-func TestRemoteForwardRefusesNonLoopback(t *testing.T) {
+// TestRemoteForwardWildcardAllowed pins the boundary where it actually is.
+//
+// An earlier version of this file asserted the opposite -- that the server refuses
+// a non-loopback bind because the address arrives in the client's request. That
+// reasoning does not survive contact with the transport: Server.Dial is the only
+// way in and production calls it from exactly one place with a one-time credential
+// this process minted, so the "client" asking to listen IS termcp. A guard there
+// would defend a boundary that does not exist, and would do it silently -- the
+// caller reads the refusal as the target sshd's policy.
+//
+// So the address is free here and the decision lives where it can be seen: the
+// forward.open capability queues the request and the review prompt names the
+// address (see summarizeOperation). This test locks in that the transport does not
+// second-guess a bind the reviewed layer already allowed.
+func TestRemoteForwardWildcardAllowed(t *testing.T) {
 	s := New()
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
@@ -106,21 +115,22 @@ func TestRemoteForwardRefusesNonLoopback(t *testing.T) {
 	cli := dialServer(t, s, mintCfg(t, s))
 	defer cli.Close()
 
-	for _, host := range []string{"0.0.0.0", "::"} {
-		ln, err := cli.Listen("tcp", net.JoinHostPort(host, "0"))
-		if err == nil {
-			ln.Close()
-			t.Fatalf("the server allowed a %s reverse-forward bind", host)
-		}
-		if _, ok := err.(*ssh.OpenChannelError); ok {
-			t.Errorf("bind %s failed with %v; want a refusal of the tcpip-forward request", host, err)
-		}
+	// 0.0.0.0 is the address a published tunnel uses; it must reach a real
+	// listener rather than a denial. The port is released immediately: what is
+	// under test is that the request is GRANTED, not what is served on it.
+	ln, err := cli.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("the server refused a wildcard reverse-forward bind: %v", err)
+	}
+	defer ln.Close()
+	if got := ln.Addr().String(); got == "" || strings.HasSuffix(got, ":0") {
+		t.Errorf("listener reports %q, want the bound address", got)
 	}
 }
 
-// TestRemoteForwardLoopbackAllowed is the counterpart to the refusal: the guard
-// must not have blocked the sane case (the test above would still pass if the
-// handler were missing entirely).
+// TestRemoteForwardLoopbackAllowed is the companion case: the ordinary bind must
+// keep working, and it would pass even if the handler were missing entirely --
+// which is why the wildcard case above exists.
 func TestRemoteForwardLoopbackAllowed(t *testing.T) {
 	s := New()
 	if err := s.Start(); err != nil {

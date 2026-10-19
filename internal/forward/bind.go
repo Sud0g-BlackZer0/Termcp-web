@@ -31,12 +31,14 @@ func ResolveBindHost(host string) string {
 
 // IsLoopbackHost reports whether host names only this machine.
 //
-// It is the guard over ReversePortForwardingCallback, where the address comes
-// from the client: the peer of an internal SSH connection is a session on this
-// host, but the address it asks the server to bind is its own argument, so
-// "listen on every interface" has to be refused rather than trusted. Loopback
-// names are resolved through the resolver only for "localhost"; everything else
-// is read as a literal so a DNS answer cannot turn a refusal into a bind.
+// It is the guard on the one forward that has no fixed target: a SOCKS5 proxy
+// dials whatever each connection asks for, so it cannot be published and then
+// reviewed by its destination the way a local forward is. It is NOT a guard over
+// tcpip-forward -- the peer asking the in-memory sshd to bind is this process, so
+// that decision belongs to the review queue, not to the transport.
+//
+// "localhost" is the only name consulted through the resolver; everything else is
+// read as a literal, so a DNS answer cannot turn a refusal into a bind.
 func IsLoopbackHost(host string) bool {
 	h := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(host), "["), "]")
 	if h == "" {

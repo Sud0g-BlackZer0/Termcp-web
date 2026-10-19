@@ -8,7 +8,7 @@
 
 - **审阅提示会说出转发绑在哪**。此前 local 分支渲染成 `open local forward :8080 -> …`（冒号前是空的，因为地址恒为回环），把「只在本机」和「开给整个网段」显示成同一句话。现在地址一定出现，非回环还附一句「reachable from the network」。
 
-- **内置回环上的 `-R` 现在能用**。`charmbracelet/ssh` 自带 `ForwardedTCPHandler`，但默认不装进 `RequestHandlers`，且 `ReversePortForwardingCallback` 为 nil 时拒绝一切——两道门都没开，客户端拿到的是 `tcpip-forward request denied by peer`，而文档把这句解释成目标的 GatewayPorts 策略。现在装配好并把绑定地址限制在回环（这条请求的地址来自客户端）。顺带修掉 `-R` 把请求值当 `ListenAddr` 上报的 bug：目标 sshd 答复的真实端口此前被丢弃，`local_port 0` 时报告的是一个拨不通的 `:0`。
+- **内置回环上的 `-R` 现在能用**。`charmbracelet/ssh` 自带 `ForwardedTCPHandler`，但默认不装进 `RequestHandlers`，且 `ReversePortForwardingCallback` 为 nil 时拒绝一切——两道门都没开，客户端拿到的是 `tcpip-forward request denied by peer`，而文档把这句解释成目标的 GatewayPorts 策略。现在装配好，绑定地址不做限制——能发这条请求的只有 termcp 自己（内置 sshd 只有 `Server.Dial` 这一个入口，生产代码仅一处调用），所以是否允许发布到网络由 `forward.open` 的审阅环节决定，那里看得见地址。顺带修掉 `-R` 把请求值当 `ListenAddr` 上报的 bug：目标 sshd 答复的真实端口此前被丢弃，`local_port 0` 时报告的是一个拨不通的 `:0`。
 
 - **内置回环握手快了一倍**。临时主机密钥从 RSA-2048 换成 ed25519（客户端必须验 KEX 签名，RSA 约 845µs、ed25519 约 59µs）：每连接 1.55ms → 0.72ms，进程启动的密钥生成 22.7ms → 0.6ms。密钥每次进程启动重新生成、从不用于校验任何东西，RSA 的长度在这里只买成本。
 

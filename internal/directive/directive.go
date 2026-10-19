@@ -554,8 +554,7 @@ fails against another.
 
 On the built-in "internal" target a remote forward listens on this same machine
 (termcp itself runs the sshd), so remote and local reach the same place by
-different routes. There --local-host must stay loopback: the in-memory peer is a
-session on this host and is not allowed to ask the server to listen for the network.
+different routes. Both bind addresses work there unchanged.
 
 A forward dies with its session: the session's ResourceScope closes it, so there
 is no orphaned listener to remember. A listing is a read and is not reviewed;

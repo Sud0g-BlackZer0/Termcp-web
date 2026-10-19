@@ -14,7 +14,6 @@ import (
 	"syscall"
 
 	"github.com/charmbracelet/ssh"
-	"github.com/open-mcp-ai/termcp/internal/forward"
 	"github.com/open-mcp-ai/termcp/internal/shell"
 	"github.com/pkg/sftp"
 )
@@ -186,18 +185,23 @@ func New() *Server {
 	// is what the handler consults before binding, so leaving it nil denies
 	// everything even with the handler present.
 	//
-	// The bind address in that request is the CLIENT's argument, so it is checked
-	// rather than trusted: loopback only. An in-memory peer is a session on this
-	// host, which has no reason to ask the server to listen for the network, and a
-	// forward is a tunnel that has already authenticated -- publishing it on
-	// 0.0.0.0 is a decision no client of this transport gets to make.
+	// The callback allows every address, and that is not a missing guard. The only
+	// way to reach this server is Server.Dial, which is called by exactly one place
+	// (session.dialClient) with a one-time credential this process minted -- so the
+	// peer asking the server to listen is termcp itself, and there is no trust
+	// boundary here to defend. Whether a bind address is acceptable is decided
+	// where the decision can be seen: the forward.open capability puts the request
+	// in the review queue, and the prompt names the address and says when it is
+	// reachable from the network. Refusing 0.0.0.0 here would move that decision
+	// into the transport, where nobody approving the operation could see it -- and
+	// silently, because the caller reads the refusal as the target's sshd policy.
 	fwdTCP := &ssh.ForwardedTCPHandler{}
 	srv.RequestHandlers = map[string]ssh.RequestHandler{
 		"tcpip-forward":        fwdTCP.HandleSSHRequest,
 		"cancel-tcpip-forward": fwdTCP.HandleSSHRequest,
 	}
-	srv.ReversePortForwardingCallback = func(_ ssh.Context, bindHost string, _ uint32) bool {
-		return forward.IsLoopbackHost(bindHost)
+	srv.ReversePortForwardingCallback = func(_ ssh.Context, _ string, _ uint32) bool {
+		return true
 	}
 	// Wrap the allocator so the PTY it creates is closed under the same lock the
 	// session handler holds while forking the command onto it (see sessionPTY).

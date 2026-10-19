@@ -29,8 +29,9 @@ func TestResolveBindHost(t *testing.T) {
 	}
 }
 
-// TestIsLoopbackHost pins the guard the SSH server puts in front of
-// tcpip-forward, where the address comes from the client.
+// TestIsLoopbackHost pins the guard on the dynamic (SOCKS5) forward, which is the
+// only forward whose destination is not fixed in advance and so cannot be reviewed
+// by where it points.
 func TestIsLoopbackHost(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
