@@ -520,6 +520,82 @@ func TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt(t *testing.T) {
 	}
 }
 
+// TestMCPRecvDrainsEveryQueuedFrame pins that recv is a QUEUE, not a snapshot.
+//
+// A resident peer answers every request it has been given, so by the time the
+// caller reads, several complete frames are sitting on the channel at once. That
+// is the normal case for an MCP conversation: initialize, then initialized, then
+// tools/list are three lines written back to back, and the replies are waiting.
+//
+// The bug this pins: recv read a WINDOW (max_bytes) and reported 204 whenever the
+// window held no complete frame, even with frames queued behind it. It looked
+// exactly like a lost message — a caller that had written three requests was told
+// "no complete frame yet" while all three replies were in the channel. The
+// workaround was to abandon recv and page the raw stream by hand, which is the
+// behaviour this test makes unnecessary.
+func TestMCPRecvDrainsEveryQueuedFrame(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "cat")
+
+	frames := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call"}`,
+		`{"jsonrpc":"2.0","id":3,"method":"notifications/initialized"}`,
+	}
+	for _, f := range frames {
+		if out := termText(t, s, map[string]any{"cmd": "mcp send " + h + " " + f}); !strings.Contains(out, "202") {
+			t.Fatalf("mcp send did not accept %s:\n%s", f, out)
+		}
+	}
+
+	// Every queued frame must come out of recv, in order, with no 204 in between.
+	// The loop polls rather than sleeping a fixed time: the peer is a process, so
+	// how soon its writes land is not the test's to assume. A 204 is retried
+	// instead of ending the loop, because "not there YET" and "never" are exactly
+	// the two cases the old code could not tell apart.
+	want := []string{`"id":1`, `"id":2`, `"id":3`}
+	var seen []string
+	deadline := time.Now().Add(3 * time.Second)
+	for len(seen) < len(want) && time.Now().Before(deadline) {
+		got := termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)})
+		if strings.Contains(got, "no complete frame yet") {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		for _, w := range want {
+			if strings.Contains(got, w) && !containsStr(seen, w) {
+				seen = append(seen, w)
+			}
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("recv delivered %d of %d queued frames (%v); frames were waiting while recv reported 204",
+			len(seen), len(want), seen)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Errorf("recv delivered frames out of order: got %v, want %v", seen, want)
+			break
+		}
+	}
+
+	// And it is a consumer, not a snapshot: with the queue drained, the next recv
+	// has nothing to give rather than replaying the three frames again.
+	after := termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)})
+	if strings.Contains(after, `"jsonrpc"`) {
+		t.Errorf("recv re-delivered a frame after the queue drained:\n%s", after)
+	}
+}
+
+func containsStr(xs []string, v string) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 // A batch target produces one slot per entry: N questions, N answers.
 func TestTermBatchProducesOneSlotPerTarget(t *testing.T) {
 	s := newTestServer(t)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -61,22 +62,40 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 		Body: "unknown mcp subcommand: " + sub}
 }
 
-// mcpRecvFrame reads exactly one JSON-RPC frame.
+// mcpRecvFrame reads exactly one JSON-RPC frame and advances this handle's cursor
+// past it.
 //
 // The "exactly one" part is the contract: a frame is complete when the bytes parsed
 // as JSON, and a partial one must be held rather than acted on. The read is
 // therefore retried while the buffer does not yet parse — never a blocking read
 // that may return half a message.
 //
-// No offset is passed, deliberately. The read tool's offset defaults to -1, which
-// means "carry on from where the last read stopped"; passing the stream SIZE
-// instead (which is what the old code did) asks for bytes after the end, so recv
-// answered "no complete frame yet" for a frame that was sitting right there in the
-// channel. A recv is a consumer, not a snapshot: it must advance the same cursor
-// every other read advances, or the second call re-delivers the first frame.
+// The cursor is the whole point, and it is kept HERE rather than left to
+// shell_output. shell_output has two modes and neither is a queue consumer: with
+// an offset it is a stateless positional read, and without one it mints a NEW
+// reader at the current end of the stream. A recv that passed neither therefore
+// read from "now" on every call, so a first call that ended mid-frame reported
+// 204 — and the next call started at the new end, skipping the frames that had
+// been waiting behind it. Measured on three queued replies: recv delivered one and
+// silently dropped the other two.
+//
+// With an explicit offset read the position is unambiguous and stateless on the
+// server side, so the map below is the only state and it advances by exactly the
+// frame that was returned. Bytes between frames (the newlines a line-delimited
+// peer writes) are skipped by the trim in firstJSONValue, and the offset advances
+// over them too, so a resumed read starts at the next '{'.
 func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, handle string) envelope.Slot {
+	from := s.recvCursor(handle)
+	// A whole frame has to fit the window, or a single large reply could never be
+	// delivered: the window is a cap on what one recv will consider, not a
+	// statement about how long a frame may be.
+	window := defaultBytesLimit
+	if window < minRecvWindow {
+		window = minRecvWindow
+	}
 	res, fail := s.callTool(ctx, "shell_output", argsOf(
-		"shell_id", handle, "max_bytes", float64(defaultBytesLimit), "timeout", float64(0)))
+		"shell_id", handle, "offset", float64(from),
+		"max_bytes", float64(window), "timeout", float64(0), "strip_ansi", false))
 	if fail != nil {
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
@@ -86,19 +105,64 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 	}
 	body := getString(doc, "output", "")
 	frame, complete := firstJSONValue(body)
+	total := int64(getFloatAny(doc, "total_bytes", 0))
 	if !complete {
+		// `has_more` says the channel holds bytes this window did not return, which
+		// means a frame is longer than the window rather than absent. Reporting 204
+		// there would be a lie the caller cannot act on; a 413 names the problem.
+		if getBool(doc, "has_more", false) && total > from {
+			return envelope.Slot{Code: 413, Headers: map[string]string{
+				"Path": stmt.Path, "Error-Code": "frame_too_large",
+				"Content-Range": envelope.UnsatisfiedRange(total),
+			}, Body: fmt.Sprintf("a frame at offset %d is longer than the %d-byte window", from, window)}
+		}
 		return envelope.Slot{Code: 204, Headers: map[string]string{
 			"Path":          stmt.Path,
-			"Content-Range": envelope.UnsatisfiedRange(int64(getFloatAny(doc, "total_bytes", 0))),
+			"Content-Range": envelope.ContentRange(from, from+int64(len(body))-1, total),
 		}, Body: "no complete frame yet"}
 	}
-	start := int64(getFloatAny(doc, "start_offset", 0))
+	start := from + int64(strings.Index(body, frame))
 	end := start + int64(len(frame))
+	// Advance past the frame, and past the whitespace that separated it from the
+	// next one, so a resumed read starts on a value rather than on a newline.
+	next := end
+	for next < from+int64(len(body)) && strings.IndexByte(" \t\r\n", body[next-from]) >= 0 {
+		next++
+	}
+	s.setRecvCursor(handle, next)
 	return envelope.Slot{
 		Code:    200,
 		Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.ContentRange(start, end-1, end)},
 		Body:    frame,
 	}
+}
+
+// minRecvWindow is the smallest window a recv will read with.
+//
+// defaultBytesLimit is the tool's default for a READ, where a caller usually wants
+// a screenful. A JSON-RPC frame is a different unit: an initialize result with
+// instructions is routinely larger than that, and a window smaller than one frame
+// makes it undeliverable. 1 MiB is far past any legitimate frame and still a bound.
+const minRecvWindow = 1 << 20
+
+// recvCursor and setRecvCursor keep one read position per channel.
+//
+// Keyed by handle without the server's own offset bookkeeping: two callers reading
+// the same channel is a race the protocol does not describe, and serialising here
+// means neither silently loses a frame to the other's window.
+func (s *Server) recvCursor(handle string) int64 {
+	s.recvCursorMu.Lock()
+	defer s.recvCursorMu.Unlock()
+	return s.recvCursors[handle]
+}
+
+func (s *Server) setRecvCursor(handle string, at int64) {
+	s.recvCursorMu.Lock()
+	defer s.recvCursorMu.Unlock()
+	if s.recvCursors == nil {
+		s.recvCursors = make(map[string]int64)
+	}
+	s.recvCursors[handle] = at
 }
 
 // firstJSONValue returns the first complete JSON value in raw.
