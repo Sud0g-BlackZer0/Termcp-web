@@ -211,6 +211,32 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 
 // directiveRemove deletes a session and its logs.
 func (s *Server) directiveRemove(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
+	// A RUNNING SESSION NEEDS --force.
+	//
+	// The distinction rm draws is not "is it alive" but "is the record recoverable",
+	// and it is the one difference between rm and close: close stops a session and
+	// leaves it readable, rm erases manifests, transcript and every trace. Without this
+	// guard, `rm <session>` on a live session erased work that was still happening and
+	// answered 204, which reads exactly like the harmless case.
+	//
+	// The status is read here rather than inside session_delete because the handler
+	// deletes whatever it is given — the decision belongs to the directive whose name
+	// promises permanence.
+	if !boolFlag(stmt, "force") {
+		if sess, bad := s.requireSession(stmt.Target); bad == nil && sess != nil {
+			if st := sess.Info().Status; st == api.SessionRunning {
+				return envelope.Slot{
+					Code: 409,
+					Headers: map[string]string{
+						"Path":       stmt.Path,
+						"Error-Code": "session_running",
+					},
+					Body: "session '" + stmt.Target + "' is running; rm erases it permanently (manifests, transcript, every trace).\n" +
+						"Stop it first with `close " + stmt.Target + "` if you only want it stopped, or pass --force to erase it now.",
+				}
+			}
+		}
+	}
 	res, fail := s.callTool(ctx, "session_delete", argsOf("session_id", stmt.Target))
 	if fail != nil {
 		return s.slotFromFailure(ctx, stmt, fail)

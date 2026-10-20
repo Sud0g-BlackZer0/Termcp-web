@@ -1804,8 +1804,9 @@ Response 200:
 | `pipe_to` | A handle whose stdin receives this reply's bytes; they leave the body |
 | `learn_mode` | Attach each directive's usage line once per reply |
 | `structured_content` | Also send the JSON projection as `structuredContent`. **Off by default**: the two projections carry the same bytes, so the JSON copy is a duplicate a human sees on every call. Pass `true` for a client that reads structured content |
-| `allow_escapes` | Permit raw control bytes in cmd. Default: false. Pass `vars` for data with newlines/quotes |
-| `vars` | Dictionary substituted into `cmd` at AST parse time ($FOO replaced, safely quoted) |
+| `allow_escapes` | Permit raw control bytes in cmd. Default: false. Pass `vars` for data (newlines/quotes) or `args` for command lines |
+| `args` | Positional values for `$1`, `$2`, … (1-based; `$0` is refused). A reference that is the WHOLE payload of `run`/`type` is sent to the terminal verbatim — that is how `pwd; whoami` gets to run as two commands — while a reference beside other words is substituted as one quoted word. `${10}` is the unambiguous form for ten or more |
+| `vars` | Dictionary substituted into `cmd` at parse time ($NAME replaced by one safely quoted word). Use `args` for values that must reach the terminal as shell syntax |
 <!-- END termdoc: args -->
 
 The window parameters are identical to the tool's, with the same names and the
