@@ -175,21 +175,13 @@ func (s *Server) handleTerm(ctx context.Context, request mcpgo.CallToolRequest) 
 // its own opinion about which is which (issue #131 P0-3).
 func (s *Server) Term(ctx context.Context, cmd string, args map[string]any) envelope.Reply {
 	if fromArgs, present, derr := readCmd(args); derr != nil {
-		return envelope.Reply{Slots: []envelope.Slot{{
-			Code:    400,
-			Headers: map[string]string{"Error-Code": "invalid_argument"},
-			Body:    derr.Msg,
-		}}}
+		return envelope.Reply{Slots: []envelope.Slot{badRequestNoPath(derr.Msg)}}
 	} else if present {
 		cmd = fromArgs
 	}
 	win, derr := parseTermArgs(args)
 	if derr != nil {
-		return envelope.Reply{Slots: []envelope.Slot{{
-			Code:    400,
-			Headers: map[string]string{"Error-Code": "invalid_argument"},
-			Body:    derr.Msg,
-		}}}
+		return envelope.Reply{Slots: []envelope.Slot{badRequestNoPath(derr.Msg)}}
 	}
 	t := s.executeTerm(ctx, cmd, win)
 	// The total cap is a property of the REPLY, not of one slot: ten slots each
@@ -349,11 +341,7 @@ func (s *Server) forwardSlotsToStdin(ctx context.Context, target string, slots [
 func (s *Server) parseErrorSlot(err error) envelope.Slot {
 	derr, ok := err.(*directive.Error)
 	if !ok {
-		return envelope.Slot{
-			Code:    400,
-			Headers: map[string]string{"Error-Code": "invalid_argument"},
-			Body:    err.Error(),
-		}
+		return badRequestNoPath(err.Error())
 	}
 	headers := map[string]string{"Error-Code": errorCodeFor(derr)}
 	if derr.Usage != "" {
@@ -422,12 +410,12 @@ func directiveTable() string {
 // errorCodeFor classifies a directive error.
 func errorCodeFor(derr *directive.Error) string {
 	if derr.Op == "" {
-		return "invalid_argument"
+		return CodeInvalidArgument
 	}
 	if _, known := directive.Lookup(derr.Op); !known {
 		return "unknown_directive"
 	}
-	return "invalid_argument"
+	return CodeInvalidArgument
 }
 
 // termReply accumulates the slots of one call and applies the total byte cap.

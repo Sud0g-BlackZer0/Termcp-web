@@ -112,8 +112,7 @@ func (s *Server) directiveInfo(ctx context.Context, stmt directive.Statement, wi
 // dimension report meaningless.
 func (s *Server) directiveResize(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	if len(stmt.Args) < 2 {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: "resize needs rows and cols: `resize a1f3:1 40 120`"}
+		return badRequest(stmt, "resize needs rows and cols: `resize a1f3:1 40 120`")
 	}
 	rows, err := flagNumber(stmt.Args[0])
 	if err != nil {
@@ -124,8 +123,7 @@ func (s *Server) directiveResize(ctx context.Context, stmt directive.Statement, 
 		return numericFlagProblem(stmt, "cols", err)
 	}
 	if rows < 1 || cols < 1 {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: "rows and cols must both be >= 1, got " + stmt.Args[0] + " and " + stmt.Args[1]}
+		return badRequest(stmt, "rows and cols must both be >= 1, got "+stmt.Args[0]+" and "+stmt.Args[1])
 	}
 	res, fail := s.callTool(ctx, "shell_resize", argsOf(
 		"shell_id", stmt.Target,
@@ -136,7 +134,7 @@ func (s *Server) directiveResize(ctx context.Context, stmt directive.Statement, 
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
 	_ = res
-	return envelope.Slot{Code: 204, Headers: map[string]string{"Path": stmt.Path}}
+	return noContent(stmt)
 }
 
 // directiveClose closes a channel or a whole session.
@@ -195,7 +193,7 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 		if _, fail := s.callTool(ctx, "session_terminate", args); fail != nil {
 			return s.slotFromFailure(ctx, stmt, fail)
 		}
-		return envelope.Slot{Code: 204, Headers: map[string]string{"Path": stmt.Path}}
+		return noContent(stmt)
 	}
 
 	if _, bad := s.requireShell(stmt.Target); bad != nil {
@@ -206,7 +204,7 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 	if _, fail := s.callTool(ctx, "shell_close", argsOf("shell_id", stmt.Target)); fail != nil {
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
-	return envelope.Slot{Code: 204, Headers: map[string]string{"Path": stmt.Path}}
+	return noContent(stmt)
 }
 
 // directiveRemove deletes a session and its logs.
@@ -242,7 +240,7 @@ func (s *Server) directiveRemove(ctx context.Context, stmt directive.Statement, 
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
 	_ = res
-	return envelope.Slot{Code: 204, Headers: map[string]string{"Path": stmt.Path}}
+	return noContent(stmt)
 }
 
 // directiveSpan lists a channel's transcript spans.
@@ -293,7 +291,7 @@ func (s *Server) directiveReader(ctx context.Context, stmt directive.Statement, 
 			return s.slotFromFailure(ctx, stmt, fail)
 		}
 		_ = res
-		return envelope.Slot{Code: 204, Headers: map[string]string{"Path": stmt.Path}}
+		return noContent(stmt)
 	}
 	res, fail := s.callTool(ctx, "shell_reader_register", argsOf("shell_id", stmt.Target))
 	if fail != nil {
@@ -314,15 +312,20 @@ func (s *Server) directiveReader(ctx context.Context, stmt directive.Statement, 
 // directiveWatch manages wake-up rules.
 func (s *Server) directiveWatch(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	args := map[string]any{}
-	switch {
+	switch off, hasOff := stmt.Flag("off"); {
 	case boolFlag(stmt, "list"):
 		args["action"] = "list"
-	case func() bool { v, ok := stmt.Flag("off"); return ok && v != "" }():
+	case hasOff && off != "":
 		args["action"] = "unregister"
-		if v, ok := stmt.Flag("off"); ok {
-			args["rule_id"] = v
-		}
+		args["rule_id"] = off
 	default:
+		// TargetOptional is true on watch so `--list` and `--off <rule>` need no
+		// target. The register form DOES need one, and reporting it here gives the
+		// caller the same syntax-level message as the other channel directives rather
+		// than a handler-internal "shell_id is required".
+		if stmt.Target == "" {
+			return badRequest(stmt, "watch needs a target: `watch <handle> [--event <name>]`")
+		}
 		args["action"] = "register"
 		args["shell_id"] = stmt.Target
 		if v, ok := stmt.Flag("event"); ok {
@@ -459,8 +462,7 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	action, _ := stmt.Flag("action")
 	tool, capID, ok := fileToolForAction(action)
 	if !ok {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: "file needs --action read|write|stat|delete|rename|mkdir|urls|perm|link|fs|getwd, got " + quoteOrDash(action)}
+		return badRequest(stmt, "file needs --action read|write|stat|delete|rename|mkdir|urls|perm|link|fs|getwd, got "+quoteOrDash(action))
 	}
 	if slot, refused := s.refuseAction(ctx, stmt, capID); refused {
 		return slot
@@ -525,8 +527,7 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 				sub, _ = stmt.Flag("action-verb")
 			}
 			if sub == "" {
-				return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-					Body: "file --action " + action + " needs the sub-action: --op " + fileSubActions(action)}
+				return badRequest(stmt, "file --action "+action+" needs the sub-action: --op "+fileSubActions(action))
 			}
 			args["action"] = sub
 		}
@@ -602,8 +603,7 @@ func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement,
 	}
 	capID, ok := profileCapability(action)
 	if !ok {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: "profile needs --action list|create|edit|copy|delete, got " + quoteOrDash(action)}
+		return badRequest(stmt, "profile needs --action list|create|edit|copy|delete, got "+quoteOrDash(action))
 	}
 	if slot, refused := s.refuseAction(ctx, stmt, capID); refused {
 		return slot
@@ -701,8 +701,7 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	}
 	capID, ok := extensionCapability(action)
 	if !ok {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: "ext needs --action list|get|create|update|delete|retry, got " + quoteOrDash(action)}
+		return badRequest(stmt, "ext needs --action list|get|create|update|delete|retry, got "+quoteOrDash(action))
 	}
 	if slot, refused := s.refuseAction(ctx, stmt, capID); refused {
 		return slot
@@ -738,16 +737,14 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	   contain a comma, and the split mangled it silently. Its value is the rest
 	   of the line, so it must come last. */
 	if err := setFlagArgvList(args, stmt, "args", "args"); err != nil {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: err.Error()}
+		return badRequest(stmt, err.Error())
 	}
 	/* --headers is the JSON object an HTTP MCP template sends on every relay
 	   request, so it takes the same treatment. It used to be in the parser's
 	   flag list and read by nobody at all, which is worse than not accepting it:
 	   the caller saw success and the header was never sent. */
 	if err := setFlagJSONObject(args, stmt, "headers", "headers"); err != nil {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: err.Error()}
+		return badRequest(stmt, err.Error())
 	}
 	setFlagList(args, stmt, "allow", "allow")
 	setFlagList(args, stmt, "paths", "paths")
@@ -755,8 +752,7 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	   word: it takes a JSON array of declarations. It also used to be accepted
 	   and ignored, so a template's tunnels never came up. */
 	if err := setFlagJSONList(args, stmt, "forwards", "forwards"); err != nil {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: err.Error()}
+		return badRequest(stmt, err.Error())
 	}
 	if boolFlag(stmt, "enabled") {
 		args["enabled"] = true
@@ -834,8 +830,7 @@ func (s *Server) refuseAction(ctx context.Context, stmt directive.Statement, cap
 func (s *Server) directiveJRPC(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	payload := strings.TrimSpace(stmt.Payload)
 	if payload == "" {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: stmt.Op + " needs a subcommand: open|tools|send|recv|call|close"}
+		return badRequest(stmt, stmt.Op+" needs a subcommand: open|tools|send|recv|call|close")
 	}
 	sub, rest := splitWord(payload)
 	switch sub {
@@ -853,8 +848,7 @@ func (s *Server) directiveJRPC(ctx context.Context, stmt directive.Statement, wi
 		}
 		return s.jrpcChannel(ctx, stmt, win, stmt.Op, sub, args)
 	}
-	return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-		Body: "unknown " + stmt.Op + " subcommand: " + sub}
+	return badRequest(stmt, "unknown "+stmt.Op+" subcommand: "+sub)
 }
 
 // splitWord cuts the first whitespace-delimited word off s, returning it and the

@@ -53,9 +53,8 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 	// future entry cannot reintroduce the silent primaryShell fallback.
 	if op, ok := directive.Lookup(stmt.Op); ok && op.TargetKind == directive.TargetChannel {
 		if stmt.Target != "" && !directive.NamesAChannel(stmt.Target) {
-			return []envelope.Slot{{Code: 400, Headers: map[string]string{
-				"Path": stmt.Path, "Error-Code": "invalid_argument",
-			}, Body: directive.ChannelTargetProblem(op, stmt.Target) + "\n" + op.Usage}}
+			return []envelope.Slot{badRequest(stmt,
+				directive.ChannelTargetProblem(op, stmt.Target)+"\n"+op.Usage)}
 		}
 	}
 	switch stmt.Op {
@@ -111,6 +110,45 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		Headers: map[string]string{"Error-Code": "unknown_directive"},
 		Body:    "unknown directive: " + stmt.Op,
 	}}
+}
+
+// noContent returns a 204 slot carrying the statement's Path header.
+func noContent(stmt directive.Statement) envelope.Slot {
+	return envelope.Slot{Code: 204, Headers: map[string]string{"Path": stmt.Path}}
+}
+
+// badRequest returns a 400 slot for an invalid argument or missing parameter.
+func badRequest(stmt directive.Statement, body string) envelope.Slot {
+	return envelope.Slot{
+		Code:    400,
+		Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeInvalidArgument},
+		Body:    body,
+	}
+}
+
+// badRequestNoPath is badRequest for the replies that predate a statement — the
+// argument screen at the entrance, and a directive error raised before a Path
+// exists. There is no Path header to attach, and inventing one would echo a
+// position the caller never wrote.
+func badRequestNoPath(body string) envelope.Slot {
+	return envelope.Slot{
+		Code:    400,
+		Headers: map[string]string{"Error-Code": CodeInvalidArgument},
+		Body:    body,
+	}
+}
+
+// ptrSlot is the address of a slot, for the helpers whose caller must return a
+// *envelope.Slot rather than a value.
+func ptrSlot(s envelope.Slot) *envelope.Slot { return &s }
+
+// notFoundSlot returns a 404 slot with the given error code.
+func notFoundSlot(stmt directive.Statement, code, body string) envelope.Slot {
+	return envelope.Slot{
+		Code:    404,
+		Headers: map[string]string{"Path": stmt.Path, "Error-Code": code},
+		Body:    body,
+	}
 }
 
 // refuseForeignTarget applies namespace isolation to every directive, including
@@ -294,8 +332,7 @@ func (s *Server) directiveType(ctx context.Context, stmt directive.Statement, wi
 // directiveKey presses a named key.
 func (s *Server) directiveKey(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
 	if len(stmt.Args) == 0 {
-		return []envelope.Slot{{Code: 400, Headers: map[string]string{"Error-Code": "invalid_argument", "Path": stmt.Path},
-			Body: "key needs a key name, e.g. `key a1f3:1 enter`"}}
+		return []envelope.Slot{badRequest(stmt, "key needs a key name, e.g. `key a1f3:1 enter`")}
 	}
 	args := argsOf("shell_id", stmt.Target, "key", stmt.Args[0])
 	repeat, err := atoiFlag(stmt, "repeat", 1)
@@ -730,14 +767,7 @@ func getFloatAny(m map[string]any, key string, def float64) float64 {
 // wrote a command line and needs to see WHICH word was wrong — "invalid argument"
 // on a fifty-flag directive is not actionable.
 func numericFlagProblem(stmt directive.Statement, flag string, err error) envelope.Slot {
-	return envelope.Slot{
-		Code: 400,
-		Headers: map[string]string{
-			"Path":       stmt.Path,
-			"Error-Code": "invalid_argument",
-		},
-		Body: "--" + flag + " " + err.Error(),
-	}
+	return badRequest(stmt, "--"+flag+" "+err.Error())
 }
 
 // boolAny reports whether a document field is the literal true.

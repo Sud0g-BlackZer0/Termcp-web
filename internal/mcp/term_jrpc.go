@@ -73,8 +73,7 @@ type jrpcHandle struct {
 // jrpcOpen connects a URL and hands back a handle.
 func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, rawURL string) envelope.Slot {
 	if rawURL == "" {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: op + " open needs a URL"}
+		return badRequest(stmt, op+" open needs a URL")
 	}
 	// The whitelist gate. A session whose template lists capabilities cannot reach
 	// a door it did not name — and before the capability rows existed it could
@@ -201,8 +200,7 @@ func devtoolsSocket(ctx context.Context, rawURL string) (string, error) {
 // stdio form, so an unknown handle there is an error rather than a fallback.
 func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win termArgs, op, sub string, rest []string) envelope.Slot {
 	if len(rest) == 0 {
-		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: op + " " + sub + " needs a handle (the one " + op + " open returned)"}
+		return badRequest(stmt, op+" "+sub+" needs a handle (the one "+op+" open returned)")
 	}
 	handle := rest[0]
 	jrpcChannelsMu.Lock()
@@ -254,8 +252,7 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		// the subcommand is a lie, and a lie that returns an error frame is worse
 		// than a sentence.
 		if h.kind != "mcp" {
-			return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-				Body: "`" + op + " tools` is MCP's tool list; use `" + op + ` call ` + handle + ` '{"method":"…"}'` + "` instead"}
+			return badRequest(stmt, "`"+op+" tools` is MCP's tool list; use `"+op+` call `+handle+` '{"method":"…"}'`+"` instead")
 		}
 		frame := map[string]any{"jsonrpc": "2.0", "method": "tools/list"}
 		return s.jrpcCall(ctx, stmt, h, frame)
@@ -276,8 +273,7 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		}
 		return s.jrpcCall(ctx, stmt, h, frame)
 	}
-	return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-		Body: "unknown " + op + " subcommand: " + sub}
+	return badRequest(stmt, "unknown "+op+" subcommand: "+sub)
 }
 
 // recvContext bounds the wait for a pushed frame by the call's timeout, so recv
@@ -355,15 +351,11 @@ func (s *Server) jrpcReady(ctx context.Context, h *jrpcHandle) error {
 func parseJRPCFrame(stmt directive.Statement, rest []string) (map[string]any, *envelope.Slot) {
 	payload := unquoteWord(strings.TrimSpace(strings.Join(rest, " ")))
 	if payload == "" {
-		return nil, &envelope.Slot{Code: 400,
-			Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body:    "needs a JSON-RPC frame, e.g. call <handle> '{\"method\":\"…\"}'"}
+		return nil, ptrSlot(badRequest(stmt, "needs a JSON-RPC frame, e.g. call <handle> '{\"method\":\"…\"}'"))
 	}
 	var frame map[string]any
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
-		return nil, &envelope.Slot{Code: 400,
-			Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body:    "the frame is not JSON: " + err.Error()}
+		return nil, ptrSlot(badRequest(stmt, "the frame is not JSON: "+err.Error()))
 	}
 	return frame, nil
 }

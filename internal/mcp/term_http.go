@@ -47,11 +47,9 @@ func (s *Server) TermHandler() http.Handler {
 			// gives float64, which is what parseTermArgs reads. An empty body is
 			// legal and means the same thing as an empty call: the guide.
 			if err := dec.Decode(&args); err != nil && err.Error() != "EOF" {
-				writeEnvelope(w, http.StatusBadRequest, envelope.Reply{Slots: []envelope.Slot{{
-					Code:    400,
-					Headers: map[string]string{"Error-Code": "invalid_argument"},
-					Body:    "request body must be a JSON object of term arguments: " + err.Error(),
-				}}})
+				writeEnvelope(w, http.StatusBadRequest, envelope.Reply{Slots: []envelope.Slot{
+					badRequestNoPath("request body must be a JSON object of term arguments: " + err.Error()),
+				}})
 				return
 			}
 		}

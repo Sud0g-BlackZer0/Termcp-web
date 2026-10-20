@@ -41,8 +41,7 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 		default:
 			payload := unquoteWord(strings.TrimSpace(strings.Join(rest, " ")))
 			if payload == "" {
-				return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-					Body: "mcp " + sub + " needs a JSON-RPC frame"}
+				return badRequest(stmt, "mcp "+sub+" needs a JSON-RPC frame")
 			}
 			frame = payload
 		}
@@ -63,8 +62,7 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 		s.dropRecvCursor(handle)
 		return envelope.Slot{Code: 204, Headers: headers}
 	}
-	return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-		Body: "unknown mcp subcommand: " + sub}
+	return badRequest(stmt, "unknown mcp subcommand: "+sub)
 }
 
 // mcpRecvFrame reads exactly one JSON-RPC frame and advances this handle's cursor
