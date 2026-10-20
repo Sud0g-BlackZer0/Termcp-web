@@ -142,6 +142,9 @@ function renderExtensionGrid(rows) {
      an empty list would drop a tick made before the first frame. */
   _extBatch.syncCards(!!_extRows && _extRows.length > 0);
   _extBatch.update();
+  /* The count above the grid updates with the list: whether empty or populated,
+     the readout is permanent. */
+  paintExtensionStat();
   /* The cards are live: a frame that arrives while one is open is what it was
      opened to watch, so every open card repaints from the row that just changed. */
   extRepaintWindows();
@@ -157,6 +160,27 @@ function renderExtensionEmpty() {
   row.className = 'ext-empty';
   row.innerHTML = '<p class="ext-empty-text">' + escapeHtml(t('ext.empty.text')) + '</p>';
   return row;
+}
+
+/* The column's count, painted on the header trigger.
+ *
+ * It used to be a line of its own above the cards, labelled "Extensions:" — under a
+ * header that already said "Extensions", which is the same word twice, one row apart.
+ * On the header the number belongs to the title instead, and the body is left to the
+ * cards. The archive's own count rides its header the same way.
+ *
+ * It does NOT hide at zero, and that is the difference from the archive: an empty
+ * archive has nothing to say, while "no extensions yet" is exactly what an author
+ * needs to see before creating the first one.
+ *
+ * The capacity bar beside it is pure CSS: `html[data-theme="cyberpunk"]` lays it out
+ * and every other theme leaves it `display: none`. The theme also renames the column
+ * to 义体容量 through the catalog, so the same number reads as a capacity there — no
+ * branch here knows which theme is active.
+ */
+function paintExtensionStat() {
+  var badge = document.getElementById('ext-count');
+  if (badge) badge.textContent = String((_extRows || []).length);
 }
 
 function renderExtensionCard(ext) {

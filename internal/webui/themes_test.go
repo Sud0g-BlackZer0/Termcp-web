@@ -240,6 +240,48 @@ func TestBuiltInThemeCopyUsesCatalogKeysAndPlaceholders(t *testing.T) {
 	}
 }
 
+// In the cyberpunk theme the archive column is "Mikoshi" (神舆 / 神輿). Entering
+// it and leaving it speak the setting's own verbs ("进入神舆" / "离开神舆") rather
+// than generic open/close, and an empty archive is "守护你的灵魂" — the construct
+// repository, not a trash heap.
+func TestCyberpunkThemeMikoshiVocabulary(t *testing.T) {
+	f := testThemeFS(t, t.TempDir(), "")
+	data, err := fs.ReadFile(f, "themes/cyberpunk/strings.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog map[string]map[string]string
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		t.Fatal(err)
+	}
+
+	wants := map[string]map[string]string{
+		"zh-Hans": {
+			"archive.expand":     "进入神舆",
+			"archive.fold":       "离开神舆",
+			"archive.empty.hint": "守护你的灵魂",
+		},
+		"zh-Hant": {
+			"archive.expand":     "進入神輿",
+			"archive.fold":       "離開神輿",
+			"archive.empty.hint": "守護你的靈魂",
+		},
+		"en": {
+			"archive.expand":     "Enter the Mikoshi",
+			"archive.fold":       "Leave the Mikoshi",
+			"archive.empty.hint": "Guarding your soul",
+		},
+	}
+	for lang, checks := range wants {
+		for key, want := range checks {
+			got := catalog[lang][key]
+			if got != want {
+				t.Errorf("cyberpunk %s[%q] = %q, want %q", lang, key, got, want)
+			}
+		}
+	}
+}
+
 func TestBuiltInTerminalThemeSettings(t *testing.T) {
 	f := testThemeFS(t, t.TempDir(), "")
 	for _, id := range []string{"default-light", "default-dark", "cyberpunk", "matrix"} {

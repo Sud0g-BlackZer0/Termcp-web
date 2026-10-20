@@ -870,6 +870,58 @@ func TestTheDockStaysStillWhenSelectionStarts(t *testing.T) {
 	}
 }
 
+// The archive header must be right-aligned in BOTH count states.
+//
+// The header's right-hand run is "badge, glyph, label" and the push comes from
+// `margin-left: auto` on its first element. That element is the count badge, and
+// the badge is `hidden` (display: none) whenever the archive is empty — which is
+// the default state, because the column opens folded and usually stays that way.
+// An auto margin on a box that is not laid out moves nothing, so with only that
+// rule the caret stayed at the left edge and the glyph and label sat right beside
+// it, leaving ~173px of empty plate at the right end of a 260px header. Measured
+// in a real browser: glyph at 1192..1214, button right edge at 1420.
+//
+// The fix hands the push to the glyph in exactly that case, so one of the two
+// rules is always live. This test pins both halves plus the markup order the
+// sibling selector depends on.
+func TestTheArchiveHeaderStaysRightAlignedWhenEmpty(t *testing.T) {
+	index := readAssetLF(t, "index.html")
+	trigger := between(t, index, `id="extpanel-toggle"`, "</div>")
+	posOf := func(tag string) int { return strings.Index(trigger, tag) }
+
+	/* The sibling selector below is only expressible because the badge comes
+	   BEFORE the glyph in the markup. If DOM order changes, the fallback rule
+	   silently stops matching and the bug returns with no test failure — unless
+	   this asserts the order the CSS assumes. */
+	badgePos := posOf(`id="extpanel-count"`)
+	glyphPos := posOf(`class="nethub-glyph"`)
+	if badgePos < 0 || glyphPos < 0 {
+		t.Fatal("the archive trigger lost its count badge or its glyph")
+	}
+	if badgePos > glyphPos {
+		t.Error("the count badge must precede the glyph in the markup: the empty-state auto margin is a sibling selector")
+	}
+
+	css := readAssetLF(t, "static/css/workspace.css")
+	for _, want := range []string{
+		// Count present: the badge carries the push and the run ends at the edge.
+		".extpanel .archive-count-badge { margin-left: auto; order: 2; }",
+		// Count absent (badge hidden): the glyph takes it over.
+		".extpanel .archive-count-badge[hidden] + .nethub-glyph { margin-left: auto; }",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("the archive header needs %q, or the empty archive is left-aligned", want)
+		}
+	}
+
+	// Folded, the trigger is a 56px column with the glyph stacked over the count.
+	// A leftover auto margin there pushes the glyph off the column's centre line.
+	folded := between(t, css, ".workspace-frame.ext-collapsed .extpanel .nethub-glyph {", "}")
+	if !strings.Contains(folded, "margin: 0") {
+		t.Errorf("the folded trigger must clear the auto margin; got %q", strings.TrimSpace(folded))
+	}
+}
+
 // Collapsing one column must not put the other one away.
 //
 // The archive deliberately wears the hosts column's frame — same .nethub-btn,
@@ -923,58 +975,6 @@ func TestCollapsingOneColumnLeavesTheOtherAlone(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("the archive body must still collapse with %q; got %q", want, strings.TrimSpace(body))
 		}
-	}
-}
-
-// The archive header must be right-aligned in BOTH count states.
-//
-// The header's right-hand run is "badge, glyph, label" and the push comes from
-// `margin-left: auto` on its first element. That element is the count badge, and
-// the badge is `hidden` (display: none) whenever the archive is empty — which is
-// the default state, because the column opens folded and usually stays that way.
-// An auto margin on a box that is not laid out moves nothing, so with only that
-// rule the caret stayed at the left edge and the glyph and label sat right beside
-// it, leaving ~173px of empty plate at the right end of a 260px header. Measured
-// in a real browser: glyph at 1192..1214, button right edge at 1420.
-//
-// The fix hands the push to the glyph in exactly that case, so one of the two
-// rules is always live. This test pins both halves plus the markup order the
-// sibling selector depends on.
-func TestTheArchiveHeaderStaysRightAlignedWhenEmpty(t *testing.T) {
-	index := readAssetLF(t, "index.html")
-	trigger := between(t, index, `id="extpanel-toggle"`, "</div>")
-	posOf := func(tag string) int { return strings.Index(trigger, tag) }
-
-	/* The sibling selector below is only expressible because the badge comes
-	   BEFORE the glyph in the markup. If DOM order changes, the fallback rule
-	   silently stops matching and the bug returns with no test failure — unless
-	   this asserts the order the CSS assumes. */
-	badgePos := posOf(`id="extpanel-count"`)
-	glyphPos := posOf(`class="nethub-glyph"`)
-	if badgePos < 0 || glyphPos < 0 {
-		t.Fatal("the archive trigger lost its count badge or its glyph")
-	}
-	if badgePos > glyphPos {
-		t.Error("the count badge must precede the glyph in the markup: the empty-state auto margin is a sibling selector")
-	}
-
-	css := readAssetLF(t, "static/css/workspace.css")
-	for _, want := range []string{
-		// Count present: the badge carries the push and the run ends at the edge.
-		".extpanel .archive-count-badge { margin-left: auto; order: 2; }",
-		// Count absent (badge hidden): the glyph takes it over.
-		".extpanel .archive-count-badge[hidden] + .nethub-glyph { margin-left: auto; }",
-	} {
-		if !strings.Contains(css, want) {
-			t.Errorf("the archive header needs %q, or the empty archive is left-aligned", want)
-		}
-	}
-
-	// Folded, the trigger is a 56px column with the glyph stacked over the count.
-	// A leftover auto margin there pushes the glyph off the column's centre line.
-	folded := between(t, css, ".workspace-frame.ext-collapsed .extpanel .nethub-glyph {", "}")
-	if !strings.Contains(folded, "margin: 0") {
-		t.Errorf("the folded trigger must clear the auto margin; got %q", strings.TrimSpace(folded))
 	}
 }
 
@@ -1106,6 +1106,19 @@ func TestTheArchiveColumnKeepsItsCollapseAnimation(t *testing.T) {
 		t.Error("the collapsed archive is a 56px rail; that width must stay a plain length")
 	}
 
+	// The item must still be allowed to shrink: min-width: auto (a grid item's
+	// default) is its min-content width, which can hold the track open past its value.
+	panel := between(t, css, ".workspace-frame > .extpanel {", "}")
+	if panel == "" {
+		t.Fatal("the archive column lost its placement rule")
+	}
+	if !strings.Contains(panel, "min-width: 0") {
+		t.Error("the archive column needs min-width: 0, so its content cannot outvote the track width")
+	}
+	// And `width: 100%` on the item would make an explicit track size moot.
+	if strings.Contains(panel, "width: 100%") {
+		t.Error("the archive column must not be width: 100%: as a grid item it stretches to its track anyway")
+	}
 }
 
 // The export must be COMPLETE — every byte the shell ever printed.

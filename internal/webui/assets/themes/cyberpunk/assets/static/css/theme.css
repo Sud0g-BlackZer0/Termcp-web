@@ -262,7 +262,8 @@
    All three are panels in miniature — a bordered, filled box that reads as a
    fabricated plate — so leaving them out of this rule is what made them plain
    rectangles while every neighbouring key had the cut corner; the menu items were
-   still rectangles for exactly that reason. `--cut` is what makes a 30px key still
+   still rectangles for exactly that reason.
+ `--cut` is what makes a 30px key still
    read as a plate: the key's own rule sets a smaller cut than the panels, so the
    diagonal is one step of a small box rather than a notch on a big one. */
 .workspace-sessions, .modal, .conn-tile.entry-card, .drawer-add,
@@ -330,6 +331,52 @@
   background: var(--accent); box-shadow: 0 0 8px var(--accent);
 }
 .workspace-sessions .section-header:hover { background-image: linear-gradient(90deg, var(--accent-surface), transparent 60%); }
+
+/* Cyberware capacity: the LONG HUD bar on the extensions header.
+ *
+ * The theme renames this column 义体容量 (nav.extensions), so the number against it is
+ * a capacity and gets a segmented energy track behind it. The bar fills the header's
+ * free space — between the title and the count — which is why it is `flex: 1 1 auto`
+ * here: a short bar floating in a wide header reads as decoration, while a track that
+ * spans the row reads as the gauge the number is reporting from.
+ *
+ * The base sheet hides the track; this is the only sheet that lays it out. Same rule
+ * as everywhere else in this theme: restyle a column, never owe it structure. */
+.ext-capacity-track {
+  display: block;
+  flex: 1 1 auto; height: 9px; min-width: 80px;
+  margin: 0 10px 0 6px;
+  background: rgba(0, 0, 0, .55);
+  border: 1px solid var(--accent-border);
+  box-shadow: inset 0 0 6px rgba(0, 0, 0, .8), 0 0 4px var(--accent-surface);
+  position: relative; overflow: hidden;
+}
+.ext-capacity-fill {
+  display: block; height: 100%;
+  /* Segmented, the way a capacity gauge is drawn: solid bars with gaps, not a smooth
+     fill. The pattern IS the look. */
+  background: repeating-linear-gradient(
+    90deg,
+    var(--accent) 0,
+    var(--accent) 7px,
+    transparent 7px,
+    transparent 10px
+  );
+  box-shadow: 0 0 8px var(--accent);
+}
+/* The count is the capacity's NUMBER, so it loses the badge box here: a bordered chip
+   on the end of a filled track is two shapes saying the same thing. Colour and weight
+   carry it instead. */
+.ext-head-bar .ext-count-badge {
+  border-color: transparent; background: none;
+  color: var(--accent); font-size: .72rem;
+  padding: 1px 0 1px 2px; min-width: 0;
+}
+.ext-head-bar .ext-count-badge::after {
+  content: '/∞';
+  margin-left: 2px;
+  opacity: .85;
+}
 
 /* Host cards: a hacker's target list. The left rail is the row's state, the
    label carries the name, and the host line is mono so addresses line up. */

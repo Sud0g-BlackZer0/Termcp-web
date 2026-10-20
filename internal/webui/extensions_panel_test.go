@@ -467,21 +467,130 @@ func TestExtensionToolbarHasOneTick(t *testing.T) {
 	}
 }
 
-// TestExtensionEmptyStateHasNoKeyOfItsOwn pins that the empty column says what an
-// extension is and nothing else: the column already closes with New and Import,
-// and a third "create one" in the middle is the same action twice.
-func TestExtensionEmptyStateHasNoKeyOfItsOwn(t *testing.T) {
+// The extension column's count rides the HEADER, not a line above the cards.
+//
+// It was a separate readout at first — a line labelled "Extensions:" sitting directly
+// under a header that already said "Extensions", which is the same word twice, one row
+// apart. The count belongs to the title, so it moved onto the header trigger, the way
+// the archive's own count rides its header. The column body is left to the cards.
+//
+// It used to be worse than that: the count lived in the EMPTY-STATE sentence ("No
+// extensions yet. An extension is a trimmed session..."), so the moment the first
+// extension existed the only count in the column disappeared. That sentence is
+// retired — a reader with one extension already knows what one is — and the number
+// is permanent.
+func TestExtensionCountRidesTheHeader(t *testing.T) {
+	index := readAssetLF(t, "index.html")
+	head := between(t, index, `class="nethub-btn ext-head-bar"`, `id="ext-head-actions"`)
+	if head == "" {
+		t.Fatal("the extension header bar is gone")
+	}
+	if !strings.Contains(head, `id="ext-count"`) {
+		t.Error("the count must sit on the header trigger, beside the title it counts")
+	}
+	if !strings.Contains(head, `id="ext-head-label"`) {
+		t.Error("the header must keep the column's title")
+	}
+	// It rides the trigger, so it is inside the fold button, not loose in the bar.
+	fold := between(t, index, `class="ext-fold-btn"`, "</button>")
+	if !strings.Contains(fold, `id="ext-count"`) {
+		t.Error("the count belongs INSIDE the fold trigger, so pressing it folds the column")
+	}
+	// Nothing may reintroduce the separate readout line.
+	body := between(t, index, `id="sec-exts-body"`, "</div>")
+	if strings.Contains(body, `id="ext-stat"`) {
+		t.Error("the separate count line above the grid is retired: it repeated the header's own word")
+	}
+
 	ext := readAssetLF(t, "static/js/extensions.js")
-	empty := between(t, ext, "function renderExtensionEmpty()", "\n}\n")
-	if strings.Contains(empty, "<button") || strings.Contains(empty, "ext-empty-add") {
-		t.Errorf("the empty state must not carry a key of its own:\n%s", empty)
+	if !strings.Contains(ext, "function paintExtensionStat(") {
+		t.Error("paintExtensionStat is gone: nothing would keep the count in step with the list")
 	}
-	if !strings.Contains(empty, "t('ext.empty.text')") {
-		t.Error("the empty state still has to say what an extension is")
+	if !strings.Contains(ext, `document.getElementById('ext-count')`) {
+		t.Error("paintExtensionStat must write the header badge")
 	}
-	// The styles and the string that dressed that key are gone with it.
+	if !strings.Contains(ext, "paintExtensionStat();") {
+		t.Error("renderExtensionGrid must call paintExtensionStat, or the count never updates")
+	}
+
+	// EXACTLY ONE auto margin in the row. The shared `.nethub-caret` rule carries
+	// `margin-left: auto` too, so leaving both in place splits the free space and puts
+	// the badge mid-bar with a hole before the caret (measured: badge at 768, caret at
+	// 1174, in a 1032px bar). The badge carries the push; the caret must not.
 	css := readAssetLF(t, "static/css/workspace.css")
-	if strings.Contains(css, "ext-empty-btn") {
-		t.Error("workspace.css still dresses the retired empty-state key")
+	badge := between(t, css, ".ext-head-bar .ext-count-badge {", "}")
+	if !strings.Contains(badge, "margin-left: auto") {
+		t.Error("the count badge carries the row's single auto margin")
+	}
+	if !strings.Contains(css, ".ext-head-bar .nethub-caret { margin-left: 0; }") {
+		t.Error("the caret's own `margin-left: auto` must be suppressed here, or the free space " +
+			"splits between it and the badge and the count drifts into the middle of the bar")
 	}
 }
+
+// The capacity meter is the CYBERPUNK theme's readout, and the switch is CSS.
+//
+// Two repo rules meet here, and doing it any other way breaks one of them:
+//
+//   - every catalog key must carry a non-empty value in all three languages, so
+//     "empty string means no capacity" is not available as a switch;
+//   - a theme may only RESTYLE a column — it may not owe it structure — so the
+//     cyberpunk meter cannot be the only markup that has one.
+//
+// So the markup always carries the track, the base sheet hides it, and
+// `html[data-theme="cyberpunk"]` lays it out. Verified in a real browser at 1440x900:
+// default-light renders "[icon] 扩展 ......... 0 [v]" with the track at display:none;
+// cyberpunk renders "[icon] 义体容量 [704px segmented bar] 0/∞ [v]", both with the
+// badge 8px from the caret at the bar's right end.
+func TestTheCapacityMeterIsAThemeRestyle(t *testing.T) {
+	index := readAssetLF(t, "index.html")
+	head := between(t, index, `class="nethub-btn ext-head-bar"`, `id="ext-head-actions"`)
+
+	// The structure is in the default theme's DOM, not only in the cyberpunk one.
+	for _, id := range []string{`id="ext-capacity-track"`, `class="ext-capacity-fill"`} {
+		if !strings.Contains(head, id) {
+			t.Errorf("the capacity meter (%s) must be part of the default DOM: a theme may restyle "+
+				"a column, never owe it structure", id)
+		}
+	}
+	// Between title and count: the bar is the gauge the number reads from.
+	if i, j := strings.Index(head, `id="ext-head-label"`), strings.Index(head, `id="ext-capacity-track"`); i < 0 || j < 0 || i > j {
+		t.Error("the capacity bar sits AFTER the title and BEFORE the count it explains")
+	}
+	if i, j := strings.Index(head, `id="ext-capacity-track"`), strings.Index(head, `id="ext-count"`); i < 0 || j < 0 || i > j {
+		t.Error("the count must follow the bar: the bar is the gauge, the number is the reading")
+	}
+	// The bar is decoration; the number beside it is what a reader needs.
+	if !strings.Contains(head, `id="ext-capacity-track" aria-hidden="true"`) {
+		t.Error("the bar is decoration and must be aria-hidden; the count carries the fact")
+	}
+
+	base := readAssetLF(t, "static/css/workspace.css")
+	if !strings.Contains(base, ".ext-capacity-track,\n.ext-capacity-fill { display: none; }") {
+		t.Error("the base sheet must hide the bar; cyberpunk is the only theme that lays it out")
+	}
+
+	cyber := readAssetLF(t, "themes/cyberpunk/assets/static/css/theme.css")
+	for _, want := range []string{".ext-capacity-track {", ".ext-capacity-fill {"} {
+		if !strings.Contains(cyber, want) {
+			t.Errorf("cyberpunk must lay out the bar: missing %q", want)
+		}
+	}
+	// It spans the header's free space rather than sitting as a short chip: a gauge
+	// that does not reach reads as decoration.
+	track := between(t, cyber, ".ext-capacity-track {", "}")
+	if !strings.Contains(track, "flex: 1 1 auto") {
+		t.Error("the cyberpunk capacity bar must fill the header's free space (`flex: 1 1 auto`)")
+	}
+	// Segmented, not a smooth fill: that pattern IS the HUD look.
+	if !strings.Contains(cyber, "repeating-linear-gradient") {
+		t.Error("the cyberpunk capacity bar is segmented (repeating-linear-gradient), not a smooth fill")
+	}
+	// The theme renames the column, which is what turns the number into a capacity.
+	strings_ := readAssetLF(t, "themes/cyberpunk/strings.json")
+	if !strings.Contains(strings_, `"nav.extensions": "义体容量"`) {
+		t.Error("cyberpunk must rename the column to 义体容量, or the number reads as a plain count")
+	}
+}
+
+

@@ -103,6 +103,38 @@
 .ext-head-bar .ext-fold-btn:focus-visible {
   outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring);
 }
+/* The column's count, on the header trigger beside its title.
+ *
+ * It used to be a line of its own above the cards, labelled "Extensions:" — directly
+ * under a header that already says "Extensions", which is the same word twice, one
+ * row apart. On the header the number belongs to the title, and the body is left to
+ * the cards. The archive's count rides its own header the same way.
+ *
+ * EXACTLY ONE auto margin may sit in this row, and this is it. The shared
+ * `.nethub-caret` rule also carries `margin-left: auto` (it is the last item in the
+ * hosts and archive headers), so leaving both in place would split the free space
+ * between them: measured, the badge sat at 768 while the caret sat at 1174, with a
+ * 388px hole in a 1032px bar. Suppressing the caret's push here and letting the badge
+ * carry it keeps the pair together at the far end.
+ *
+ * There is no `[hidden]` sibling fallback, unlike the archive's: this badge never
+ * hides — "no extensions" is the state an author needs to see before creating the
+ * first one — so the box that carries the push is always laid out. */
+.ext-head-bar .ext-count-badge {
+  flex: 0 0 auto; margin-left: auto;
+  min-width: 18px; padding: 1px 5px;
+  border: 1px solid var(--accent-border); border-radius: 0;
+  background: var(--accent-surface); color: var(--accent);
+  font: 700 .62rem/1.4 var(--font-mono); letter-spacing: 0; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.ext-head-bar .nethub-caret { margin-left: 0; }
+/* The capacity bar is the CYBERPUNK theme's, and it is hidden by default rather than
+ * absent from the markup: a theme may restyle a column, never owe it structure. The
+ * theme also renames the column to 义体容量 through the catalog, so this same number
+ * reads as a capacity there. */
+.ext-capacity-track,
+.ext-capacity-fill { display: none; }
 /* The keys sit inside the bar, on its right end, separated by a hairline: they
    are a different control from the fold, and the line says so without a gap that
    would break the bar's border into two boxes. */
@@ -555,11 +587,22 @@
    go through the REST routes that the extension tool's own authoring layer
    serves, so a template saved here and one saved by an agent are one file on
    disk and one row in this panel. */
-/* The archive column: the frame's THIRD track, and the panel fills it rather
-   than sizing to its content, or its cards would sit in a narrow strip at the
-   left edge. It is the extension panel's own frame — trigger key, folding body,
-   rail of lamps — which is why nothing here but the placement had to change. */
-.workspace-frame > .extpanel { grid-column: 3; width: 100%; }
+/* The archive column: the frame's THIRD track, and the panel fills it.
+ *
+ * NO `width: 100%`, and that is the whole reason the column could not be sized to
+ * its content. A grid item at `width: 100%` asks for the track's own width, so an
+ * intrinsically-sized track (`max-content` / `fit-content`) has no stable answer
+ * to "how wide is my content" — the item wants whatever the track ends up being,
+ * and the track wants the item's content. The browser resolves that circle by
+ * falling back to the definite value (measured: the track stayed at 260px no
+ * matter what the template said). As a grid item the panel STRETCHES to fill its
+ * track by default, so the declaration was redundant anyway; deleting it is what
+ * lets the track follow the ledger.
+ *
+ * `min-width: 0` is the other half: a grid item defaults to `min-width: auto`,
+ * i.e. its min-content width, and that floor is what the track may not shrink
+ * below — measured at 233px, which silently held the column open on its own. */
+.workspace-frame > .extpanel { grid-column: 3; min-width: 0; }
 /* No width override here any more, and that is the fix rather than an omission.
    The extension column used to be a 260px side track, so a rule forced its cards
    to `width: 100%` — one card per row was the only option there. In the wide
@@ -1130,13 +1173,10 @@
   border-color: var(--border-subtle);
   background: var(--bg-elevated);
 }
-/* The count rides the row's right end: the ticked number is the answer to "did I
-   pick what I meant to", and the row has room for it here where the extension
-   plate puts it on the switch's face (it has a switch; this bar does not). */
+/* The count LEADS the right-hand run, so its gap belongs on its RIGHT: it reads as
+   the label of the two verbs that follow it. `margin-left: auto` (the push that
+   opens the gap after the invert key) is declared with the toolbar above. */
 .archive-tick-count {
-  /* NOT auto: the gap belongs to the export key, so the count rides the far right
-     AFTER the verbs it counts for. A tally to the right of the keys reads as their
-     count; the same number to the left of them reads as their label. */
   font: 700 .72rem/1 var(--font-mono); color: var(--accent);
   font-variant-numeric: tabular-nums;
   min-width: 1.5ch; text-align: right;

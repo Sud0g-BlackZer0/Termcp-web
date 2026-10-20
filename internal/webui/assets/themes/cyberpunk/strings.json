@@ -16,7 +16,7 @@
     "session.dead.badge": "dead",
     "plate.sessions.empty": "No live sessions",
     "plate.archive.empty": "The Mikoshi is empty",
-    "nav.extensions": "Cyberware",
+    "nav.extensions": "Cyberware Capacity",
     "ext.kind.mcp": "MCP",
     "ext.kind.skill": "Skillware",
     "ext.kind.prompt": "Shell",
@@ -66,8 +66,9 @@
     "ext.toast.saveFailed": "Could not write the cyberware: {msg}",
     "sec.archive": "Mikoshi",
     "archive.count": "Mikoshi: {count} sessions",
-    "archive.fold": "Close the Mikoshi",
-    "archive.expand": "Open the Mikoshi"
+    "archive.empty.hint": "Guarding your soul",
+    "archive.fold": "Leave the Mikoshi",
+    "archive.expand": "Enter the Mikoshi"
   },
   "zh-Hans": {
     "nav.nethub": "网络接入仓",
@@ -84,7 +85,7 @@
     "conn.approval.mark": "该配置启动的会话默认开启审核模式",
     "plate.sessions.empty": "暂无活动会话",
     "plate.archive.empty": "神舆为空",
-    "nav.extensions": "义体",
+    "nav.extensions": "义体容量",
     "ext.kind.mcp": "MCP",
     "ext.kind.skill": "技能件",
     "ext.kind.prompt": "终端",
@@ -134,8 +135,9 @@
     "ext.toast.saveFailed": "保存失败：{msg}",
     "sec.archive": "神舆",
     "archive.count": "神舆：{count} 个会话",
-    "archive.fold": "关闭神舆",
-    "archive.expand": "开启神舆"
+    "archive.empty.hint": "守护你的灵魂",
+    "archive.fold": "离开神舆",
+    "archive.expand": "进入神舆"
   },
   "zh-Hant": {
     "nav.nethub": "網路接入倉",
@@ -152,7 +154,7 @@
     "conn.approval.mark": "此設定啟動的工作階段預設開啟審核模式",
     "plate.sessions.empty": "尚無使用中的工作階段",
     "plate.archive.empty": "神輿為空",
-    "nav.extensions": "義體",
+    "nav.extensions": "義體容量",
     "ext.kind.mcp": "MCP",
     "ext.kind.skill": "技能件",
     "ext.kind.prompt": "終端",
@@ -202,7 +204,8 @@
     "ext.toast.saveFailed": "儲存失敗：{msg}",
     "sec.archive": "神輿",
     "archive.count": "神輿：{count} 個工作階段",
-    "archive.fold": "關閉神輿",
-    "archive.expand": "開啟神輿"
+    "archive.empty.hint": "守護你的靈魂",
+    "archive.fold": "離開神輿",
+    "archive.expand": "進入神輿"
   }
 }
