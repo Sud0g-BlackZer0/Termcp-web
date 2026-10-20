@@ -26,6 +26,20 @@
   align-items: start;
   gap: 16px;
   --nethub-w: 276px;
+  /* 260px, A PLAIN LENGTH VALUE, and that is what makes the collapse ANIMATE.
+   *
+   * An intrinsically-sized track (`fit-content(...)` or `max-content`) is not
+   * interpolable: CSS transitions drop any transition between an intrinsic keyword
+   * and a length, which caused "collapsing and expanding the archive lost its smooth
+   * animation and snapped in one frame".
+   *
+   * 260px gives the rows the room they need (a tick, name+meta, and facts column),
+   * keeps the right column balanced with the 276px hosts column, and interpolates
+   * cleanly to/from the 56px collapsed rail over the .24s transition window.
+   *
+   * The "one vertical strip" constraint is carried by the archive grid's own
+   * `flex-wrap: nowrap` below: rows scroll top-to-bottom and never wrap into a
+   * second column. */
   --ext-w: 260px;
   transition: grid-template-columns .24s ease;
 }
@@ -782,21 +796,32 @@
  * count appears: the badge grows to its left, inside the pushed block, so nothing
  * after it has to move. */
 .extpanel .nethub-caret { order: 1; margin-left: 0; }
-/* The auto margin moves to the GROUP, not to the caret: the caret is the first
-   item, so pushing from there pushed everything. `margin-left: auto` on the badge —
-   the first item that belongs to the right-hand run — is what splits the row into
-   "caret at the left edge, everything else at the right edge", and that is the
-   shape asked for: `[▾] ......... 2 🗄 Archive`. */
+/* The auto margin sits on the FIRST element of the right-hand run, and that run
+   is the badge → glyph → label block. The caret keeps its place at the left edge
+   and the rest is pushed right, which is the shape asked for:
+
+     [▾] ......... 2 🗄 Archive
+
+   It is written TWICE, and the second form is the load-bearing one. The badge is
+   `hidden` — display:none — whenever the archive is empty, and an auto margin on
+   a box that is not laid out moves nothing. With only the first rule, the empty
+   archive (the default state, since the column opens folded) pushed nothing: the
+   caret sat at the left edge and the glyph and label sat right next to it, with
+   ~173px of empty plate to their right. That is the "归档和图标没有居右" report,
+   and it is the state a reader sees almost all the time.
+
+   `[hidden] + .nethub-glyph` hands the push to the glyph in exactly that case, so
+   one of the two rules is always live. It is a sibling selector rather than
+   `:has()` because `:has()` is the only thing in this sheet that would raise the
+   browser floor, and the markup order (badge before glyph) is what makes the
+   sibling form expressible at all. */
 .extpanel .archive-count-badge { margin-left: auto; order: 2; }
+.extpanel .archive-count-badge[hidden] + .nethub-glyph { margin-left: auto; }
 .extpanel .nethub-glyph { order: 3; }
 .extpanel .nethub-label { order: 4; }
-/* Let the row breathe: the shared 8px gap is between glyph and label, but the
-   caret needs more separation from them or the three items read as one cluster. */
-.extpanel .nethub-caret + .nethub-glyph { margin-left: 2px; }
-/* Mirroring the pair: the label follows the glyph outward, so the badge and the
-   glyph/label keep the header's own 8px rhythm instead of inheriting the caret's
-   wider separation. */
-.extpanel .archive-count-badge { margin-right: 0; }
+/* Separation inside the right-hand run: the badge has a small air gap before the
+   glyph, and the glyph has the shared 8px gap before the label. */
+.extpanel .archive-count-badge:not([hidden]) { margin-right: 2px; }
 
 /* Folded, the trigger is 56px of glyph: the label and the caret go, and the count
    becomes the glyph's caption rather than sitting on its right. */
@@ -849,7 +874,7 @@
   margin: 0; padding: 0; border: 0; background: none;
   font-size: .58rem; line-height: 1; order: 1;
 }
-.workspace-frame.ext-collapsed .extpanel .nethub-glyph { order: 0; }
+.workspace-frame.ext-collapsed .extpanel .nethub-glyph { order: 0; margin: 0; }
 /* Folded, the archive's BODY goes away — it does not merely get narrower.
  *
  * It had no collapsed rule at all. The frame narrowed `--ext-w` to a 56px spine
@@ -901,6 +926,18 @@
    what says whether it is worth opening. */
 #archive-grid {
   display: flex; flex-direction: column; gap: 2px;
+  /* NOWRAP, and it is load-bearing. This element carries `conn-grid`, whose
+     `flex-wrap: wrap` is right for the card grids it was written for — cards flow
+     along a row and wrap DOWN. Here the axis is flipped: `flex-direction: column`
+     flows rows DOWN, and wrapping then means the overflow goes ACROSS, into a second
+     column. The container is capped (the panel's max-height chain), so the instant
+     the ledger outgrew that cap it split into two side-by-side columns — the second
+     one painting past the panel's right edge. Measured at 1440x900 with 20 rows:
+     two columns at left 1167 and left 1348, the panel ending at 1419.
+
+     The archive is a STRIP of rows, not a grid of them: a ledger reads top to bottom
+     only, and a second column is a second reading order for the same list. */
+  flex-wrap: nowrap;
   padding: 0 6px 6px; min-height: 0;
   flex: 0 1 auto; overflow-y: auto; overscroll-behavior: contain;
   /* `stretch`, not the inherited `flex-start`. This grid carries `conn-grid` — it
@@ -1022,16 +1059,32 @@
 /* ONE control at each end, not a cluster at the left.
  *
  * The invert key answers the whole list, so it sits at the left edge where a list's
- * own verbs live; export and delete answer the SELECTION, they are the destructive
- * pair, and they sit at the right edge under the count they act on. They used to be
- * three keys in a row at the left, which put the destructive pair shoulder to
- * shoulder with the one key that must never be mistaken for it, and left the whole
- * right half of the bar empty.
+ * own verbs live. Export and delete answer the SELECTION, they are the destructive
+ * pair, and they sit at the right edge — furthest from the one key that must never
+ * be mistaken for them. They used to be three keys in a row at the left, which put
+ * the destructive pair shoulder to shoulder with the invert check and left the
+ * whole right half of the bar empty.
  *
- * `margin-left: auto` on export opens the gap. Nothing is ever inserted BEFORE the
- * invert key — that is what keeps it from sliding out from under the pointer on the
- * press that changes the selection. */
-#archive-batch-export { margin-left: auto; }
+ * THE COUNT LEADS THAT RIGHT-HAND RUN, which is the correction this rule carries.
+ * It used to be the last item in the row, so the number sat in the far corner after
+ * the trash key — a readout with no visible relation to the two keys it explains,
+ * reading as a page total rather than as "three rows are ticked, so these two are
+ * live". Leading the run makes the order the sentence the reader needs:
+ *
+ *     [✓] ......... 3 [⤓] [🗑]
+ *
+ * `margin-left: auto` is therefore on the COUNT: it is the first item of the
+ * right-hand run, so pushing from it opens the gap after the invert key and carries
+ * the verbs along. Nothing is ever inserted BEFORE the invert key — that is what
+ * keeps it from sliding out from under the pointer on the press that changes the
+ * selection.
+ *
+ * The count is `hidden` (display: none) while the selection is empty, and an auto
+ * margin on a box that is not laid out moves nothing — the same trap the archive
+ * header fell into. The second rule hands the push to the export key in exactly that
+ * case, so one of the two is always live. */
+#archive-toggle-count { margin-left: auto; }
+#archive-toggle-count[hidden] + #archive-batch-export { margin-left: auto; }
 /* Nothing ticked: the verbs are SHADOW, not absent. `disabled` alone leaves them at
    full contrast in most themes, which reads as "press me and nothing will happen".
    Dropping the opacity and the pointer to near-zero is what makes the state legible

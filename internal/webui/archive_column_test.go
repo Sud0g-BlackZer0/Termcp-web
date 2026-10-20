@@ -921,3 +921,185 @@ func TestCollapsingOneColumnLeavesTheOtherAlone(t *testing.T) {
 		}
 	}
 }
+
+// The archive header must be right-aligned in BOTH count states.
+//
+// The header's right-hand run is "badge, glyph, label" and the push comes from
+// `margin-left: auto` on its first element. That element is the count badge, and
+// the badge is `hidden` (display: none) whenever the archive is empty — which is
+// the default state, because the column opens folded and usually stays that way.
+// An auto margin on a box that is not laid out moves nothing, so with only that
+// rule the caret stayed at the left edge and the glyph and label sat right beside
+// it, leaving ~173px of empty plate at the right end of a 260px header. Measured
+// in a real browser: glyph at 1192..1214, button right edge at 1420.
+//
+// The fix hands the push to the glyph in exactly that case, so one of the two
+// rules is always live. This test pins both halves plus the markup order the
+// sibling selector depends on.
+func TestTheArchiveHeaderStaysRightAlignedWhenEmpty(t *testing.T) {
+	index := readAssetLF(t, "index.html")
+	trigger := between(t, index, `id="extpanel-toggle"`, "</div>")
+	posOf := func(tag string) int { return strings.Index(trigger, tag) }
+
+	/* The sibling selector below is only expressible because the badge comes
+	   BEFORE the glyph in the markup. If DOM order changes, the fallback rule
+	   silently stops matching and the bug returns with no test failure — unless
+	   this asserts the order the CSS assumes. */
+	badgePos := posOf(`id="extpanel-count"`)
+	glyphPos := posOf(`class="nethub-glyph"`)
+	if badgePos < 0 || glyphPos < 0 {
+		t.Fatal("the archive trigger lost its count badge or its glyph")
+	}
+	if badgePos > glyphPos {
+		t.Error("the count badge must precede the glyph in the markup: the empty-state auto margin is a sibling selector")
+	}
+
+	css := readAssetLF(t, "static/css/workspace.css")
+	for _, want := range []string{
+		// Count present: the badge carries the push and the run ends at the edge.
+		".extpanel .archive-count-badge { margin-left: auto; order: 2; }",
+		// Count absent (badge hidden): the glyph takes it over.
+		".extpanel .archive-count-badge[hidden] + .nethub-glyph { margin-left: auto; }",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("the archive header needs %q, or the empty archive is left-aligned", want)
+		}
+	}
+
+	// Folded, the trigger is a 56px column with the glyph stacked over the count.
+	// A leftover auto margin there pushes the glyph off the column's centre line.
+	folded := between(t, css, ".workspace-frame.ext-collapsed .extpanel .nethub-glyph {", "}")
+	if !strings.Contains(folded, "margin: 0") {
+		t.Errorf("the folded trigger must clear the auto margin; got %q", strings.TrimSpace(folded))
+	}
+}
+
+// The ticked count LEADS the right-hand run of the archive toolbar.
+//
+// It used to be the last item in the row, so the number sat in the far corner
+// after the trash key: `[✓] ... [⤓] [🗑] 3`. A readout in the corner has no
+// visible relation to the two keys it explains, and reads as a page total rather
+// than as "three rows are ticked, so these two are live". Measured before the fix
+// at 1440px: count at 1399..1409, export at 1317..1352, delete at 1358..1393.
+//
+// Leading the run makes the row say the sentence in the order the reader needs:
+//
+//     [✓] ......... 3 [⤓] [🗑]
+//
+// which also puts the destructive key in the corner where it belongs, furthest
+// from the invert check it must never be confused with.
+func TestTheArchiveCountLeadsTheRightHandRun(t *testing.T) {
+	index := readAssetLF(t, "index.html")
+	toolbar := between(t, index, `class="archive-keys" role="toolbar"`, "</div>")
+	if toolbar == "" {
+		t.Fatal("the archive toolbar is gone")
+	}
+
+	countPos := strings.Index(toolbar, `id="archive-toggle-count"`)
+	exportPos := strings.Index(toolbar, `id="archive-batch-export"`)
+	deletePos := strings.Index(toolbar, `id="archive-batch-delete"`)
+	invertPos := strings.Index(toolbar, `id="archive-sel-invert"`)
+	if countPos < 0 || exportPos < 0 || deletePos < 0 || invertPos < 0 {
+		t.Fatal("the archive toolbar lost one of its controls")
+	}
+	// Invert first (a list-wide verb), then the count, then the two selection verbs.
+	if !(invertPos < countPos && countPos < exportPos && exportPos < deletePos) {
+		t.Error("the order must be invert, count, export, delete: the count leads the verbs it explains, " +
+			"and the destructive key takes the corner")
+	}
+
+	css := readAssetLF(t, "static/css/workspace.css")
+	/* The gap that pushes the run to the right sits on the COUNT (the first item
+	   of the run), and falls back to export while the count is hidden. Without the
+	   fallback, an empty selection has no auto margin at all — the count is
+	   display:none — and the two verbs slide over to the invert key. */
+	for _, want := range []string{
+		"#archive-toggle-count { margin-left: auto; }",
+		"#archive-toggle-count[hidden] + #archive-batch-export { margin-left: auto; }",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("the toolbar's right-hand run needs %q", want)
+		}
+	}
+	// And the old spelling — the push on export unconditionally — must not return:
+	// it would put the count back in the corner.
+	if regexp.MustCompile(`(?m)^\s*#archive-batch-export\s*\{\s*margin-left:\s*auto`).MatchString(css) {
+		t.Error("export must not carry the push unconditionally: that leaves the count in the far corner again")
+	}
+}
+
+// The archive is a STRIP of rows — one column, top to bottom, always.
+//
+// `#archive-grid` carries `conn-grid`, whose `flex-wrap: wrap` is correct for the
+// card grids it was written for: cards flow along a row and wrap DOWN. The archive
+// flips the axis (`flex-direction: column`), so wrapping means the overflow goes
+// ACROSS — into a second column. The container is height-capped by the panel's
+// max-height chain, so the moment the ledger outgrew that cap it split into two
+// side-by-side columns, the second one painting past the panel's right edge.
+//
+// Measured at 1440x900 with 20 rows and no explicit wrap: `columnCount: 2`, the
+// columns at left 1167 and left 1348 while the panel ended at 1419.
+//
+// A ledger has ONE reading order. A second column is a second one.
+func TestTheArchiveIsOneColumnOfRows(t *testing.T) {
+	css := readAssetLF(t, "static/css/workspace.css")
+	grid := between(t, css, "\n#archive-grid {", "}")
+	if grid == "" {
+		t.Fatal("the archive grid lost its rule")
+	}
+	if !strings.Contains(grid, "flex-direction: column") {
+		t.Errorf("the archive grid must be a column of rows; got %q", strings.TrimSpace(grid))
+	}
+	/* nowrap is the fix, not a stylistic choice: without it the inherited
+	   `flex-wrap: wrap` turns any overflow into a second column. */
+	if !strings.Contains(grid, "flex-wrap: nowrap") {
+		t.Error("the archive grid must declare flex-wrap: nowrap, or a long ledger wraps into a SECOND column " +
+			"instead of scrolling — the second column paints past the panel's right edge")
+	}
+}
+
+// The archive column is a PLAIN LENGTH, and that is what keeps its collapse smooth.
+//
+// An intrinsically-sized track (`fit-content(...)`, `max-content`) is not
+// interpolable: CSS drops a transition between an intrinsic keyword and a length.
+// Measured at 1440x900, sampling every frame across the .24s window:
+//
+//   px -> px             15 distinct widths   (56 -> 67 -> 89 -> ... -> 260)
+//   fit-content -> px    2  distinct widths   (260, then 56: one frame, a snap)
+//
+// The archive opens and closes by class toggle, so BOTH states have to be plain
+// lengths or the animation is silently lost — which is exactly how "the collapse
+// stopped animating and just snaps open" gets reported.
+//
+// The "one vertical strip" constraint lives in the grid rule
+// (`flex-wrap: nowrap`), NOT in the track width: an intrinsic track was reaching for
+// the content and paid for it with the animation.
+func TestTheArchiveColumnKeepsItsCollapseAnimation(t *testing.T) {
+	css := readAssetLF(t, "static/css/workspace.css")
+
+	frame := between(t, css, ".workspace-frame {", "}")
+	if frame == "" {
+		t.Fatal("the workspace frame lost its rule")
+	}
+	/* Both ends of the transition must be plain lengths. A keyword here is the whole
+	   bug: the transition is dropped and the column snaps. */
+	for _, banned := range []string{"fit-content", "max-content", "min-content", "auto"} {
+		if strings.Contains(frame, "--ext-w: "+banned) {
+			t.Errorf("--ext-w must be a plain length: %q cannot be interpolated to the collapsed "+
+				"56px, so the collapse loses its transition and snaps in one frame", banned)
+		}
+	}
+	if !strings.Contains(frame, "--ext-w: 260px") {
+		t.Errorf("the expanded archive track must be a plain 260px; got %q", strings.TrimSpace(frame))
+	}
+	// The transition that the value has to be compatible with.
+	if !strings.Contains(frame, "transition: grid-template-columns") {
+		t.Error("the frame must still transition grid-template-columns, or nothing animates at all")
+	}
+
+	// The collapsed end is the other half of the pair, and it must be a length too.
+	if !strings.Contains(css, ".workspace-frame.ext-collapsed { --ext-w: 56px; }") {
+		t.Error("the collapsed archive is a 56px rail; that width must stay a plain length")
+	}
+
+}
