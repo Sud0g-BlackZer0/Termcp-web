@@ -1,6 +1,7 @@
 package sftp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,29 +13,35 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/clock"
 )
 
+// ErrIsDirectory reports that a read named a directory.
+//
+// A sentinel rather than a formatted string because the MCP layer classifies it: a
+// directory is what the caller asked for and cannot use, which is a 400, while an
+// SSH_FX_FAILURE from the same reader is a genuine fault and stays a 500.
+var ErrIsDirectory = errors.New("is a directory")
+
 // FileResult holds the result of a file_read operation.
 type FileResult struct {
-	// Data, Length and BytesRead carry NO omitempty, so a zero-length read still
-	// reports them.
+	// Data is a POINTER so "the inline body is empty" and "this read has no inline
+	// body" stay distinguishable.
 	//
-	// They used to be omitted when zero, and the reply is built by marshalling this
-	// struct to JSON: reading past the end of a file answered
-	// `{offset: 1, total_size: 1, mode: text}` with no data, no length and no
-	// bytes_read at all, so the caller could not tell "nothing to read" from "the
-	// fields are missing". Every other read reports them; a read that returns
-	// nothing is the one case where the caller most needs to see a zero.
+	// mode=file streams to a local path and never fills Data; mode=text/hex always
+	// does, even when the window is empty. A plain string with no omitempty made the
+	// first case report `data: ""` — a body that looks truncated rather than absent —
+	// while keeping omitempty made the second case drop the field on a zero-length
+	// read, which is the one read where seeing a zero matters.
 	//
-	// Mode and TotalSize already always appear, and LocalPath is genuinely absent
-	// for an inline read, so it keeps its omitempty.
-	Data      string `json:"data"`
-	Mode      string `json:"mode"` // "text" | "hex" | "file"
-	Encoding  string `json:"encoding,omitempty"`
-	TotalSize int64  `json:"total_size"`
-	HasMore   bool   `json:"has_more,omitempty"`
-	Offset    int64  `json:"offset,omitempty"`
-	Length    int64  `json:"length"`
-	BytesRead int64  `json:"bytes_read"`
-	LocalPath string `json:"local_path,omitempty"`
+	// Length and BytesRead keep no omitempty for the same reason they always needed
+	// it: 0 is a fact about the window, not a missing value.
+	Data      *string `json:"data,omitempty"`
+	Mode      string  `json:"mode"` // "text" | "hex" | "file"
+	Encoding  string  `json:"encoding,omitempty"`
+	TotalSize int64   `json:"total_size"`
+	HasMore   bool    `json:"has_more,omitempty"`
+	Offset    int64   `json:"offset,omitempty"`
+	Length    int64   `json:"length"`
+	BytesRead int64   `json:"bytes_read"`
+	LocalPath string  `json:"local_path,omitempty"`
 }
 
 // FileStatResult holds the result of a file_stat operation.

@@ -13,13 +13,14 @@ import (
 // TestFileResultZeroLengthKeepsShape pins bug #11: a zero-length read must still
 // report data, length and bytes_read rather than omitting them under omitempty.
 func TestFileResultZeroLengthKeepsShape(t *testing.T) {
+	empty := ""
 	r := &sftp.FileResult{
 		Mode:      "text",
 		TotalSize: 10,
 		Offset:    10,
 		Length:    0,
 		BytesRead: 0,
-		Data:      "",
+		Data:      &empty,
 	}
 	b, err := json.Marshal(r)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	pkgsftp "github.com/pkg/sftp"
 
 	"github.com/open-mcp-ai/termcp/internal/clock"
+	filesftp "github.com/open-mcp-ai/termcp/internal/sftp"
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
 
@@ -387,10 +388,16 @@ func (s *Server) handleFileFsOp(ctx context.Context, request mcpgo.CallToolReque
 	switch action {
 	case "truncate":
 		remotePath := getString(args, "remote_path", "")
-		size := int64(getFloat64(args, "size", 0))
-		if remotePath == "" {
-			return toolError(CodeInvalidArgument, "%s", "truncate requires remote_path and size"), nil
+		// SIZE IS REQUIRED, AND ZERO IS A REAL SIZE. The old check demanded
+		// remote_path and then used whatever size happened to be there — defaulting
+		// to 0 — so `--action fs --op truncate --remote-path f` with no --size
+		// EMPTIED THE FILE and answered success. A missing size and a size of 0 are
+		// different requests, and the destructive one must not be the default.
+		sizeVal, hasSize := args["size"]
+		if remotePath == "" || !hasSize {
+			return toolError(CodeInvalidArgument, "%s", "truncate requires remote_path and size (use --size 0 to empty a file)"), nil
 		}
+		size := int64(getFloat64(map[string]any{"size": sizeVal}, "size", 0))
 		if err := sftpCli.TruncateFile(remotePath, size); err != nil {
 			return fileErr(err), nil
 		}
@@ -480,6 +487,9 @@ func fileErr(err error) *mcpgo.CallToolResult {
 		return toolError(CodeFileNotFound, "%s", err.Error())
 	case errors.Is(err, os.ErrPermission), errors.Is(err, pkgsftp.ErrSSHFxPermissionDenied):
 		return toolError(CodeForbidden, "%s", err.Error())
+	case errors.Is(err, filesftp.ErrIsDirectory):
+		// A directory is a caller mistake, not a fault: 400 rather than 500.
+		return toolError(CodeInvalidArgument, "%s", err.Error())
 	}
 	return toolError(CodeOperationFailed, "%s", err.Error())
 }

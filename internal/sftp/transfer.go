@@ -107,6 +107,15 @@ func (s *Client) ReadFile(remotePath string, offset, length int64, mode string, 
 	if err != nil {
 		return nil, fmt.Errorf("stat remote file: %w", err)
 	}
+	// A DIRECTORY IS A CALLER MISTAKE, NOT A TRANSPORT FAULT, and it has to be
+	// caught HERE. Reading one through SFTP fails deep inside the reader and comes
+	// back as `sftp: "read /tmp/x: is a directory" (SSH_FX_FAILURE)` — an
+	// ErrSSHFxFailure indistinguishable from a genuine fault, complete with the
+	// protocol's own wording. Stat already knows the answer, so say it in terms the
+	// caller can act on.
+	if fi.IsDir() {
+		return nil, fmt.Errorf("%s: %w; use --action stat to list its contents", remotePath, ErrIsDirectory)
+	}
 	totalSize := fi.Size()
 
 	inlineCap := int64(maxInlineRead)
@@ -161,9 +170,11 @@ func (s *Client) ReadFile(remotePath string, offset, length int64, mode string, 
 	// Encode based on mode.
 	switch mode {
 	case "hex":
-		result.Data = fmt.Sprintf("%x", segment)
+		body := fmt.Sprintf("%x", segment)
+		result.Data = &body
 	case "text", "":
-		result.Data = encoding.EncodeText(segment)
+		body := encoding.EncodeText(segment)
+		result.Data = &body
 	default:
 		return nil, fmt.Errorf("unknown mode %q (use text, hex, or file)", mode)
 	}
