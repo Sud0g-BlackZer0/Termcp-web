@@ -77,6 +77,15 @@ func termArgToolOptions() []mcpgo.ToolOption {
 				opts = append(opts, mcpgo.Enum(d.Enum...))
 			}
 			out = append(out, mcpgo.WithString(d.Name, opts...))
+		case argMap:
+			// A dictionary of string→string. The schema says object with string
+			// values so a client can refuse `{"N": 3}` before the call; readEnvArg
+			// enforces the same rule for the REST entrance, which never reaches
+			// mcp-go's validator.
+			out = append(out, mcpgo.WithObject(d.Name,
+				mcpgo.Description(d.Desc),
+				mcpgo.AdditionalProperties(map[string]any{"type": "string"}),
+			))
 		}
 	}
 	return out

@@ -55,10 +55,9 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 		// so it keeps the same rules; this layer exists so a client sees the refusal
 		// for the call it made, with its own schema in hand.
 		mcpserver.WithInputSchemaValidation(),
-		// Resources are read-only docs (resources/list + resources/read) and the
-		// list is fixed at startup, so no subscribe/listChanged: mcp-go v0.50 has
-		// no subscribe handler, and claiming it would break clients that try.
-		mcpserver.WithResourceCapabilities(false, false),
+		// Prompts are user-triggered playbooks (the `learn-api` one). Resources are
+		// NOT claimed: the tool surface is one command line that describes itself,
+		// so a client has nothing to list or read here (see docs.go).
 		mcpserver.WithPromptCapabilities(false),
 		// The address is NOT in the instructions (see mcpServerInstructions): it
 		// rides on the listing, which must reach the model or no tool can be called.
@@ -94,35 +93,6 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 			OnAfterListTools: []mcpserver.OnAfterListToolsFunc{
 				func(ctx context.Context, _ any, _ *mcpgo.ListToolsRequest, result *mcpgo.ListToolsResult) {
 					s.decorateTools(ctx, result)
-				},
-			},
-			OnAfterListResources: []mcpserver.OnAfterListResourcesFunc{
-				func(ctx context.Context, _ any, _ *mcpgo.ListResourcesRequest, result *mcpgo.ListResourcesResult) {
-					s.decorateResources(ctx, result)
-				},
-			},
-			// mcp-go routes resources by exact URI, so a read of the URI this
-			// instance just advertised must be mapped back to the registration
-			// before routing (see canonicalDocURI).
-			OnBeforeReadResource: []mcpserver.OnBeforeReadResourceFunc{
-				func(_ context.Context, _ any, request *mcpgo.ReadResourceRequest) {
-					request.Params.URI = s.canonicalDocURI(request.Params.URI)
-				},
-			},
-			OnAfterReadResource: []mcpserver.OnAfterReadResourceFunc{
-				func(ctx context.Context, _ any, request *mcpgo.ReadResourceRequest, result *mcpgo.ReadResourceResult) {
-					p := docPathOf(request.Params.URI)
-					if p == "" {
-						return
-					}
-					// ResourceContents is an interface; only the text variant is
-					// served here (see registerDocs).
-					for i, c := range result.Contents {
-						if tc, ok := c.(mcpgo.TextResourceContents); ok {
-							tc.URI = s.docURLFor(ctx, p)
-							result.Contents[i] = tc
-						}
-					}
 				},
 			},
 		}),

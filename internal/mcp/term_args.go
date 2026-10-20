@@ -37,6 +37,11 @@ const (
 	argNumber
 	argBool
 	argEnum
+	// argMap is a JSON object of string→string, for a parameter whose shape is a
+	// dictionary rather than a scalar. It exists for `vars`: a caller that needs to
+	// send data the command text cannot carry safely writes it as a named value here
+	// and references the name in cmd.
+	argMap
 )
 
 // termArgDecl is one argument of the term tool.
@@ -85,7 +90,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "cmd",
 		Kind:    argString,
-		Desc:    "One terminal line, e.g. `run a1f3:1 ls -la`. Empty = guide: usage summary plus what is available to act on now.",
+		Desc:    "One terminal line, e.g. `run a1f3:1 ls -la`. Empty = guide.",
 		DocNote: "Empty or omitted returns the guide (where am I, what can I do, what is here) — never an error. A `cmd` that is present but not a string is a 400: a command that was sent and did not survive the transport is not the same request as one never sent",
 		Def:     "",
 		DefText: "",
@@ -103,7 +108,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "bytes_limit",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Space axis: max raw bytes returned. 0 = handle only, consume nothing. Default: %d.", defaultBytesLimit),
+		Desc:    fmt.Sprintf("Max raw bytes returned; 0 = handle only. Default: %d.", defaultBytesLimit),
 		DocNote: fmt.Sprintf("Max bytes per slot (default %d; `0` = the handle only, no bytes)", defaultBytesLimit),
 		Def:     defaultBytesLimit,
 		DefText: strconv.Itoa(defaultBytesLimit),
@@ -112,7 +117,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "lines_limit",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Space axis: max complete lines returned. 0 = no line limit. Default: %d.", defaultLinesLimit),
+		Desc:    fmt.Sprintf("Max lines returned; 0 = no limit. Default: %d.", defaultLinesLimit),
 		DocNote: fmt.Sprintf("Max lines per slot (default %d; `0` = no line limit)", defaultLinesLimit),
 		Def:     defaultLinesLimit,
 		DefText: strconv.Itoa(defaultLinesLimit),
@@ -121,7 +126,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "total_bytes_limit",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Whole reply: absolute cap across all slots. Default: %d.", defaultTotalBytesLimit),
+		Desc:    fmt.Sprintf("Absolute cap for the whole reply. Default: %d.", defaultTotalBytesLimit),
 		DocNote: fmt.Sprintf("Absolute cap for the whole reply (default %d)", defaultTotalBytesLimit),
 		Def:     defaultTotalBytesLimit,
 		DefText: strconv.Itoa(defaultTotalBytesLimit),
@@ -157,7 +162,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "pipe_to",
 		Kind:    argString,
-		Desc:    "Send this command's stdout into another handle's stdin; those bytes stay out of the reply body. Default: empty (stdout stays in the reply).",
+		Desc:    "Send stdout into another handle's stdin; those bytes leave the reply.",
 		DocNote: "A handle whose stdin receives this reply's bytes; they leave the body",
 		Def:     "",
 		DefText: "",
@@ -165,7 +170,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "learn_mode",
 		Kind:    argBool,
-		Desc:    "Attach the matched directive's one-line usage to its slot (once per directive). Default: false.",
+		Desc:    "Attach the usage line to each directive's slot. Default: false.",
 		DocNote: "Attach each directive's usage line once per reply",
 		Def:     false,
 		DefText: "false",
@@ -188,10 +193,26 @@ var termArgDecls = []termArgDecl{
 		// text instead; `content_only` was the same intent spelled backwards, which
 		// made "no duplicate" the thing you had to ask for. One positive flag with the
 		// quiet default says what it does: pass true and you get the JSON twin.
-		Desc:    "Also send the JSON twin (structuredContent). Default: false — the rendered text alone, since both carry the same bytes.",
+		Desc:    "Also send structuredContent. Default: false (text only; both carry the same bytes).",
 		DocNote: "Also send the JSON projection as `structuredContent`. **Off by default**: the two projections carry the same bytes, so the JSON copy is a duplicate a human sees on every call. Pass `true` for a client that reads structured content",
 		Def:     false,
 		DefText: "false",
+	},
+	{
+		Name:    "allow_escapes",
+		Kind:    argBool,
+		Desc:    "Permit raw control bytes (CR, ^C, ^D, ^Z, ESC) in cmd. Default: false.",
+		DocNote: "Permit raw control bytes in cmd. Default: false. Pass `vars` for data with newlines/quotes",
+		Def:     false,
+		DefText: "false",
+	},
+	{
+		Name:    "vars",
+		Kind:    argMap,
+		Desc:    "Values for `$FOO` in cmd, substituted and quoted at parse time.",
+		DocNote: "Dictionary substituted into `cmd` at AST parse time ($FOO replaced, safely quoted)",
+		Def:     nil,
+		DefText: "",
 	},
 }
 
@@ -259,7 +280,44 @@ func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
 	if err := readBoolArg(args, "structured_content", &w.StructuredContent); err != nil {
 		return termArgs{}, err
 	}
+	if err := readBoolArg(args, "allow_escapes", &w.AllowEscapes); err != nil {
+		return termArgs{}, err
+	}
+	vars, derr := readVarsArg(args)
+	if derr != nil {
+		return termArgs{}, derr
+	}
+	w.Vars = vars
 	return w, nil
+}
+
+// readVarsArg reads the vars dictionary.
+//
+// Keys and values must both be strings: a caller that sent `{"N": 3}` meant the
+// string "3", but guessing that here would mean the substitution and the caller
+// disagree about what was sent. An empty or absent vars is nil, which
+// ParseWithVars reads as "substitute nothing".
+func readVarsArg(args map[string]any) (map[string]string, *directive.Error) {
+	raw, present := args["vars"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return nil, &directive.Error{Msg: "vars must be an object of name: value pairs, got " + typeNameOf(raw)}
+	}
+	out := make(map[string]string, len(obj))
+	for name, v := range obj {
+		if name == "" {
+			return nil, &directive.Error{Msg: "vars has an entry with an empty name; every key must name the variable it fills"}
+		}
+		s, isString := v.(string)
+		if !isString {
+			return nil, &directive.Error{Msg: "vars[" + name + "] must be a string, got " + typeNameOf(v)}
+		}
+		out[name] = s
+	}
+	return out, nil
 }
 
 // readNumberArg fills dst with the argument's value, its declared default when the

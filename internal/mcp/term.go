@@ -66,6 +66,30 @@ type termArgs struct {
 	// the text is the copy a caller usually reads, so the JSON twin is a duplicate
 	// paid for on every call. See envelope.Reply.StructuredContent.
 	StructuredContent bool
+
+	// AllowEscapes permits unquoted control bytes and raw escape sequences in cmd.
+	//
+	// OFF by default, because a raw carriage return in a payload does not print a
+	// character — the terminal treats it as "submit this line", so one call can run
+	// two commands while answering 200 for one. The same is true of Ctrl-C, Ctrl-D
+	// and Ctrl-Z. A caller that genuinely needs those bytes has two honest ways to
+	// say so: this flag, or `vars` (which carries the value as data, never as syntax).
+	AllowEscapes bool
+
+	// Vars holds values substituted into cmd at AST parse time, by variable name.
+	//
+	// It is the channel for data that cannot be written into a command line: a
+	// newline, a quote, a semicolon, a carriage return. The value never appears in
+	// cmd, so nothing in cmd can mangle it, and the substitution quotes it before it
+	// reaches the shell.
+	//
+	// It is NAMED vars, not env, on purpose. `env` means process environment to every
+	// tool that has ever had one, and this is not that: a key here is used only if
+	// cmd mentions it, nothing is exported to the child, and a $NAME cmd refers to
+	// that vars does not define is a 400 rather than the empty string an environment
+	// lookup would give. A caller that read `env` as "set FOO=bar for the child"
+	// would be wrong in all three places.
+	Vars map[string]string
 }
 
 // readCmd extracts the command line, distinguishing the three states a caller can
@@ -157,7 +181,31 @@ func (s *Server) Term(ctx context.Context, cmd string, args map[string]any) enve
 
 // executeTerm parses cmd and runs it, accumulating the reply.
 func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) termReply {
-	file, err := directive.Parse(cmd)
+	// Raw control bytes in the command text are refused unless the caller said
+	// otherwise. A carriage return is the case that matters: the shell parses
+	// `echo a\rNoSuch` as one command of four words, but the terminal treats the \r
+	// as "submit this line" — so one call runs two commands and answers 200 for one.
+	// The same is true of Ctrl-C, Ctrl-D, Ctrl-Z, NUL and ESC.
+	//
+	// The refusal names BOTH ways out, because either is a real choice: turn the
+	// gate off (`allow_escapes`), or pass the data so it never becomes syntax
+	// (`env`). Refusing without saying what to do instead is the half-measure that
+	// leaves a caller stuck.
+	if !win.AllowEscapes {
+		if b, name, found := directive.DetectRawControl(cmd); found {
+			return termReply{win: win, slots: []envelope.Slot{{
+				Code: 400,
+				Headers: map[string]string{
+					"Error-Code": "raw_control_byte",
+				},
+				Body: fmt.Sprintf("cmd contains an unquoted %s, which the terminal acts on instead of printing.\n"+
+					"Either pass the data through the `vars` argument (it is substituted as a quoted value, so it never becomes syntax:\n"+
+					"  vars: {\"NAME\": \"<value>\"}, cmd: \"run <handle> echo $NAME\"),\n"+
+					"or set allow_escapes: true if you really mean to send byte 0x%02x.", name, b),
+			}}}
+		}
+	}
+	file, err := directive.ParseWithVars(cmd, win.Vars)
 	if err != nil {
 		// A directive the caller invented (an alias) is unknown to the parser by
 		// definition, so it is resolved here before the error is reported.

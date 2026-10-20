@@ -42,7 +42,7 @@ MCP tool arguments, results, and error codes are described by the tool schemas f
 can open `/api.html` (Web UI **API / MCP**) for copy-ready MCP config and the HTTP
 API cheat sheet.
 
-## 2. Agent-facing documents (HTTP + MCP resources)
+## 2. Agent-facing documents (HTTP)
 
 The instance serves its own documentation on the same origin, so agents and scripts
 can learn the API without MCP and without version drift:
@@ -63,17 +63,15 @@ carries what a pinned, capability-trimmed session is and how to drive one.
 A written tutorial would be a second description of the protocol, and the one
 thing a second description reliably does is drift.
 
-MCP clients get the same bytes as resources: `resources/list` exposes these files
-and the `resources/read` URIs are exactly the `<origin>/…` HTTP addresses above (one
-URI, two access paths). The `learn-api` prompt primes an agent with these documents
-before it acts. Like the tool listing, these addresses follow the **request**: a
-client that reached the instance through a LAN IP, a proxy name or a tunnel is handed
-that address, and `resources/read` accepts the URI it was just given (the registration
-is matched by path, so any origin works).
+MCP clients do **not** get this file as an MCP resource: the server publishes one
+tool whose command line describes itself, so a model driving termcp over MCP has no
+reason to read the REST endpoint table — it sends `help`, not `GET /api/sessions`.
+The `learn-api` prompt is still published, and it points an agent at this URL when
+the task really is to script against REST.
 
 The instance's own address is published to agents, so one can tell a human where to look
 (watch live output, type a secret, approve a reviewed command) instead of naming a page
-they would have to find themselves. It rides on the `notify_user` tool description in
+they would have to find themselves. It rides on the `term` tool description in
 `tools/list` — the one channel guaranteed to reach the model, since a client that drops
 the tool listing cannot call any tool at all. It is deliberately **not** in the
 `initialize` instructions (optional in MCP, routinely discarded, and a per-request value
@@ -86,23 +84,13 @@ The origin is the one the **request** arrived on — the host the client dialed 
 `X-Forwarded-Proto` — so the client that dialed a LAN IP, a proxy name, or a tunnel host
 is told exactly the address it reached, and a human on that same path can open it. It is
 resolved per request, so one instance can serve several addresses at once, and every
-published address follows it: the `notify_user` description, the `resources/list` URIs,
-the `resources/read` reply and the `learn-api` prompt all name the caller's own address.
+published address follows it: the `term` tool description and the `learn-api` prompt
+both name the caller's own address.
 A proxy must
 keep `Host` (or set `X-Forwarded-Host`); one that rewrites it to an internal upstream
 name makes the published address unusable, since termcp has no self-origin override.
 The one fallback is a request that names no host at all (HTTP/1.0 without `Host`), which
 is handed the discovered bind address instead.
-
-Authentication does not apply to these read-only documents: they carry no data
-and no secrets, and a fresh client (an agent before MCP setup, a script) has to be
-able to fetch them before it can use the API, so `/api.md` stays public even when a
-token is configured. Everything else — Web UI, REST, MCP, WebSocket
-— still requires credentials.
-
-```bash
-curl -fsS "$BASE/api.md"                       # authoritative reference
-```
 
 ## 3. Authentication (optional, off by default)
 
@@ -1816,6 +1804,8 @@ Response 200:
 | `pipe_to` | A handle whose stdin receives this reply's bytes; they leave the body |
 | `learn_mode` | Attach each directive's usage line once per reply |
 | `structured_content` | Also send the JSON projection as `structuredContent`. **Off by default**: the two projections carry the same bytes, so the JSON copy is a duplicate a human sees on every call. Pass `true` for a client that reads structured content |
+| `allow_escapes` | Permit raw control bytes in cmd. Default: false. Pass `vars` for data with newlines/quotes |
+| `vars` | Dictionary substituted into `cmd` at AST parse time ($FOO replaced, safely quoted) |
 <!-- END termdoc: args -->
 
 The window parameters are identical to the tool's, with the same names and the

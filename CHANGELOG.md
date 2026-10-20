@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **不再提供 MCP resources**。工具的公开面只有一个 `term`，而它的参数是一条命令行；这条命令行能描述自己：空 `cmd` 返回引导，`help` 返回全部指令表，`help <directive>` 返回单条用法与坑。所以一个走 MCP 的客户端没有任何理由去读 REST 端点表——它发 `pty internal`，不调 `POST /api/sessions`。`api.md` 本身还在，还在 `GET /api.md` 上，因为它是**传输层**唯一的手写参考（端点、请求体、cursor 语义、认证），这部分 `help` 盖不到；直接写脚本的调用方 curl 那个 URL 即可。把同一批字节再经过 `resources/read` 发一遍没有多买到什么，却多一个 capability 声明和四个钩子要维护。现在初始化不再声答应 `resources`，`resources/list` 由协议层直接拒绕（而不是回一个空列表——“空列表”意思是这个服务器没有文档，“拒绕”意思是它不做 resources）；`learn-api` prompt 保留，因为一个还不知道 `cmd` 就是全部表面的 agent 不会想到去发它。
+
+- **`vars`：把无法写进命令行的数据当成数据送进去**。一个调用方要发一个带换行、引号、分号或回车的载荷，此前没有任何办法：写进 `cmd` 的每一个字符都会被 shell 重新解释，转义则是在赌哪一层先解码。`term` 现在接受 `vars` 字典，`cmd` 里的 `$FOO` / `${FOO}` 在 **AST 解析期**按变量名替换成 `vars["FOO"]`，替换值按 shell 字面量引用（单引号包裹，内含单引号按 `'\''` 转义；双引号内的展开按双引号上下文转义），所以值里的任何字节都到不了语法层。替换是**节点替换**而不是重新解析：参数展开节点的字节区间被换掉，`cmd` 其余字节原位不动，payload 仍然是调用方所写源码的切片。`vars` 里有而 `cmd` 里没用的键不算错；`cmd` 里用了而 `vars` 没定义的变量是 **400**，点名是哪个变量——留给 shell 展开就等于两个输入静默各说各话。叫 `vars` 而不是 `env` 是因为它不是进程环境：没有东西被导出给子进程，没被 `cmd` 提到的键被忽略，而没定义的 `$NAME` 是错误而不是空串——读过 `env` 就会以为那三处行为都反过来。
+
+- **裸控制字节默认拒绝，`allow_escapes` 是明确的放行**。`run h:1 echo a<CR>NoSuch` 在 shell 眼里是四个词的一条命令，在终端眼里 CR 是「回车提交」：一次调用跑了两条命令，却只为一条回 200。Ctrl-C / Ctrl-D / Ctrl-Z / NUL / ESC 同理。现在 `cmd` 里**引号外**的控制字节（C0，`\t` 与空格除外）默认回 400，错误里同时给出两条出路：`allow_escapes: true`，或者用 `vars` 把值当数据送。引号内的控制字节是调用方的字面量，照常放行。
 - **句柄只有一个形式，通道与容器不再有歧义（破坏性）**。通道句柄现在永远是 `<session>:<index>`（`pty internal` 也返回 `abc:1` 而不是裸 `abc`），而裸 session id 是容器。`run` / `type` / `key` / `read` / `resize` / `reader` / `watch` / `span` 这些操作**通道**的指令只接受通道形，传裸 session id 在**解析期**就回 400 并附 usage，不再回退到 primary shell。之前正是这个回退让 `close <session> --force` 变成静默 no-op（#132），也让 `run <session>` 在多通道会话上默默猜一个；`span <session>` 同样在读 primary 通道的记录。`shell_id` 退回内部实现：磁盘目录、SSH channel、日志、审阅队列仍按它索引，但它不再是调用方看得到的第二种写法。
 
 - **序号是稳定身份，不会漂移**。`nextShellIndex` 只增不减且在 `shellStateMu` 内递增，**关闭的通道序号永不复用**（`TestChannelIndexIsMonotonicAndNeverReused`），重启时从 manifest 的 `maxShellIndex` 续接（`TestChannelIndexSurvivesRestart`）。所以 `sid:N` 在整个会话生命周期内指向唯一一个通道：通道关闭后它指向一个 exited 通道，绝不会指向后来新建的那个。

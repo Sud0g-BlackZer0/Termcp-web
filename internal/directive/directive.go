@@ -819,6 +819,72 @@ func Lookup(name string) (Op, bool) {
 	return op, ok
 }
 
+// DetectRawControl scans a command line for raw, unquoted control bytes that the
+// terminal would act on (submit, interrupt, suspend, EOF) rather than print.
+//
+// IT EXCLUDES QUOTED SECTIONS: a single-quoted `'a\rb'` or double-quoted `"a\rb"`
+// is the caller's data, which the parser preserves byte for byte. What is dangerous
+// is an UNQUOTED control byte — `run h:1 echo a\rNoSuch` — which the shell parses
+// as regular words while the terminal treats the \r as "press enter", executing two
+// commands for one call while answering 200.
+//
+// The bytes checked are the C0 control set (< 0x20), excluding the two safe
+// whitespace characters: space (0x20) and TAB (0x09). Everything else — CR (0x0d),
+// Ctrl-C (0x03), Ctrl-D (0x04), Ctrl-Z (0x1a), ESC (0x1b), NUL (0x00) — is a
+// terminal action when unquoted.
+func DetectRawControl(src string) (byte, string, bool) {
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	for i := 0; i < len(src); i++ {
+		b := src[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if b == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+		if b == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if b == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		// Outside single quotes: an unquoted control byte is a terminal action.
+		if !inSingle && !inDouble {
+			if b < 0x20 && b != '\t' && b != '\n' {
+				return b, controlByteName(b), true
+			}
+		}
+	}
+	return 0, "", false
+}
+
+// controlByteName names a control byte for the rejection message.
+func controlByteName(b byte) string {
+	switch b {
+	case '\r':
+		return "carriage return (\\r, 0x0d)"
+	case 0x00:
+		return "NUL byte (0x00)"
+	case 0x03:
+		return "Ctrl-C (0x03, interrupt)"
+	case 0x04:
+		return "Ctrl-D (0x04, EOF)"
+	case 0x1a:
+		return "Ctrl-Z (0x1a, suspend)"
+	case 0x1b:
+		return "ESC (0x1b, terminal escape sequence)"
+	default:
+		return fmt.Sprintf("control byte 0x%02x", b)
+	}
+}
+
 // Parse reads cmd into statements.
 //
 // Statements are separated by `;` and newlines — the shell's own sequencing —
@@ -827,8 +893,43 @@ func Lookup(name string) (Op, bool) {
 // wants (and one reply slot), whereas `run a:1 'x'; run b:1 'y'` asks two
 // questions and gets two slots.
 func Parse(src string) (*File, error) {
+	return ParseWithVars(src, nil)
+}
+
+// ParseWithVars reads cmd into statements, with values from vars substituted at
+// the AST level before anything is sliced out of the source.
+//
+// WHY SUBSTITUTE IN THE AST AND NOT IN THE SHELL. A caller that wants to send a
+// payload containing a quote, a newline, a semicolon or a carriage return has no
+// way to write it into cmd: every one of those either ends the statement or is
+// re-interpreted by the shell that eventually receives it. Escaping it is a
+// guessing game about which layer will decode it. vars is the way out — the value
+// never appears in the command text, so nothing in the command text can mangle
+// it.
+//
+// It is NOT a process environment: nothing here is exported to the child, a key
+// vars defines but cmd never mentions is ignored, and a $NAME that vars does not
+// define is an error rather than an empty expansion. Those three differences are
+// why the argument is called vars and not env (see termArgs.Vars).
+//
+// The substitution is a NODE REPLACEMENT, not a reparse: the parameter expansion
+// node's byte range is replaced with the value, and every other byte of src stays
+// exactly where the caller put it. That keeps the zero-rewrite guarantee the rest
+// of this package rests on — the payload is still a slice of the source the caller
+// wrote, only with the named holes filled in.
+//
+// A name in vars that does not appear in cmd is not an error: cmd and vars are two
+// independent inputs, and a caller may share one vars block across several calls.
+func ParseWithVars(src string, vars map[string]string) (*File, error) {
 	if strings.TrimSpace(src) == "" {
 		return &File{Empty: true}, nil
+	}
+	if len(vars) > 0 {
+		substituted, err := substituteVars(src, vars)
+		if err != nil {
+			return nil, &Error{Msg: "cannot parse cmd: " + err.Error()}
+		}
+		src = substituted
 	}
 	parser := syntax.NewParser()
 	file, err := parser.Parse(strings.NewReader(src), "")
@@ -859,6 +960,132 @@ func Parse(src string) (*File, error) {
 		return &File{Empty: true}, nil
 	}
 	return out, nil
+}
+
+// substituteVars fills every parameter expansion that names a key in vars with that
+// key's value, leaving every other byte of src untouched.
+//
+// THE VALUE IS INSERTED AS A QUOTED WORD, not spliced in raw. That is the whole
+// point of the vars channel: a value may contain a space, a quote, a semicolon or a
+// newline, and any of those spliced bare into a command line becomes SHELL SYNTAX
+// instead of data. Quoting happens here, once, from the raw bytes the caller sent,
+// so the layer that decodes is the same layer that encoded.
+//
+// A name the caller used but vars does not define is a 400, not a pass-through.
+// Leaving it for the shell would make the two inputs disagree silently: the caller
+// wrote `$FOO` intending vars, and got whatever the shell happened to have. That is
+// the same class of quiet substitution this protocol keeps refusing: say which
+// word was wrong, before anything runs.
+//
+// Single quotes are used because they survive every shell: nothing inside them is
+// expanded, no escape is interpreted. A value containing a single quote is closed,
+// the quote escaped, and reopened — the standard `'` → `'\''` spelling.
+func substituteVars(src string, vars map[string]string) (string, error) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(src), "")
+	if err != nil {
+		// The error is reported by the caller's own Parse; this pass is only here to
+		// find the substitutions.
+		return src, nil
+	}
+
+	type replacement struct {
+		start, end int
+		text       string
+	}
+	var reps []replacement
+	var missing []string
+	seen := map[string]bool{}
+
+	var walk func(node syntax.Node)
+	visitWordPart := func(part syntax.WordPart) {
+		switch p := part.(type) {
+		case *syntax.ParamExp:
+			name := p.Param.Value
+			value, ok := vars[name]
+			if !ok {
+				if !seen[name] {
+					seen[name] = true
+					missing = append(missing, name)
+				}
+				return
+			}
+			reps = append(reps, replacement{
+				start: int(p.Pos().Offset()),
+				end:   int(p.End().Offset()),
+				text:  shellSingleQuote(value),
+			})
+		case *syntax.DblQuoted:
+			// Inside double quotes the value must stay inside those quotes, so the
+			// quoting above would nest wrongly. A double-quoted expansion is
+			// replaced with the value escaped for a double-quoted context.
+			for _, inner := range p.Parts {
+				if pe, ok := inner.(*syntax.ParamExp); ok {
+					value, found := vars[pe.Param.Value]
+					if !found {
+						if !seen[pe.Param.Value] {
+							seen[pe.Param.Value] = true
+							missing = append(missing, pe.Param.Value)
+						}
+						continue
+					}
+					reps = append(reps, replacement{
+						start: int(pe.Pos().Offset()),
+						end:   int(pe.End().Offset()),
+						text:  shellDoubleQuoteBody(value),
+					})
+				}
+			}
+		}
+	}
+	walk = func(node syntax.Node) {
+		switch n := node.(type) {
+		case *syntax.CallExpr:
+			for _, a := range n.Args {
+				for _, part := range a.Parts {
+					visitWordPart(part)
+				}
+			}
+		case *syntax.BinaryCmd:
+			walk(n.X)
+			walk(n.Y)
+		case *syntax.Stmt:
+			if n.Cmd != nil {
+				walk(n.Cmd)
+			}
+		}
+	}
+	for _, stmt := range file.Stmts {
+		walk(stmt)
+	}
+
+	if len(missing) > 0 {
+		return "", fmt.Errorf("vars does not define %s; pass it in the `vars` argument, or drop the $ so the shell expands it",
+			"$"+strings.Join(missing, ", $"))
+	}
+	if len(reps) == 0 {
+		return src, nil
+	}
+
+	// Apply from the end backwards so earlier offsets stay valid.
+	sort.Slice(reps, func(i, j int) bool { return reps[i].start > reps[j].start })
+	out := []byte(src)
+	for _, r := range reps {
+		out = append(out[:r.start], append([]byte(r.text), out[r.end:]...)...)
+	}
+	return string(out), nil
+}
+
+// shellSingleQuote renders a value as a single-quoted shell word.
+func shellSingleQuote(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'"
+}
+
+// shellDoubleQuoteBody renders a value for insertion INSIDE existing double
+// quotes: backslash, double quote and dollar must be escaped, and a literal
+// newline is left as-is (it is data inside quotes).
+func shellDoubleQuoteBody(v string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
+	return r.Replace(v)
 }
 
 // leadCall finds the first CallExpr of a statement, in source order.
