@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -365,9 +366,6 @@ func (s *Server) handleFileFsOp(ctx context.Context, request mcpgo.CallToolReque
 	args := request.GetArguments()
 	sessionID := strings.TrimSpace(getString(args, "session_id", ""))
 	action := getString(args, "action", "")
-	// realpath and statvfs are reads; only truncate changes the host.
-	if action == "truncate" {
-	}
 
 	if sessionID == "" {
 		return toolError(CodeInvalidArgument, "%s", "session_id required"), nil
@@ -396,6 +394,27 @@ func (s *Server) handleFileFsOp(ctx context.Context, request mcpgo.CallToolReque
 		canonical, err := sftpCli.RealPath(remotePath)
 		if err != nil {
 			return fileErr(err), nil
+		}
+		// TWO SERVERS, TWO MEANINGS OF "REAL PATH".
+		//
+		// SSH_FXP_REALPATH is only specified to make a path absolute and clean it.
+		// OpenSSH goes further and resolves symlinks; pkg/sftp's server does not —
+		// it calls filepath.Abs and stops. So `realpath symlink` answered the link's
+		// own path on the internal profile and the target's path on a real host: the
+		// same directive, two answers, and the caller cannot tell which one it got.
+		//
+		// The internal profile's filesystem IS this process's filesystem, so the
+		// missing step can be taken here. A remote host keeps whatever its server
+		// does: resolving its symlinks would mean walking them over SFTP, and
+		// inventing a second answer for a host that already answered is worse than
+		// reporting the answer it gave.
+		// Resolved here rather than up front: only this branch needs the session
+		// record, and sftpClient already proved the session exists and is running.
+		if sess, serr := s.requireRunningSession(sessionID); serr == nil && canonical != "" &&
+			sess.Info().SSHEndpoint == "internal" {
+			if resolved, rerr := filepath.EvalSymlinks(canonical); rerr == nil {
+				canonical = resolved
+			}
 		}
 		return jsonResult(map[string]any{"canonical_path": canonical}), nil
 	case "statvfs":

@@ -14,14 +14,26 @@ import (
 
 // FileResult holds the result of a file_read operation.
 type FileResult struct {
-	Data      string `json:"data,omitempty"`
+	// Data, Length and BytesRead carry NO omitempty, so a zero-length read still
+	// reports them.
+	//
+	// They used to be omitted when zero, and the reply is built by marshalling this
+	// struct to JSON: reading past the end of a file answered
+	// `{offset: 1, total_size: 1, mode: text}` with no data, no length and no
+	// bytes_read at all, so the caller could not tell "nothing to read" from "the
+	// fields are missing". Every other read reports them; a read that returns
+	// nothing is the one case where the caller most needs to see a zero.
+	//
+	// Mode and TotalSize already always appear, and LocalPath is genuinely absent
+	// for an inline read, so it keeps its omitempty.
+	Data      string `json:"data"`
 	Mode      string `json:"mode"` // "text" | "hex" | "file"
 	Encoding  string `json:"encoding,omitempty"`
 	TotalSize int64  `json:"total_size"`
 	HasMore   bool   `json:"has_more,omitempty"`
 	Offset    int64  `json:"offset,omitempty"`
-	Length    int64  `json:"length,omitempty"`
-	BytesRead int64  `json:"bytes_read,omitempty"`
+	Length    int64  `json:"length"`
+	BytesRead int64  `json:"bytes_read"`
 	LocalPath string `json:"local_path,omitempty"`
 }
 
