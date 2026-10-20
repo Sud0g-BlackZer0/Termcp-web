@@ -242,6 +242,48 @@ func (h *Handler) handleCloseShell(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleArchiveShell closes one shell channel and KEEPS its record
+// (POST /api/shells/{id}/archive).
+//
+// This is what the terminal tab's X calls. DELETE /api/shells/{id} stays the erase:
+// it stops the channel and drops the record, so nothing addresses the transcript
+// afterwards. Both exist because both are wanted, and the UI's ordinary close needs
+// the first, not the second.
+//
+// A missing shell answers 204 like its DELETE twin: the caller's intent — this
+// channel is not running — is already true, and an error would only teach the UI to
+// ignore errors.
+func (h *Handler) handleArchiveShell(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	// Same gate as close: stopping a channel is one capability whichever verb carries
+	// it, and an extension that never granted shell_close must not have its channel
+	// stopped by a spelling it did not expect.
+	if sess := h.sessionOwning(id, id); restRefuseTool(w, sess, capability.ShellClose) {
+		return
+	}
+	// The internal primary shell outlives its tab; closing it is a no-op, and
+	// archiving it would claim a record for a shell that is still running.
+	if sess := h.Sessions.GetByShellID(id); sess != nil && sess.IsInternalPrimaryShell(id) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if cs := h.Sessions.GetChildShell(id); cs != nil {
+		_, _ = h.Sessions.ArchiveChildShell(id)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// Already gone: nothing to stop, nothing to record.
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleClosePrimaryShell is the compatibility POST /api/sessions/{id}/close-shell path.
 // Path id is a session_id: close that session's primary shell only.
 func (h *Handler) handleClosePrimaryShell(w http.ResponseWriter, r *http.Request) {

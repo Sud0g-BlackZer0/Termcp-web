@@ -67,6 +67,20 @@ type ChildShell struct {
 	// and TerminateShell can check it without extra locking; see
 	// CloseChildShell and the watcher's store-then-recheck in startReaders.
 	closed atomic.Bool
+	// archived marks a shell that was CLOSED but KEPT (ArchiveChildShell).
+	//
+	// Closing and erasing are two different acts and only one of them was
+	// available: the tab's X called CloseChildShell, which stops the channel and
+	// deletes the record, so a closed channel left nothing behind to look at —
+	// no row in the archive, no entry in the session's snapshot, and "where did
+	// that channel go?" had no answer anywhere in the UI. The transcript was on
+	// disk the whole time; only the metadata that addresses it was gone.
+	//
+	// So a closed-but-kept shell sets this flag. It is out of the live map (its
+	// tab must not come back) and IN the per-shell snapshot (with an exit status,
+	// so a live session's view still filters it out while the archive — which
+	// reads the snapshot — can show it). DELETE remains what it was: the erase.
+	archived atomic.Bool
 }
 
 // statusValue reads the lifecycle status. The zero ChildShell reports "", the
