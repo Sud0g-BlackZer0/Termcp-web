@@ -43,18 +43,18 @@ func (s *Client) StreamReadTo(w io.Writer, remotePath string, offset, length int
 }
 
 // StreamWriteFrom reads raw bytes from r and writes them to remotePath at the given
-// offset. offset=0 truncates the file; offset>0 writes at that position without
-// truncation. Uses io.Copy to stream without buffering in memory.
-func (s *Client) StreamWriteFrom(r io.Reader, remotePath string, offset int64) (int64, error) {
-	flag, offset := writeOpenFlags(offset)
+// offset. A nil offset truncates the file; a pointer to 0 overwrites from the first
+// byte without truncating. Uses io.Copy to stream without buffering in memory.
+func (s *Client) StreamWriteFrom(r io.Reader, remotePath string, offset *int64) (int64, error) {
+	flag, off := writeOpenFlags(offset)
 	f, err := s.client.OpenFile(remotePath, flag)
 	if err != nil {
 		return 0, fmt.Errorf("open remote file: %w", err)
 	}
 	defer f.Close()
 
-	if offset > 0 {
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+	if off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
 			return 0, fmt.Errorf("seek: %w", err)
 		}
 	}
@@ -172,14 +172,14 @@ func (s *Client) ReadFile(remotePath string, offset, length int64, mode string, 
 }
 
 // WriteFile writes data to a remote file, either inline or from a local file.
-func (s *Client) WriteFile(remotePath string, offset int64, data string, mode string, localPath string, localOffset, length int64) (int64, error) {
+func (s *Client) WriteFile(remotePath string, offset *int64, data string, mode string, localPath string, localOffset, length int64) (int64, error) {
 	if localPath != "" {
 		return s.writeFromLocal(remotePath, offset, localPath, localOffset, length)
 	}
 	return s.writeInline(remotePath, offset, data, mode)
 }
 
-func (s *Client) writeInline(remotePath string, offset int64, data string, mode string) (int64, error) {
+func (s *Client) writeInline(remotePath string, offset *int64, data string, mode string) (int64, error) {
 	var raw []byte
 	switch mode {
 	case "hex":
@@ -194,7 +194,7 @@ func (s *Client) writeInline(remotePath string, offset int64, data string, mode 
 		return 0, fmt.Errorf("unknown mode %q", mode)
 	}
 
-	flag, offset := writeOpenFlags(offset)
+	flag, off := writeOpenFlags(offset)
 	f, err := s.client.OpenFile(remotePath, flag)
 	if err != nil {
 		return 0, fmt.Errorf("open remote file: %w", err)
@@ -205,8 +205,8 @@ func (s *Client) writeInline(remotePath string, offset int64, data string, mode 
 	// starts at 0, so writing at 0 needs no seek; writing anywhere else does. This
 	// is the half of the offset-0 bug that made it invisible: the flag was right
 	// and the position was right, so only the truncate decision was wrong.
-	if offset > 0 {
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+	if off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
 			return 0, fmt.Errorf("seek: %w", err)
 		}
 	}
@@ -217,7 +217,7 @@ func (s *Client) writeInline(remotePath string, offset int64, data string, mode 
 	return int64(n), nil
 }
 
-func (s *Client) writeFromLocal(remotePath string, offset int64, localPath string, localOffset, length int64) (int64, error) {
+func (s *Client) writeFromLocal(remotePath string, offset *int64, localPath string, localOffset, length int64) (int64, error) {
 	localFile, err := os.Open(localPath)
 	if err != nil {
 		return 0, fmt.Errorf("open local file: %w", err)
@@ -235,15 +235,15 @@ func (s *Client) writeFromLocal(remotePath string, offset int64, localPath strin
 		return 0, fmt.Errorf("seek local: %w", err)
 	}
 
-	flag, offset := writeOpenFlags(offset)
+	flag, off := writeOpenFlags(offset)
 	remoteFile, err := s.client.OpenFile(remotePath, flag)
 	if err != nil {
 		return 0, fmt.Errorf("open remote file: %w", err)
 	}
 	defer remoteFile.Close()
 
-	if offset > 0 {
-		if _, err := remoteFile.Seek(offset, io.SeekStart); err != nil {
+	if off > 0 {
+		if _, err := remoteFile.Seek(off, io.SeekStart); err != nil {
 			return 0, fmt.Errorf("seek remote: %w", err)
 		}
 	}
@@ -257,19 +257,21 @@ func (s *Client) writeFromLocal(remotePath string, offset int64, localPath strin
 
 // writeOpenFlags decides how a write opens its target.
 //
-// OFFSET -1 IS "NOT GIVEN"; 0 IS THE FIRST BYTE. The rule used to be `offset <= 0`,
-// which sent both down the truncate path: writing one byte at offset 0 turned a
-// ten-byte file into a one-byte file while the identical write at offset 3 patched
-// in place. The destructive form was the default and nothing said so, and there was
-// no spelling that overwrote a file from its first byte.
+// A POINTER, NOT A SENTINEL: nil means the caller did not specify an offset (the
+// file is truncated and rewritten from the start), while a pointer to 0 means
+// "overwrite from the first byte, preserving the rest". They used to share the
+// value 0 under `offset <= 0`, which made the destructive one the default.
 //
-// A caller that wants the file replaced passes -1 (the "no offset" form); a caller
-// that named a position gets that position.
-func writeOpenFlags(offset int64) (int, int64) {
+// The returned offset is always non-negative: 0 for the truncate case, and
+// whatever the caller passed otherwise.
+func writeOpenFlags(offset *int64) (int, int64) {
 	flag := os.O_RDWR | os.O_CREATE
-	if offset < 0 {
-		flag |= os.O_TRUNC
-		offset = 0
+	if offset == nil {
+		return flag | os.O_TRUNC, 0
 	}
-	return flag, offset
+	off := *offset
+	if off < 0 {
+		off = 0
+	}
+	return flag, off
 }

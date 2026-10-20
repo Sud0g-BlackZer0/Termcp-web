@@ -50,13 +50,10 @@ func (s *Server) handleFileWrite(ctx context.Context, request mcpgo.CallToolRequ
 	args := request.GetArguments()
 	sessionID := strings.TrimSpace(getString(args, "session_id", ""))
 	remotePath := getString(args, "remote_path", "")
-	// -1 IS "NOT GIVEN", 0 IS A REAL POSITION.
-	//
-	// The default was 0, which made "--offset 0" indistinguishable from "no offset"
-	// and sent both down the truncate path: writing one byte at offset 0 turned a
-	// ten-byte file into a one-byte file, while the same write at offset 3 patched
-	// in place. A caller could not overwrite a file from the beginning at all.
-	offset := int64(getFloat64(args, "offset", -1))
+	// A POINTER ALL THE WAY DOWN, because absence and 0 are different requests:
+	// "no offset" means replace the file, "offset 0" means overwrite from the first
+	// byte. They shared the value 0 once, and the destructive one was the default.
+	offset := int64PtrFromArgs(args, "offset")
 	data := getString(args, "data", "")
 	mode := getString(args, "mode", "text")
 	localPath := getString(args, "local_path", "")
@@ -276,12 +273,23 @@ func (s *Server) handleFilePerm(ctx context.Context, request mcpgo.CallToolReque
 		}
 	case "chown":
 		remotePath := getString(args, "remote_path", "")
-		uid := int(getFloat64(args, "uid", -1))
-		gid := int(getFloat64(args, "gid", -1))
-		if remotePath == "" || uid < 0 || gid < 0 {
-			return toolError(CodeInvalidArgument, "%s", "chown requires remote_path, uid, and gid"), nil
+		uid := intPtrFromArgs(args, "uid")
+		gid := intPtrFromArgs(args, "gid")
+		// POINTERS, NOT -1: uid 0 IS root, so a sentinel drawn from inside the valid
+		// range cannot say "not given". The old check collapsed three outcomes into one
+		// sentence — a missing uid, a missing gid, and a negative one all answered
+		// "chown requires remote_path, uid, and gid" — so a caller who passed
+		// `--uid 0` and forgot gid could not tell which field was actually wrong.
+		if remotePath == "" {
+			return toolError(CodeInvalidArgument, "%s", "chown requires remote_path"), nil
 		}
-		if err := sftpCli.ChownFile(remotePath, uid, gid); err != nil {
+		if uid == nil || gid == nil {
+			return toolError(CodeInvalidArgument, "%s", "chown requires uid and gid"), nil
+		}
+		if *uid < 0 || *gid < 0 {
+			return toolError(CodeInvalidArgument, "%s", "uid and gid must be >= 0"), nil
+		}
+		if err := sftpCli.ChownFile(remotePath, *uid, *gid); err != nil {
 			return fileErr(err), nil
 		}
 	case "chtimes":

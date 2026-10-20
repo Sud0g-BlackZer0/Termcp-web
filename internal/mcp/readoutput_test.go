@@ -34,8 +34,8 @@ func TestParseReadParamsDefaults(t *testing.T) {
 	if p.MaxBytes != 8192 {
 		t.Errorf("max_bytes = %d, want 8192", p.MaxBytes)
 	}
-	if p.Offset != -1 {
-		t.Errorf("offset = %d, want -1: -1 is what means \"no positional read\"", p.Offset)
+	if p.Offset != nil {
+		t.Errorf("offset = %v, want nil: nil is what means \"no positional read\"", *p.Offset)
 	}
 	if p.TailLines != nil {
 		t.Errorf("tail_lines = %v, want nil: nil is what means \"no tail given\"", *p.TailLines)
@@ -65,13 +65,17 @@ func TestParseReadParamsValues(t *testing.T) {
 	// RequireUTF8 is set by the parser, not by the caller: this surface's reply is
 	// JSON, and encoding/json would otherwise substitute U+FFFD for bytes it cannot
 	// decode. See readoutput_utf8_test.go for the behaviour it buys.
-	// TailLines is a pointer (absent vs zero are different requests), so compare it
-	// by value and the rest by equality.
+	// Offset and TailLines are pointers (absent vs zero are different requests), so
+	// compare them by value and the rest by equality.
 	if p.TailLines == nil || *p.TailLines != 3 {
 		t.Fatalf("tail_lines = %v, want 3", p.TailLines)
 	}
+	if p.Offset == nil || *p.Offset != 42 {
+		t.Fatalf("offset = %v, want 42", p.Offset)
+	}
 	p.TailLines = nil
-	want := readParams{StripAnsi: false, RequireUTF8: true, Timeout: 1.5, MaxLines: 7, MaxBytes: 1234, ReaderID: 9, Offset: 42}
+	p.Offset = nil
+	want := readParams{StripAnsi: false, RequireUTF8: true, Timeout: 1.5, MaxLines: 7, MaxBytes: 1234, ReaderID: 9}
 	if p != want {
 		t.Errorf("parsed %+v, want %+v", p, want)
 	}
@@ -93,8 +97,7 @@ func TestParseReadParamsRanges(t *testing.T) {
 		{"timeout above 60", map[string]any{"timeout": float64(60.1)}, false},
 		{"tail_lines 0 asks for zero lines", map[string]any{"tail_lines": float64(0)}, true},
 		{"tail_lines negative is refused", map[string]any{"tail_lines": float64(-1)}, false},
-		{"offset -1 means no positional read", map[string]any{"offset": float64(-1)}, true},
-		{"offset below -1", map[string]any{"offset": float64(-2)}, false},
+		{"offset negative is refused", map[string]any{"offset": float64(-1)}, false},
 		{"offset 0 is a valid first byte", map[string]any{"offset": float64(0)}, true},
 	}
 	for _, c := range cases {

@@ -159,7 +159,7 @@ func (h *Handler) writeOutputRange(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	win, rerr := transcript.Read(r.Context(), src, transcript.Params{
-		Offset:    start,
+		Offset:    &start,
 		MaxBytes:  max,
 		Stream:    stream,
 		StripAnsi: false, // the terminal repaints raw bytes

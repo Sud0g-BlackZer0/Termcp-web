@@ -465,7 +465,9 @@ func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
 		MaxLines:    int(getFloat64(args, "max_lines", 0)),
 		MaxBytes:    int(getFloat64(args, "max_bytes", 8192)),
 		ReaderID:    int(getFloat64(args, "reader_id", 0)),
-		Offset:      int64(getFloat64(args, "offset", -1)),
+		// A pointer for the same reason TailLines is one: 0 is a real byte position,
+		// so "no positional read" and "read from the first byte" cannot share it.
+		Offset: int64PtrFromArgs(args, "offset"),
 		// ABSENT AND ZERO ARE DIFFERENT REQUESTS, so this is a pointer: nil means
 		// the caller named no tail at all, 0 means they asked for zero lines.
 		//
@@ -745,5 +747,14 @@ func intPtrFromArgs(args map[string]any, key string) *int {
 		return nil
 	}
 	v := int(getFloat64(args, key, 0))
+	return &v
+}
+
+// int64PtrFromArgs is intPtrFromArgs for the 64-bit fields (byte offsets).
+func int64PtrFromArgs(args map[string]any, key string) *int64 {
+	if _, ok := args[key]; !ok {
+		return nil
+	}
+	v := int64(getFloat64(args, key, 0))
 	return &v
 }

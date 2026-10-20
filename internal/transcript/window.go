@@ -19,7 +19,14 @@ type Params struct {
 	MaxLines  int
 	MaxBytes  int
 	ReaderID  int
-	Offset    int64
+	// Offset names a POSITIONAL read when non-nil, and says nothing when nil.
+	//
+	// The same shape as TailLines, for the same reason: 0 is a real position (the
+	// first byte), so an int could not distinguish "read from the start" from "no
+	// positional read at all". The sentinel was -1 and it held only because every
+	// caller happened to set another selector too; a struct literal that omitted
+	// this field read from byte 0 without saying so.
+	Offset *int64
 	// TailLines names a LINE TAIL when non-nil, and says nothing when nil.
 	//
 	// A pointer, because ZERO IS A REAL REQUEST: `--tail 0` asks for zero lines,
@@ -66,8 +73,8 @@ func ValidateParams(p Params) error {
 	if p.TailLines != nil && *p.TailLines < 0 {
 		return errf(ErrInvalid, "tail_lines must be >= 0, got %d", *p.TailLines)
 	}
-	if p.Offset < -1 {
-		return errf(ErrInvalid, "offset must be >= -1, got %d", p.Offset)
+	if p.Offset != nil && *p.Offset < 0 {
+		return errf(ErrInvalid, "offset must be >= 0, got %d", *p.Offset)
 	}
 	if p.FromLine < 0 {
 		return errf(ErrInvalid, "from_line must be >= 0, got %d", p.FromLine)
@@ -82,7 +89,7 @@ func ValidateParams(p Params) error {
 		if p.TailLines != nil {
 			return errf(ErrInvalid, "from_line and tail_lines are mutually exclusive; use one selector per read")
 		}
-		if p.Offset >= 0 {
+		if p.Offset != nil {
 			return errf(ErrInvalid, "from_line and offset are mutually exclusive; use one selector per read")
 		}
 		if p.ReaderID > 0 {
@@ -205,7 +212,7 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 			TotalLines:  totalLines,
 			LineBytes:   lineBytes,
 		}
-	case p.TailLines != nil || p.TailBytes || (src.Live == nil && p.Offset < 0):
+	case p.TailLines != nil || p.TailBytes || (src.Live == nil && p.Offset == nil):
 		raw, st, tot, err := src.scanTailWindow(p.TailLines, p.MaxBytes)
 		if err != nil {
 			return Window{}, errf(ErrOperation, "%s", err.Error())
@@ -219,25 +226,26 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 			return Window{}, err
 		}
 		w = Window{Output: rendered, Raw: filtered, Start: st, End: tot, Total: tot, PartialTail: rawPartialTail(raw)}
-	case p.Offset >= 0:
+	case p.Offset != nil:
+		offset := *p.Offset
 		total, err := src.Len()
 		if err != nil {
 			return Window{}, errf(ErrOperation, "%s", err.Error())
 		}
 		max := p.MaxBytes
 		if max <= 0 {
-			max = int(total - p.Offset)
+			max = int(total - offset)
 			if max < 0 {
 				max = 0
 			}
 		}
-		raw, _, err := src.ByteRange(p.Offset, max)
+		raw, _, err := src.ByteRange(offset, max)
 		if err != nil {
 			return Window{}, errf(ErrOperation, "%s", err.Error())
 		}
 		raw = truncateAtLines(raw, p.MaxLines)
-		end := p.Offset + int64(len(raw))
-		filtered, err := filterStream(raw, p.Offset, src, p.Stream)
+		end := offset + int64(len(raw))
+		filtered, err := filterStream(raw, offset, src, p.Stream)
 		if err != nil {
 			return Window{}, err
 		}
@@ -245,7 +253,7 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		if err != nil {
 			return Window{}, err
 		}
-		w = Window{Output: rendered, Raw: filtered, Start: p.Offset, End: end, Total: total, HasMore: end < total, PartialTail: rawPartialTail(raw)}
+		w = Window{Output: rendered, Raw: filtered, Start: offset, End: end, Total: total, HasMore: end < total, PartialTail: rawPartialTail(raw)}
 	default:
 		// Live streaming cursor path (unchanged semantics).
 		pre := src.Live.ReaderCursor(p.ReaderID)

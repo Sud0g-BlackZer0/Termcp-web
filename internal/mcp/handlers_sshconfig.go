@@ -249,11 +249,13 @@ func applyEntryEdits(existing *sshconfig.Entry, args map[string]any) {
 	if v := getString(args, "proxy", ""); v != "" {
 		existing.Proxy = strings.TrimSpace(v)
 	}
-	if v := getFloat64(args, "port", -1); v >= 0 {
-		existing.Port = int(v)
+	// Presence, not a sentinel: an edit updates only what the caller named.
+	// Matches the `if _, ok := args["trust_unknown_host"]` right below it.
+	if v := intPtrFromArgs(args, "port"); v != nil && *v > 0 {
+		existing.Port = *v
 	}
-	if v := getFloat64(args, "dial_timeout_seconds", -1); v >= 0 {
-		existing.DialTimeoutSeconds = int(v)
+	if v := intPtrFromArgs(args, "dial_timeout_seconds"); v != nil && *v >= 0 {
+		existing.DialTimeoutSeconds = *v
 	}
 	if _, ok := args["trust_unknown_host"]; ok {
 		t := getBool(args, "trust_unknown_host", false)
@@ -290,11 +292,11 @@ func applyJumpEdits(existing *sshconfig.Entry, args map[string]any) {
 		if v := getString(args, "jump_proxy", ""); v != "" {
 			existing.Jump.Proxy = strings.TrimSpace(v)
 		}
-		if v := getFloat64(args, "jump_port", -1); v >= 0 {
-			existing.Jump.Port = int(v)
+		if v := intPtrFromArgs(args, "jump_port"); v != nil && *v > 0 {
+			existing.Jump.Port = *v
 		}
-		if v := getFloat64(args, "jump_dial_timeout_seconds", -1); v >= 0 {
-			existing.Jump.DialTimeoutSeconds = int(v)
+		if v := intPtrFromArgs(args, "jump_dial_timeout_seconds"); v != nil && *v >= 0 {
+			existing.Jump.DialTimeoutSeconds = *v
 		}
 		if _, ok := args["jump_trust_unknown_host"]; ok {
 			t := getBool(args, "jump_trust_unknown_host", false)

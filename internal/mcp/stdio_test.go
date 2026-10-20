@@ -174,8 +174,10 @@ func TestStreamFilter_PipeSeparatesStderrCrossOS(t *testing.T) {
 	if out := m["output"].(string); out != "ERR-1\n" {
 		t.Fatalf("stream=e output = %q, want exactly the stderr line", out)
 	}
-	// ...and via the tail window, which filters the same raw bytes.
-	m = readStream(t, s, shellID, "e", map[string]any{"offset": -1.0, "tail_lines": 5.0})
+	// ...and via the tail window, which filters the same raw bytes. No offset is
+	// passed: absent is how a caller says "no positional read" now, since -1 was a
+	// sentinel that had to be sent as an invalid value.
+	m = readStream(t, s, shellID, "e", map[string]any{"tail_lines": 5.0})
 	if out := m["output"].(string); out != "ERR-1\n" {
 		t.Fatalf("stream=e tail output = %q, want exactly the stderr line", out)
 	}
