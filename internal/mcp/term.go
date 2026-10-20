@@ -90,6 +90,24 @@ type termArgs struct {
 	// lookup would give. A caller that read `env` as "set FOO=bar for the child"
 	// would be wrong in all three places.
 	Vars map[string]string
+
+	// Args holds positional values substituted into cmd as $1, $2, … (1-based).
+	//
+	// IT IS THE OPPOSITE CHANNEL TO VARS, and the difference is the whole reason it
+	// exists. A positional value that IS the whole payload of `run`/`type` is spliced
+	// in VERBATIM, because it is a command line: args=["pwd; whoami"] on
+	// `run h:1 $1` sends two commands to the terminal. Quoting it — which is what
+	// vars does, correctly, for data — produced `'pwd; whoami'`, and the shell
+	// answered "command not found: pwd; whoami".
+	//
+	// A positional reference anywhere else (beside other words, in a flag value, in a
+	// target) is substituted as ONE QUOTED WORD, so a value can never turn into
+	// syntax the caller did not write.
+	//
+	// $0 is refused rather than bound to the first element: the shell gives $0 a
+	// meaning (the program's own name) that an argument list does not have, so
+	// binding it would be a guess. ${N} is the unambiguous spelling for N ≥ 10.
+	Args []string
 }
 
 // readCmd extracts the command line, distinguishing the three states a caller can
@@ -191,24 +209,54 @@ func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) term
 	// gate off (`allow_escapes`), or pass the data so it never becomes syntax
 	// (`env`). Refusing without saying what to do instead is the half-measure that
 	// leaves a caller stuck.
+	//
+	// THE ARGUMENTS ARE SCANNED TOO, and that is not redundant: a value reaches the
+	// terminal through `args` or `vars` without appearing in cmd at all, so scanning
+	// cmd alone let `args: ["a\x03b"]` through. The observed result was worse than a
+	// missing check — the terminal read the byte as an ACTION, echoed `^C`, and the
+	// shell dropped into its `quote>` continuation prompt, with the reply still 200.
+	// Quoting does not help: a control byte inside single quotes is still a control
+	// byte to the terminal, which is why the gate has to look at the values.
 	if !win.AllowEscapes {
-		if b, name, found := directive.DetectRawControl(cmd); found {
+		where, b, name, found := "", byte(0), "", false
+		if b, name, found = directive.DetectRawControl(cmd); found {
+			where = "cmd"
+		}
+		if !found {
+			for i, a := range win.Args {
+				if b, name, found = directive.DetectRawControl(a); found {
+					where = fmt.Sprintf("args[%d]", i)
+					break
+				}
+			}
+		}
+		if !found {
+			for k, v := range win.Vars {
+				if b, name, found = directive.DetectRawControl(v); found {
+					where = "vars[" + k + "]"
+					break
+				}
+			}
+		}
+		if found {
 			return termReply{win: win, slots: []envelope.Slot{{
 				Code: 400,
 				Headers: map[string]string{
 					"Error-Code": "raw_control_byte",
 				},
-				Body: fmt.Sprintf("cmd contains an unquoted %s, which the terminal acts on instead of printing.\n"+
+				Body: fmt.Sprintf("%s contains an unquoted %s, which the terminal acts on instead of printing.\n"+
 					"Either pass the data through the `vars` argument (it is substituted as a quoted value, so it never becomes syntax:\n"+
 					"  vars: {\"NAME\": \"<value>\"}, cmd: \"run <handle> echo $NAME\"),\n"+
-					"or set allow_escapes: true if you really mean to send byte 0x%02x.", name, b),
+					"or set allow_escapes: true if you really mean to send byte 0x%02x.", where, name, b),
 			}}}
 		}
 	}
-	file, err := directive.ParseWithVars(cmd, win.Vars)
+	file, err := directive.ParseWithSubst(cmd, directive.Subst{Named: win.Vars, Pos: win.Args})
 	if err != nil {
 		// A directive the caller invented (an alias) is unknown to the parser by
-		// definition, so it is resolved here before the error is reported.
+		// definition, so it is resolved here before the error is reported — with the
+		// SAME substitution table, because the alias's expansion is the caller's
+		// command line and may reference the same $1/$NAME values.
 		if stmt, ok := aliases.expandError(err); ok {
 			return s.runStatements(ctx, []directive.Statement{stmt}, win)
 		}
@@ -314,7 +362,15 @@ func (s *Server) parseErrorSlot(err error) envelope.Slot {
 	if _, known := directive.Lookup(derr.Op); !known && derr.Op != "" {
 		// An unknown directive is exactly the caller who needs the table, so the
 		// whole listing rides along instead of a second round trip.
-		headers["Usage"] = directiveTable()
+		//
+		// EXCEPT WHEN THE CALLER WAS NOT WRITING DIRECTIVES. A `;` that ended a
+		// payload leaves an unknown "directive" that is really a shell command, and
+		// printing 25 directive names beside that teaches the wrong shape: the
+		// caller does not need a different directive, they need a different slot.
+		// The HINT below says which one, so the table would only compete with it.
+		if derr.AfterPayload == "" {
+			headers["Usage"] = directiveTable()
+		}
 	}
 	// PARSING PRECEDES EVERYTHING. The whole cmd is parsed before the first
 	// statement runs, so this failure means the batch did not run — not even the
@@ -331,6 +387,19 @@ func (s *Server) parseErrorSlot(err error) envelope.Slot {
 	// there is nothing else that could have run, so saying so is noise on the most
 	// common error of all.
 	body := derr.Msg
+	if derr.AfterPayload != "" {
+		// The failing statement followed a directive whose payload goes to a
+		// terminal, so the most likely cause is a `;` the caller meant as SHELL
+		// sequencing. Naming the fix beats naming the directive table: the caller
+		// did not misspell a directive, they wrote a shell command line in a slot
+		// that holds one directive.
+		body += fmt.Sprintf("\nHINT: %q follows a `%s`, whose payload is ONE line. A `;` in cmd separates\n"+
+			"termcp statements, not shell commands — so if you meant several SHELL commands, pass\n"+
+			"them as args instead:\n"+
+			"  cmd: \"%s <handle> $1\"   args: [\"pwd; whoami\"]\n"+
+			"Or keep it in the payload with &&: %s <handle> pwd && whoami",
+			derr.Op, derr.AfterPayload, derr.AfterPayload, derr.AfterPayload)
+	}
 	if derr.Parsed > 0 {
 		body += fmt.Sprintf("\nnothing was executed, including the %d statement(s) before this one: a cmd is parsed in full before any of it runs", derr.Parsed)
 	}

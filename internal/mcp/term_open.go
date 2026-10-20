@@ -219,7 +219,11 @@ func (a *aliasTable) Expand(stmt directive.Statement) directive.Statement {
 	if _, ok := a.get(stmt.Op); !ok {
 		return stmt
 	}
-	if resolved, ok := a.resolve(stmt.Op, strings.TrimSpace(stmt.Target+" "+stmt.Payload)); ok {
+	// NO SUBSTITUTION HERE: this runs on an already-parsed statement, so the
+	// caller's values have been filled in. Passing an empty table keeps the
+	// expansion's own `$N` text as the shell's own positional parameters, which is
+	// what it was before this path existed.
+	if resolved, ok := a.resolve(stmt.Op, strings.TrimSpace(stmt.Target+" "+stmt.Payload), directive.Subst{}); ok {
 		return resolved
 	}
 	return stmt
@@ -228,17 +232,37 @@ func (a *aliasTable) Expand(stmt directive.Statement) directive.Statement {
 // expandError resolves a statement the parser could not parse against the alias
 // table: an alias is a directive the caller invented, so the parser is right to
 // refuse it and we are right to run it.
+//
+// NO SUBSTITUTION TABLE IS PASSED ON, and that is deliberate. `derr.Rest` is the
+// caller's text AFTER the first parse already filled it in — the `$1` in `ech $1`
+// became the caller's value before this function ran. Re-applying the same table
+// would fill the ALIAS'S OWN `$1` with that same value a second time, so
+// `alias ech run h $1` used as `ech $1` sent the argument twice:
+//
+//	run h:1 'echo hello' 'echo hello'
+//
+// The two `$` namespaces belong to different authors. A caller's `$N` is the
+// caller's value; an alias's `$N` is whatever the alias author meant, which this
+// server cannot know and must not guess. Leaving it alone hands it to the shell.
 func (a *aliasTable) expandError(err error) (directive.Statement, bool) {
 	derr, ok := err.(*directive.Error)
 	if !ok || derr.Op == "" {
 		return directive.Statement{}, false
 	}
-	return a.resolve(derr.Op, derr.Rest)
+	return a.resolve(derr.Op, derr.Rest, directive.Subst{})
 }
 
 // resolve follows a name through the table until it lands on a directive the
 // parser knows, or fails (unknown name, unparseable expansion, or a cycle).
-func (a *aliasTable) resolve(name, rest string) (directive.Statement, bool) {
+//
+// IT RE-PARSES WITH THE CALLER'S SUBSTITUTION TABLE, and that is not a detail. The
+// first parse happened against `ech $1`, where `ech` was an unknown directive — so
+// the `$1` was still raw text. If this pass parsed the expansion WITHOUT the table,
+// the value would never be filled in; if it parsed the ALREADY-SUBSTITUTED rest, the
+// value would arrive quoted as data and a positional payload would stop being syntax.
+// Passing the table through is what makes an alias expand to the same statement the
+// caller would have written out in full.
+func (a *aliasTable) resolve(name, rest string, sub directive.Subst) (directive.Statement, bool) {
 	seen := map[string]bool{}
 	for {
 		expansion, ok := a.get(name)
@@ -246,7 +270,7 @@ func (a *aliasTable) resolve(name, rest string) (directive.Statement, bool) {
 			return directive.Statement{}, false
 		}
 		seen[name] = true
-		f, err := directive.Parse(strings.TrimSpace(expansion + " " + rest))
+		f, err := directive.ParseWithSubst(strings.TrimSpace(expansion+" "+rest), sub)
 		if err == nil && len(f.Statements) == 1 {
 			stmt := f.Statements[0]
 			if _, next := a.get(stmt.Op); !next {

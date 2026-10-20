@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/envelope"
@@ -97,17 +98,46 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 	if window < minRecvWindow {
 		window = minRecvWindow
 	}
-	res, fail := s.callTool(ctx, "shell_output", argsOf(
-		"shell_id", handle, "offset", float64(from),
-		"max_bytes", float64(window), "timeout", float64(0), "strip_ansi", false))
-	if fail != nil {
-		return s.slotFromFailure(ctx, stmt, fail)
+	// POLL, BECAUSE THE READ ITSELF DOES NOT WAIT FOR AN OFFSETTED WINDOW.
+	//
+	// shell_output's timeout is honoured only by its live-cursor mode; the
+	// offset-addressed mode returns what is buffered right now, and nothing else. A
+	// recv that asked once therefore answered "no complete frame yet" while the peer's
+	// bytes were still in flight — and a caller had to guess how long to keep asking.
+	// The retry loop is here, with a bound, so one recv means one frame rather than
+	// one sample.
+	//
+	// The bound is the same window the directive exists inside: a caller that gets
+	// 204 after it has been told the frame is not coming yet, and the next recv
+	// resumes from the cursor this one left untouched.
+	deadline := time.Now().Add(recvPollBudget)
+	var doc map[string]any
+	var body string
+	for {
+		res, fail := s.callTool(ctx, "shell_output", argsOf(
+			"shell_id", handle, "offset", float64(from),
+			"max_bytes", float64(window), "timeout", float64(0), "strip_ansi", false))
+		if fail != nil {
+			return s.slotFromFailure(ctx, stmt, fail)
+		}
+		var ok bool
+		doc, ok = toolResultMap(res)
+		if !ok {
+			return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
+		}
+		body = getString(doc, "output", "")
+		if _, complete := firstJSONValue(body); complete {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: ctx.Err().Error()})
+		case <-time.After(recvPollInterval):
+		}
 	}
-	doc, ok := toolResultMap(res)
-	if !ok {
-		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
-	}
-	body := getString(doc, "output", "")
 	// rawLen, not len(body): the window's byte span is what the next read's offset
 	// is measured in. len(body) counts the RENDERED string, which differs whenever
 	// the reply was ANSI-stripped or escaped, so advancing by it lands mid-frame.
@@ -145,6 +175,18 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 		Body:    frame,
 	}
 }
+
+// How long one recv keeps asking, and how often.
+//
+// The pair is a compromise between the two callers that exist: an agent reading a
+// stdio MCP server's answer wants `mcp recv` to return the frame, not a 204 it has to
+// loop on, while the same call must still come back promptly when the answer really
+// has not been written. Two seconds is below the 6-9s an assistant turn costs and long enough
+// for a peer that has already been sent the request.
+const (
+	recvPollBudget   = 2 * time.Second
+	recvPollInterval = 25 * time.Millisecond
+)
 
 // minRecvWindow is the smallest window a recv will read with.
 //
@@ -187,10 +229,22 @@ func (s *Server) setRecvCursor(handle string, at int64) {
 // may be pretty-printed, and a line-delimited peer may still emit a value with
 // embedded newlines inside a string.
 func firstJSONValue(raw string) (string, bool) {
-	trimmed := strings.TrimLeft(raw, " \t\r\n")
-	if trimmed == "" {
+	// SKIP THE NOISE BEFORE THE FRAME, and there is always some: a stdio peer's own
+	// startup output shares this stream. Measured on @modelcontextprotocol/
+	// server-everything it was 149 bytes of npm warning and a "Starting default
+	// (STDIO) server..." banner, and every recv on that channel reported "no complete
+	// frame yet" while a complete frame sat in the buffer — the decoder was being
+	// handed the warning, not the frame.
+	//
+	// A frame starts at a '{' or a '['. Nothing before the first one can be part of
+	// it: a JSON object's first byte must be '{' (a leading BOM or whitespace is not
+	// this protocol's problem, and whitespace is handled by the scan below). Scanning
+	// for those two bytes is what the line-delimited reality of a pipe channel needs.
+	start := strings.IndexAny(raw, "{[")
+	if start < 0 {
 		return "", false
 	}
+	trimmed := raw[start:]
 	dec := json.NewDecoder(strings.NewReader(trimmed))
 	var value json.RawMessage
 	if err := dec.Decode(&value); err != nil {

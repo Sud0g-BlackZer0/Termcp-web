@@ -195,11 +195,11 @@ func (s *Server) runOne(ctx context.Context, stmt directive.Statement, win termA
 	}
 
 	if _, fail := s.callTool(ctx, "shell_input", argsOf("shell_id", stmt.Target, "text", stmt.Payload)); fail != nil {
-		return s.slotFromFailure(ctx, stmt, fail)
+		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, fail, s))
 	}
 	keyRes, fail := s.callTool(ctx, "shell_key", argsOf("shell_id", stmt.Target, "key", "enter"))
 	if fail != nil {
-		return s.slotFromFailure(ctx, stmt, fail)
+		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, fail, s))
 	}
 	// A held command line: review mode staged the text and queued it on the enter.
 	// The reply is the review shape, not a read — there is nothing to read yet.
@@ -212,6 +212,50 @@ func (s *Server) runOne(ctx context.Context, stmt directive.Statement, win termA
 	}
 
 	return s.readSlotAfter(ctx, stmt, win, start)
+}
+
+// pipeClosedHint turns a bare write failure into something a caller can act on.
+//
+// A pipe channel's process can exit while the session and the channel still report
+// `running` — the status is updated when the exit is reaped, and the write can lose
+// that race. What reaches the caller then is the OS error on a closed stdin, `EOF`
+// or `process has exited, cannot send input`, which says nothing about the two facts
+// that matter: this channel was a one-shot program, and its output is still there.
+//
+// The hint is only added for a pipe channel: on a pty the same error means something
+// else (the shell died), and pointing at `read` would be wrong.
+func pipeClosedHint(handle string, f *toolFailure, s *Server) *toolFailure {
+	if f == nil {
+		return f
+	}
+	msg := strings.TrimSpace(f.msg)
+	closed := msg == "EOF" || strings.Contains(msg, "cannot send input") ||
+		strings.Contains(msg, "file already closed") || strings.Contains(msg, "broken pipe")
+	if !closed {
+		return f
+	}
+	// The channel may already be refused by requireShell (its process exited and the
+	// status caught up), which is the OTHER way this error arrives. Both roads lead to
+	// the same advice, so a bad resolution is checked for the mode instead of
+	// returning early: a pty whose shell died must NOT be told to `read` its exit
+	// code, because a pty has no exit code to read.
+	cs, bad := s.requireShell(handle)
+	if cs == nil {
+		return f
+	}
+	if bad != nil {
+		if cs.Info().Mode != api.ModePipe {
+			return f
+		}
+	} else if cs.Info().Mode != api.ModePipe {
+		return f
+	}
+	return &toolFailure{
+		code: CodeOperationFailed,
+		msg: msg + "\nThis is a PIPE channel: its process has finished, so there is no stdin left to write to " +
+			"and `run`/`type` cannot drive it. Its output is still readable — `read " + handle + "` returns it, " +
+			"including the exit code. For an interactive session use `pty` instead.",
+	}
 }
 
 // probeShell resolves a handle and reports why it cannot be used, so a `run`
@@ -237,7 +281,7 @@ func (s *Server) slotFromFailure(ctx context.Context, stmt directive.Statement, 
 func (s *Server) directiveType(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
 	res, fail := s.callTool(ctx, "shell_input", argsOf("shell_id", stmt.Target, "text", stmt.Payload))
 	if fail != nil {
-		return []envelope.Slot{s.slotFromFailure(ctx, stmt, fail)}
+		return []envelope.Slot{s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, fail, s))}
 	}
 	if held := reviewPendingFrom(res); held != nil {
 		return []envelope.Slot{{Code: 202, Headers: map[string]string{"Path": stmt.Path}, Body: *held}}

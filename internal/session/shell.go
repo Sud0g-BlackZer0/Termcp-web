@@ -117,6 +117,16 @@ func (cs *ChildShell) ParentSessionID() string {
 }
 
 // Info returns a snapshot of the child shell's public metadata.
+//
+// THE STATUS IS THE WATCHER'S TO PUBLISH, and this deliberately does not correct it
+// from the process. The exit watcher drains the last bytes and seals the buffer
+// BEFORE storing "exited", and read paths take that ordering as a promise: a reader
+// that sees `exited` may return an empty body, because the stream it was handed is
+// complete. Reporting `exited` earlier — from the process channel — made a read
+// return nothing while the transcript still had the tail in flight.
+//
+// A caller that must know whether a shell can still be written to asks
+// SendTerminalBytes, which checks the process directly (see processGone).
 func (cs *ChildShell) Info() api.Session {
 	s := api.Session{
 		ID:        cs.ID,
@@ -131,6 +141,27 @@ func (cs *ChildShell) Info() api.Session {
 	}
 	s.ExitCode = cs.exitCodeValue()
 	return s
+}
+
+// processGone reports whether the process has exited, whatever the published status
+// says. It reads the earliest observable signal — the exec channel — and falls back
+// to the finalization channel for a shell that has no exec session (a deserialized
+// record, a transport-less shell).
+func (cs *ChildShell) processGone() bool {
+	if cs.execSession != nil {
+		select {
+		case <-cs.execSession.Done():
+			return true
+		default:
+			return false
+		}
+	}
+	select {
+	case <-cs.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // Done returns a channel that closes once the shell is finalized: the process
@@ -157,6 +188,36 @@ func (cs *ChildShell) SendTerminalBytesFrom(data []byte, pressEnter bool, src In
 	status := cs.statusValue()
 	if status != api.SessionRunning {
 		return fmt.Errorf("process has %s, cannot send input", status)
+	}
+	// THE EXIT IS PUBLISHED LATE, SO ASK THE PROCESS TOO.
+	//
+	// statusValue is written by the exit watcher AFTER it drains the last bytes and
+	// publishes the exit code (that ordering is deliberate — a reader that sees
+	// "exited" must find every byte). The cost is that there is a window in which the
+	// process is gone and the status still says running, and a write in that window
+	// reached the OS and came back as a bare `EOF`. Checking Done() costs nothing and
+	// covers the whole window, because Done() closes as the final step of the same
+	// watcher.
+	//
+	// It is a SELECT rather than a boolean so the closed-channel read is the only
+	// thing that can succeed here: a Done() that is open must not block.
+	//
+	// TWO CHANNELS, because they close at different moments. execSession.Done() fires
+	// the instant the process is gone; cs.done fires after the watcher has drained and
+	// sealed the transcript. The gap between them is exactly the window this check
+	// exists for, and only the earlier one covers it — querying cs.done alone left the
+	// bare `EOF` in place, because the write happened before the watcher finished.
+	if cs.execSession != nil {
+		select {
+		case <-cs.execSession.Done():
+			return fmt.Errorf("process has exited, cannot send input")
+		default:
+		}
+	}
+	select {
+	case <-cs.done:
+		return fmt.Errorf("process has exited, cannot send input")
+	default:
 	}
 	var toWrite []byte
 	if pressEnter {
