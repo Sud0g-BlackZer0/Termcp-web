@@ -20,7 +20,16 @@ type Params struct {
 	MaxBytes  int
 	ReaderID  int
 	Offset    int64
-	TailLines int
+	// TailLines names a LINE TAIL when non-nil, and says nothing when nil.
+	//
+	// A pointer, because ZERO IS A REAL REQUEST: `--tail 0` asks for zero lines,
+	// which is a different instruction from "no tail at all" — and the two used to
+	// share the value 0, so the smallest request produced the largest answer (the
+	// whole buffer). No in-band sentinel can fix that for an int: -1 can say "not
+	// given", but 0 would still be ambiguous in a struct literal that simply omits
+	// the field. nil is unambiguous, and the compiler makes every caller state which
+	// one it means.
+	TailLines *int
 	FromLine  int64
 	Stream    string // "", "all", "o", "e"
 	// TailBytes forces the byte-tail read (last MaxBytes aligned to a line
@@ -54,8 +63,8 @@ func (p Params) render(raw []byte) (string, error) {
 // surface. The messages are part of the tool contract: callers get told why
 // instead of silently getting a different read.
 func ValidateParams(p Params) error {
-	if p.TailLines < 0 {
-		return errf(ErrInvalid, "tail_lines must be >= 0, got %d", p.TailLines)
+	if p.TailLines != nil && *p.TailLines < 0 {
+		return errf(ErrInvalid, "tail_lines must be >= 0, got %d", *p.TailLines)
 	}
 	if p.Offset < -1 {
 		return errf(ErrInvalid, "offset must be >= -1, got %d", p.Offset)
@@ -70,7 +79,7 @@ func ValidateParams(p Params) error {
 	// selectors rather than combining with them: each names a different position
 	// for the same read, and honoring both would mean silently choosing one.
 	if p.FromLine > 0 {
-		if p.TailLines > 0 {
+		if p.TailLines != nil {
 			return errf(ErrInvalid, "from_line and tail_lines are mutually exclusive; use one selector per read")
 		}
 		if p.Offset >= 0 {
@@ -196,7 +205,7 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 			TotalLines:  totalLines,
 			LineBytes:   lineBytes,
 		}
-	case p.TailLines > 0 || p.TailBytes || (src.Live == nil && p.Offset < 0):
+	case p.TailLines != nil || p.TailBytes || (src.Live == nil && p.Offset < 0):
 		raw, st, tot, err := src.scanTailWindow(p.TailLines, p.MaxBytes)
 		if err != nil {
 			return Window{}, errf(ErrOperation, "%s", err.Error())
@@ -430,13 +439,18 @@ const defaultTailCap = 8192
 // tailLines == 0, the last maxBytes bytes aligned to a line start) via a
 // bounded backward scan, plus the raw start offset of the returned window.
 // The returned window always ends at the stream end.
-func (o *Source) scanTailWindow(tailLines, maxBytes int) (raw []byte, start, total int64, err error) {
+func (o *Source) scanTailWindow(tailLines *int, maxBytes int) (raw []byte, start, total int64, err error) {
 	var raw0 []byte
 	total, err = o.Len()
 	if err != nil || total == 0 {
 		return nil, 0, total, err
 	}
-	if tailLines <= 0 {
+	if tailLines != nil && *tailLines == 0 {
+		// AN EXPLICIT ZERO: an empty window at the end of the stream.
+		return nil, total, total, nil
+	}
+	if tailLines == nil {
+		// No line limit: the byte tail, aligned to a line start.
 		cap := int64(maxBytes)
 		if cap <= 0 {
 			if o.Live != nil {
@@ -475,14 +489,14 @@ func (o *Source) scanTailWindow(tailLines, maxBytes int) (raw []byte, start, tot
 		if err != nil {
 			return nil, 0, total, err
 		}
-		if countLines(raw0) >= int64(tailLines) || start == 0 || window >= tailScanCeiling {
+		if countLines(raw0) >= int64(*tailLines) || start == 0 || window >= tailScanCeiling {
 			break
 		}
 		window *= 2
 	}
 
-	if n := countLines(raw0); n > int64(tailLines) {
-		raw0 = takeLastLines(raw0, int64(tailLines))
+	if n := countLines(raw0); n > int64(*tailLines) {
+		raw0 = takeLastLines(raw0, int64(*tailLines))
 	}
 	if maxBytes > 0 && int64(len(raw0)) > int64(maxBytes) {
 		cut := int64(len(raw0)) - int64(maxBytes)

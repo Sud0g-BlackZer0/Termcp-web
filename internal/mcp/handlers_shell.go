@@ -466,9 +466,17 @@ func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
 		MaxBytes:    int(getFloat64(args, "max_bytes", 8192)),
 		ReaderID:    int(getFloat64(args, "reader_id", 0)),
 		Offset:      int64(getFloat64(args, "offset", -1)),
-		TailLines:   int(getFloat64(args, "tail_lines", 0)),
-		FromLine:    int64(getFloat64(args, "from_line", 0)),
-		Stream:      getString(args, "stream", ""),
+		// ABSENT AND ZERO ARE DIFFERENT REQUESTS, so this is a pointer: nil means
+		// the caller named no tail at all, 0 means they asked for zero lines.
+		//
+		// The field is an int in the wire format (a JSON number), and the old
+		// default of 0 made "--tail 0" indistinguishable from "no tail" — which
+		// scanTailWindow read as "no line limit" and answered with the ENTIRE
+		// buffer. The smallest possible request produced the largest possible
+		// answer.
+		TailLines: intPtrFromArgs(args, "tail_lines"),
+		FromLine:  int64(getFloat64(args, "from_line", 0)),
+		Stream:    getString(args, "stream", ""),
 	}
 	if p.Timeout < 0 || p.Timeout > 60 {
 		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("timeout must be between 0 and 60, got %v", p.Timeout))
@@ -599,6 +607,20 @@ func (s *Server) handleListMessages(ctx context.Context, request mcpgo.CallToolR
 			if fromLine, toLine, lerr := s.sessMgr.LineSpanOfOffsets(sess.ID, shellID, m.Offset, end); lerr == nil {
 				span["from_line"] = fromLine
 				span["to_line"] = toLine
+				// A MARK RECORDS WHERE A COMMAND BEGAN, NOT WHERE ITS FIRST LINE
+				// BEGAN: the prompt that preceded the command belongs to the same
+				// line, so start and line_start differ by the prompt's width (37
+				// bytes in the case that surfaced this). Reporting only `start`
+				// next to a line number invited callers to read from it and land
+				// mid-line.
+				//
+				// line_start is the byte `read --from-line <from_line>` starts
+				// from, so a caller can go from this listing straight to the bytes.
+				if fromLine > 0 {
+					if ls, lserr := s.sessMgr.LineStartOffset(sess.ID, shellID, fromLine); lserr == nil {
+						span["line_start"] = ls
+					}
+				}
 			}
 		}
 		spans = append(spans, span)
@@ -714,4 +736,14 @@ func (s *Server) handleUnregisterReader(ctx context.Context, request mcpgo.CallT
 	}
 	shell.UnregisterReader(readerID)
 	return successResult(), nil
+}
+
+// intPtrFromArgs reads an optional integer argument, distinguishing "absent" (nil)
+// from "present and zero" (pointer to 0).
+func intPtrFromArgs(args map[string]any, key string) *int {
+	if _, ok := args[key]; !ok {
+		return nil
+	}
+	v := int(getFloat64(args, key, 0))
+	return &v
 }

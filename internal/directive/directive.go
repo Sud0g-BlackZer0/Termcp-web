@@ -398,11 +398,17 @@ when the client declared it, resource otherwise.`
 
 // spanDetail decodes the one-letter statuses, which are terse by design (they are
 // written to log.jsonl for every status change) and unreadable without this.
-const spanDetail = `Session output index: time, byte offset and line numbers per span, so a window
-can be read by position instead of by streaming. status: o output (the shell's
-own bytes), a AI input, i human input, q approval asked, A approved input. i/q
-mean a person operated; a means the agent did. Read a span's bytes with
-read <handle> --cursor <offset>, or its lines with --from-line <line>.`
+const spanDetail = `Session output index: time, byte range, line range and line start per
+span, so a window can be read by position instead of by streaming.
+
+Two offsets, two questions. The byte range is where the COMMAND began and ended.
+The @column is where the LINE RANGE begins — earlier, by the width of the prompt
+that preceded the command on that line. Paging by position uses the @column:
+read <handle> --from-line <line> starts exactly there, while --cursor on the
+range start lands mid-line.
+
+status: o output (the shell's own bytes), a AI input, i human input, q approval
+asked, A approved input. i/q mean a person operated; a means the agent did.`
 
 // notifyDetail is the rule for reaching the human, stated where a caller looks it
 // up. It used to be the notify_user tool's description; with one tool there is no
