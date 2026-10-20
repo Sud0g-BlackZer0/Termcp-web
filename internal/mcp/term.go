@@ -68,11 +68,46 @@ type termArgs struct {
 	StructuredContent bool
 }
 
-// handleTerm is the MCP entrance: a thin wrapper that hands the command line to
+// readCmd extracts the command line, distinguishing the three states a caller can
+// send.
+//
+// It EXISTS because the tool's one string parameter is where a silent failure was
+// most visible: a `cmd` that is not a string used to be read with a loose getter
+// that answered "" for anything it did not like, and "" is the GUIDE PAGE. So a
+// client whose bridge mangled the argument — issue #131 P0-3, where a call returned
+// the wake-up page instead of running — got a successful-looking reply that
+// described the whole protocol, and nothing anywhere said a command had been lost.
+//
+//	absent        -> "", nil   the documented empty call: the guide, which is legal
+//	null          -> "", nil   the same, since JSON null is how "no value" arrives
+//	string        -> it, nil
+//	anything else -> 400       the caller sent a command and it was not a string
+//
+// The distinction is the point: "I did not send a command yet" and "my command did
+// not survive the transport" are different facts, and only one of them is a request
+// for the guide.
+func readCmd(args map[string]any) (cmd string, present bool, derr *directive.Error) {
+	raw, ok := args["cmd"]
+	if !ok || raw == nil {
+		return "", false, nil
+	}
+	s, isString := raw.(string)
+	if !isString {
+		return "", false, &directive.Error{Msg: "cmd must be a string, got " + typeNameOf(raw) +
+			"; send the command line as a string, or omit cmd entirely to read the guide"}
+	}
+	return s, true, nil
+}
+
+// handleTerm is the MCP entrance: a thin wrapper that hands the call's arguments to
 // Term and re-renders the reply as a tool result.
+//
+// It does not read `cmd` itself. Reading it in two places is how the two entrances
+// drifted apart once already (issue #131 P0-3): each call site had its own copy of
+// "absent means the guide", and the loose getter they shared folded "not a string"
+// into it. Term is the one reader.
 func (s *Server) handleTerm(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	args := request.GetArguments()
-	return toolResult(s.Term(ctx, getString(args, "cmd", ""), args)), nil
+	return toolResult(s.Term(ctx, "", request.GetArguments())), nil
 }
 
 // Term executes one term command line and returns the reply as plain data.
@@ -87,7 +122,25 @@ func (s *Server) handleTerm(ctx context.Context, request mcpgo.CallToolRequest) 
 //
 // The window parameters are read from args by their tool names, so a caller
 // arriving over HTTP sends the same object the tool's schema describes.
+//
+// `cmd` IS READ FROM args, not from the parameter, when args carries one. The
+// parameter stays because executeTerm is also reached directly and because a caller
+// holding a command string should not have to build a map to run it; args wins where
+// both are present, because args is the value a transport actually delivered.
+//
+// Reading it HERE, once, is what makes both entrances agree: a `cmd` that is not a
+// string is a 400 and an absent one is the guide, and neither surface gets to have
+// its own opinion about which is which (issue #131 P0-3).
 func (s *Server) Term(ctx context.Context, cmd string, args map[string]any) envelope.Reply {
+	if fromArgs, present, derr := readCmd(args); derr != nil {
+		return envelope.Reply{Slots: []envelope.Slot{{
+			Code:    400,
+			Headers: map[string]string{"Error-Code": "invalid_argument"},
+			Body:    derr.Msg,
+		}}}
+	} else if present {
+		cmd = fromArgs
+	}
 	win, derr := parseTermArgs(args)
 	if derr != nil {
 		return envelope.Reply{Slots: []envelope.Slot{{
@@ -126,10 +179,15 @@ func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) term
 //
 // An alias is expanded before dispatch and before Path is read, so the echo a
 // caller gets back is the command that actually ran.
+//
+// The reply accumulator is a LOCAL, threaded where it is needed. It used to also
+// live on the Server (s.currentReply) so a directive could consult learn_mode's
+// de-duplication without receiving it; that made two concurrent Term calls share
+// mutable state, which is a data race — and the field was redundant anyway, since
+// the learn_mode attach below already runs for every statement. Removing it is why
+// the MCP server is now safe for concurrent Term calls.
 func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement, win termArgs) termReply {
 	out := termReply{win: win, seenUsage: map[string]bool{}}
-	s.currentReply = &out
-	defer func() { s.currentReply = nil }()
 	for _, stmt := range stmts {
 		expanded := aliases.Expand(stmt)
 		slots := s.runDirective(ctx, expanded, win)
@@ -358,36 +416,34 @@ func (t *termReply) withUsage(stmt directive.Statement, headers map[string]strin
 	}
 }
 
-// atoiFlag reads a numeric flag, returning the fallback when absent or unusable.
-func atoiFlag(stmt directive.Statement, key string, fallback int) int {
-	raw, ok := stmt.Flags[key]
-	if !ok || raw == "" {
-		return fallback
+// atoiFlag reads an integer flag.
+//
+// `absent` is the value used when the flag is NOT given at all — a documented
+// default, not a rescue. A flag written WITHOUT a value is a different mistake and
+// is reported as one; a flag with a value that does not parse is reported as that.
+// The three cases used to be one, and `--repeat` silently meant `--repeat 1`.
+func atoiFlag(stmt directive.Statement, key string, absent int) (int, error) {
+	switch stmt.FlagState(key) {
+	case directive.FlagAbsent:
+		return absent, nil
+	case directive.FlagNoValue:
+		return 0, fmt.Errorf("needs a value")
 	}
-	n, err := strconv.Atoi(raw)
+	raw, _ := stmt.Flag(key)
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("expected an integer, got %q", raw)
 	}
-	return n
+	return n, nil
 }
 
 // boolFlag reports whether a valueless flag was given.
+//
+// A flag written as `--force=yes` is given too: the caller's intent is the same and
+// the value is refused elsewhere if it matters. What is NOT given is `--force` that
+// never appeared.
 func boolFlag(stmt directive.Statement, key string) bool {
-	_, ok := stmt.Flags[key]
-	return ok
-}
-
-// int64Flag reads a 64-bit numeric flag.
-func int64Flag(stmt directive.Statement, key string, fallback int64) int64 {
-	raw, ok := stmt.Flags[key]
-	if !ok || raw == "" {
-		return fallback
-	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return fallback
-	}
-	return n
+	return stmt.FlagState(key) != directive.FlagAbsent
 }
 
 // argsOf is the compact way to hand a directive onto an existing handler: the

@@ -44,11 +44,6 @@ type Server struct {
 	// connections tracks the MCP clients currently attached (see connections.go).
 	// It is fed by mcp-go's session hooks, which is the only place a client
 	// attaching or detaching is observable.
-	// currentReply is the reply being assembled by handleTerm, so a slot can
-	// consult the learn_mode de-duplication without threading the accumulator
-	// through every directive. It is set and cleared per call.
-	currentReply *termReply
-
 	connections *connRegistry
 	// connListener is called when that set changes, so the Web UI can refresh
 	// without polling. Set by main to the same broadcast the session list uses.

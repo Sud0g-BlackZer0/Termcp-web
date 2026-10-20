@@ -31,6 +31,8 @@ import (
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/open-mcp-ai/termcp/internal/locator"
 )
 
 // Kind says how the words after the target are read.
@@ -49,6 +51,33 @@ const (
 	KindInterpreted
 )
 
+// TargetKind says what a directive's target names.
+//
+// IT IS ENFORCED AT PARSE TIME. The whole reason #131 and #132 happened is that
+// every reader tried to resolve the object itself and fell back when it guessed
+// wrong: `close <session>` became a primary shell close, `run <session>` became a
+// primary shell run, and nobody could tell what the caller meant.
+//
+// Declaring the kind here turns "did you give a channel or a session?" from a
+// runtime guess into a syntax check: a channel-only directive (run, key, type,
+// resize, reader) REFUSES a session id before any handler runs.
+type TargetKind int
+
+const (
+	// TargetAny is a target whose shape is not checked by the parser: it may be a
+	// session id, an entry name, a locator or a handle. The directive resolves it.
+	TargetAny TargetKind = iota
+
+	// TargetChannel requires a channel handle: the `sid:N` short handle, a locator
+	// with a non-zero index, or a raw channel id. A bare session id is REFUSED with
+	// a usage line pointing at `ps` — no silent fallback to primaryShell.
+	TargetChannel
+
+	// TargetSession requires a container: a session id, an entry name, or a locator
+	// naming a session.
+	TargetSession
+)
+
 // Op is one directive's grammar.
 type Op struct {
 	Name string
@@ -61,6 +90,16 @@ type Op struct {
 	// Without it the positional rule ("word 2 is the target") would reject a
 	// leading flag, so the documented forms could never parse.
 	TargetOptional bool
+	// TargetKind says what the target NAMES, and therefore which spellings are
+	// accepted. It is a declaration, not a hint: parseStatement enforces it, so a
+	// directive that needs a channel refuses a session id at parse time with a usage
+	// line — before any handler runs and before any reply can claim success.
+	//
+	// THE ZERO VALUE IS TargetAny, and that is deliberate: a directive that does not
+	// say gets the permissive reading it had before, so adding this field broke
+	// nothing. The directives that DO say are the ones where the two spellings mean
+	// different things, which is exactly the set that used to guess.
+	TargetKind TargetKind
 	// Flags lists the accepted option names (without the leading --).
 	Flags []string
 	// MinArgs is the minimum number of POSITIONAL arguments after the target,
@@ -113,10 +152,25 @@ type Statement struct {
 	Target string
 	// Args are the positional arguments after the target.
 	Args []string
-	// Flags holds --name[=value] options. A flag given without a value is
-	// present with an empty string, so "was it set" and "what was it set to" are
-	// two questions with two answers.
-	Flags map[string]string
+	// Flags holds --name[=value] options.
+	//
+	// THE POINTER IS THE POINT. A flag has three states, not two, and a plain
+	// `string` can only carry two:
+	//
+	//	key absent        the caller did not write the flag at all
+	//	nil value         the caller wrote `--name` with no value
+	//	*""               the caller wrote an explicitly empty value
+	//	non-empty value   the value
+	//
+	// With a `map[string]string` the middle three collapsed: a bare `--remote-path`,
+	// one followed by an explicitly empty value, and one followed by `""` all
+	// arrived as (present, ""), so every reader either treated an explicit empty
+	// value as "missing" (and refused a legitimate empty `--data` that way) or
+	// treated a missing value as empty (and wrote an empty file for a flag the
+	// caller had fumbled). Both answers are wrong, and no reader can tell which
+	// case it is looking at. A nil VALUE means the flag was given without one,
+	// which every reader can now refuse by name instead of guessing.
+	Flags map[string]*string
 	// Payload is the raw source slice handed to the directive, for the payload
 	// kinds. It is EMPTY for a directive that takes none.
 	Payload string
@@ -125,6 +179,55 @@ type Statement struct {
 	// is the caller's own bytes, not a canonical re-rendering.
 	Path string
 }
+
+// Flag returns a flag's value and whether it was given one.
+//
+//	value, ok := stmt.Flag("data")
+//	// ok=false: absent, OR written without a value
+//	// ok=true:  an explicit value, which may be empty
+//
+// A reader that must tell those two apart uses FlagState: "the caller forgot the
+// value" and "the caller chose an empty value" are different facts, and only one of
+// them is a mistake at all.
+func (s Statement) Flag(name string) (string, bool) {
+	v, ok := s.Flags[name]
+	if !ok || v == nil {
+		return "", false
+	}
+	return *v, true
+}
+
+// FlagState reports which of the three states a flag is in.
+//
+// Each caller has to say which states it accepts; that is the point. Collapsing
+// them upstream is what made an explicitly empty `--data` indistinguishable from a
+// forgotten value, and what made a reader unable to say WHICH mistake the caller
+// had made.
+func (s Statement) FlagState(name string) FlagValue {
+	v, ok := s.Flags[name]
+	switch {
+	case !ok:
+		return FlagAbsent
+	case v == nil:
+		return FlagNoValue
+	default:
+		return FlagValueSet
+	}
+}
+
+// FlagValue names the three states of a flag.
+type FlagValue int
+
+const (
+	// FlagAbsent is a flag the caller did not write.
+	FlagAbsent FlagValue = iota
+	// FlagNoValue is a flag written without a value — `--data` with nothing after
+	// it. For every flag that takes a value this is a caller mistake, and it can
+	// now be reported AS that instead of as "missing".
+	FlagNoValue
+	// FlagValueSet is a flag with an explicit value, including an empty string.
+	FlagValueSet
+)
 
 // Error is a directive-level failure: unknown op, bad flag, missing argument.
 // It carries the usage line so the reply can teach, which is why it is a type
@@ -169,14 +272,15 @@ type File struct {
 // ops is the directive set. It is the whole user-facing grammar in one table,
 // so `help`, the error usage lines and the parser cannot disagree.
 var ops = []Op{
-	{Name: "run", Core: true, Kind: KindPayload, Target: true, MinArgs: 1,
+	{Name: "run", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChannel,
 		Usage:  "run <handle> <payload>   |   payload: 原样交给 shell，协议不分词",
 		Detail: runDetail},
-	{Name: "type", Core: true, Kind: KindPayload, Target: true, MinArgs: 1,
-		Usage: "type <handle> <payload>   |   只打字，不回车"},
-	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat"},
+	{Name: "type", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChannel,
+		Usage:  "type <handle> <payload>   |   只打字，不回车",
+		Detail: typeDetail},
+	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat"}, TargetKind: TargetChannel,
 		Usage: "key <handle> <key> [--repeat N]"},
-	{Name: "read", Core: true, Kind: KindFlags, Target: true,
+	{Name: "read", Core: true, Kind: KindFlags, Target: true, TargetKind: TargetChannel,
 		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw"},
 		Valueless: []string{"raw"},
 		Usage:     "read <handle> [--cursor N|--from-line N|--tail N] [--stream o|e] [--raw]",
@@ -193,19 +297,19 @@ var ops = []Op{
 		Usage: "ps [--shells] [--all]"},
 	{Name: "info", Core: true, Kind: KindFlags, Target: true,
 		Usage: "info <session|handle>"},
-	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2,
+	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2, TargetKind: TargetChannel,
 		Usage: "resize <handle> <rows> <cols>"},
 	{Name: "close", Core: true, Kind: KindFlags, Target: true, Flags: []string{"force", "grace"}, Valueless: []string{"force"},
 		Usage:  "close <handle|session> [--force] [--grace N]",
 		Detail: closeDetail},
 	{Name: "rm", Kind: KindFlags, Target: true,
 		Usage: "rm <session>"},
-	{Name: "span", Kind: KindFlags, Target: true,
+	{Name: "span", Kind: KindFlags, Target: true, TargetKind: TargetChannel,
 		Usage:  "span <handle>",
 		Detail: spanDetail},
-	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"},
+	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"}, TargetKind: TargetChannel,
 		Usage: "reader <handle>   |   reader <handle> --drop <id>"},
-	{Name: "watch", Kind: KindFlags, Target: true, TargetOptional: true,
+	{Name: "watch", Kind: KindFlags, Target: true, TargetOptional: true, TargetKind: TargetChannel,
 		Flags:     []string{"event", "for", "off", "list", "channel"},
 		Valueless: []string{"list"},
 		Usage:     "watch <handle> [--event output|exit|silence] [--for N] [--channel resource|sampling]   |   watch --off <rule>   |   watch --list",
@@ -338,10 +442,36 @@ consuming cursor, so the bytes the sample already took are no longer there.
 For a program whose output you need in full, prefer pipe (--argv) on the same
 entry — its exit IS observable, so a read after it returns the whole output.`
 
+// typeDetail explains the one thing `type` does that its usage line cannot say in
+// the space it has.
+//
+// A word in Chinese is not enough for a caller writing English, and the failure it
+// prevents is real and reported (issue #131): `type` deliberately does NOT press
+// enter, so `type h make` followed by `run h test` leaves `maketest` on the shell's
+// line — one malformed command, submitted by whichever statement pressed enter.
+// The two directives look interchangeable and are not, which is exactly the kind of
+// difference a `help` page exists to state rather than let each caller discover.
+const typeDetail = `TYPING IS NOT SUBMITTING. type sends the bytes to the shell's input line and
+stops there; nothing runs until something presses enter. That is what makes it
+useful for driving a TUI, where enter would confirm a menu item instead of starting
+a command — and it is the trap when you meant to run a command:
+
+  type h make        line now holds "make", nothing has run
+  run  h test        appends to it — the shell sees "maketest"
+
+So pair a type with an explicit enter, or do not use type for a command:
+
+  type h make; key h enter      type the line, then run it
+  key h enter --repeat 2        enter twice (a TUI that confirms with a blank line)
+  run h make                    one call: type the payload and press enter
+
+key takes the KEY NAME from terminal vocabulary — enter, tab, esc, space, up,
+down, left, right, backspace, delete, home, end, pageup, pagedown, or a single
+character. --repeat N presses it N times in one call.`
+
 // fileDetail is the file directive's flag map.
 //
-// The one-line Usage can only name the actions, but `file` carries more flags than
-// any other directive (22, versus 3-7 elsewhere) and each action accepts a
+// The one-line Usage can only name the actions, but `file` carries more flags than// any other directive (22, versus 3-7 elsewhere) and each action accepts a
 // different subset. Without this page the flags were reachable only by guessing
 // or by reading the source: `help file` was 106 bytes while `help watch` was 999,
 // so the directive with the most parameters had the least documentation.
@@ -370,6 +500,20 @@ writes at that byte position and leaves the rest alone. That is what makes a
 large upload resumable chunk by chunk from N, but it also means a transfer
 interrupted at offset 0 cannot be resumed by rewriting its first chunk at 0 —
 that restarts the file rather than filling it. Re-send from offset 0 instead.
+
+--data IS NOT RAW BYTES: it is read by the parser as a value (quoting removed,
+nothing evaluated) and then DECODED by --mode. With --mode text the sequences
+\n \r \t \xHH become the byte they name — that is the documented way to put a
+newline in a payload, so --data "line1\nline2" writes two lines rather than the
+characters l-i-n-e-1-backslash-n. With --mode hex the value is hex and writes
+those exact bytes; a payload that is already binary belongs in --mode hex or in
+--local-path, never in --mode text.
+
+Quoting is the SHELL's, not this protocol's: a flag value is the caller's own
+bytes with the quotes removed and nothing else touched. --data '$HOME' writes the
+five characters $HOME, and so does --data "$HOME" — the parser reports where an
+expansion SITS instead of guessing what it means. Single quotes are still the
+cleaner habit, because they are unambiguous about what is literal.
 
 --action-verb is the older spelling of --op and does the same thing; --op wins if
 both are given. Prefer --op.
@@ -561,8 +705,14 @@ is no orphaned listener to remember. A listing is a read and is not reviewed;
 opening and closing are reviewed, so expect a 202 and wait rather than retrying.`
 
 // closeDetail states the kill deadline, which otherwise looks instantaneous.
-const closeDetail = `--force terminates a whole session; a channel closes with or without it. --grace N
-is how many seconds a process gets to exit before it is killed. Default: 5.`
+const closeDetail = `A CHANNEL is closed by its handle: close <session>:<index> (what ps prints).
+A SESSION is terminated by its id: close <session> --force. The two are different
+actions with different lifecycles: closing a channel leaves the connection and
+other channels intact; terminating the session stops every channel and drops the
+transport, keeping the entry in the archive as exited with its output still
+readable via shell_output.
+
+--grace N gives a process N seconds to exit before SIGKILL. Default: 5.`
 
 // argvDetail is the --argv contract: a word list, not a command line. It is
 // stated on `help pipe` because both failure modes are silent or come from the
@@ -762,7 +912,7 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		return Statement{}, false, nil
 	}
 	opWord := call.Args[0]
-	name, ok := literalWord(opWord)
+	name, ok := literalWord(src, opWord)
 	if !ok {
 		// e.g. "$X" as the directive: not a directive this parser can name.
 		return Statement{}, false, nil
@@ -793,16 +943,16 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		   the reply's op) keys on the canonical one. `extensions list` therefore
 		   runs `ext` with no special case anywhere below this line. */
 		Op:    op.Name,
-		Flags: map[string]string{},
+		Flags: map[string]*string{},
 		Path:  strings.TrimSpace(src[stmt.Pos().Offset():bodyEnd]),
 	}
 
 	var rest []word
 	for _, arg := range call.Args[1:] {
-		text, _ := literalWord(arg)
+		text, _ := literalWord(src, arg)
 		rest = append(rest, word{
 			text:  text,
-			lit:   wordLiteral(arg),
+			lit:   wordLiteral(src, arg),
 			start: arg.Pos().Offset(),
 			end:   arg.End().Offset(),
 		})
@@ -828,6 +978,9 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		default:
 			out.Target = rest[0].text
 			rest = rest[1:]
+			if err := checkTargetKind(op, out.Target); err != nil {
+				return Statement{}, false, err
+			}
 		}
 	}
 
@@ -873,15 +1026,26 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 				} else {
 					val = tail
 				}
-				out.Flags[key] = strings.TrimSpace(val)
+				// A RestValue flag requires a following word, so this branch
+				// always HAS a value: it is never absent and never empty.
+				storeFlag(out.Flags, key, strings.TrimSpace(val))
 				i = len(rest)
 				break
 			}
-			if val == "" && !valuelessFlag(op, key) && i+1 < len(rest) && !strings.HasPrefix(rest[i+1].text, "--") {
+			hadEquals := strings.Contains(rest[i].text, "=")
+			if val == "" && !hadEquals && !valuelessFlag(op, key) && i+1 < len(rest) && !strings.HasPrefix(rest[i+1].text, "--") {
 				val = rest[i+1].lit
+				hadEquals = true
 				i++
 			}
-			out.Flags[key] = val
+			// Three states, preserved: no `=` and no value word means the flag was
+			// written without one (nil); `--name=` and an explicitly empty value
+			// both carry an explicit empty string.
+			if !hadEquals && !valuelessFlag(op, key) && val == "" {
+				out.Flags[key] = nil
+			} else {
+				storeFlag(out.Flags, key, val)
+			}
 			i++
 		}
 		if i == len(rest) {
@@ -950,14 +1114,20 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 				} else {
 					val = tail
 				}
-				out.Flags[key] = strings.TrimSpace(val)
+				storeFlag(out.Flags, key, strings.TrimSpace(val))
 				break
 			}
-			if val == "" && !valuelessFlag(op, key) && i+1 < len(rest) && !strings.HasPrefix(rest[i+1].text, "--") {
+			hadEquals := strings.Contains(w.text, "=")
+			if val == "" && !hadEquals && !valuelessFlag(op, key) && i+1 < len(rest) && !strings.HasPrefix(rest[i+1].text, "--") {
 				val = rest[i+1].lit
+				hadEquals = true
 				i++
 			}
-			out.Flags[key] = val
+			if !hadEquals && !valuelessFlag(op, key) && val == "" {
+				out.Flags[key] = nil
+			} else {
+				storeFlag(out.Flags, key, val)
+			}
 		}
 	}
 
@@ -969,6 +1139,75 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		}
 	}
 	return out, true, nil
+}
+
+// checkTargetKind enforces an Op's TargetKind declaration at PARSE time.
+//
+// It is here, in the parser, and not in the dispatch layer, because that is the one
+// place a bad target can be refused with a usage line BEFORE anything runs. The two
+// bugs that produced this check both came from the opposite arrangement — resolve
+// first, fall back when the resolution is ambiguous:
+//
+//	close <session> --force   resolved to the session's primary shell, closed that,
+//	                          answered 204, and left the session running (#132)
+//	run <session> ls          resolved to the primary shell, which is a guess when
+//	                          the session has several channels
+//
+// A channel target must therefore say WHICH channel. The spelling that does is
+// `<session>:<index>` (what `ps` prints for every channel, index 1 included) and a
+// resource locator with an index. A bare session id is none of them: it names a
+// container, and a container is not a channel.
+func checkTargetKind(op Op, target string) *Error {
+	if op.TargetKind != TargetChannel {
+		return nil
+	}
+	if NamesAChannel(target) {
+		return nil
+	}
+	return &Error{Op: op.Name, Msg: ChannelTargetProblem(op, target), Usage: op.Usage}
+}
+
+// ChannelTargetProblem is the message for a target that names a container where a
+// channel was required.
+//
+// It is exported because the same refusal happens at two layers — the parser and
+// the dispatch entry — and the two must say the same thing. It names `ps` and the
+// shape rather than just rejecting, because "which channel" is answerable in one
+// line and an error that only refuses leaves the caller to work it out.
+func ChannelTargetProblem(op Op, target string) string {
+	return op.Name + " needs a CHANNEL, not \"" + target + "\". Run `ps` and use the handle it prints (`<session>:N`); a session is the container, and which of its channels to use is not something this directive will guess."
+}
+
+// NamesAChannel reports whether a target explicitly names channels, one per entry.
+//
+// The rule is one comparison per entry: a handle carries a non-zero channel index.
+// That is what `locator.SplitHandle` already decides for every other reader, so a
+// target this function accepts is exactly a target the resolvers will read as a
+// channel — there is no second spelling to keep in sync.
+//
+// A COMMA-SEPARATED BATCH is accepted when EVERY entry names a channel: `a:1,b:2`
+// is two channels, while `a:1,b` mixes a channel with a container and is refused as
+// a whole. All-or-nothing is the same rule a batch already follows everywhere else
+// (one bad statement refuses the batch), and it keeps the caller from getting half
+// a reply without knowing which half was guessed at.
+//
+// A bare session id, an entry name and a `#<session>` locator all have index 0 and
+// are therefore NOT channel targets. That is the breaking change: `run <session>`
+// used to work by falling back to the primary channel, and now it is refused at
+// parse time.
+func NamesAChannel(target string) bool {
+	entries := strings.Split(target, ",")
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if locator.SplitHandle(entry).Index <= 0 {
+			return false
+		}
+	}
+	// An all-empty target is not a channel either.
+	return len(entries) > 0 && strings.TrimSpace(target) != ""
 }
 
 // word is a parsed argument plus its byte range in the source, so a payload can
@@ -1014,52 +1253,103 @@ func restOfStatement(src string, stmt *syntax.Stmt) string {
 	return ""
 }
 
-// wordLiteral is the shell's reading of one word: the parts joined WITHOUT quotes,
-// and without expansion. A word assembled from several parts has no single Lit, so
-// each part contributes its own literal text.
-func wordLiteral(w *syntax.Word) string {
+// wordLiteral is the shell's reading of one word: the caller's own bytes with the
+// quoting removed, and NOTHING else touched.
+//
+// The rule is "read the source slice, not the node". `syntax` offers a `Value` on
+// every literal, and it is not a byte-faithful copy of what the caller typed:
+//
+//	quoted CRLF   Value drops the CR   ("a\r\nb" parses to a\nb)
+//	quoted CR     Value keeps it
+//	$((1+2))      Value does not exist at all
+//
+// `Value` is the parser's model of what a shell WOULD expand to, which is not what
+// this protocol wants: the caller is writing a value, not asking for expansion. The
+// source slice at Pos()/End() is the bytes they wrote, so that is what a flag value
+// and an interpreted word are read from.
+//
+// What this replaced lost data in three separate ways, all silent:
+//
+//   - A `*syntax.DblQuoted` only copied its `*syntax.Lit` children, so anything
+//     else inside the quotes vanished: `--data "$HOME/x"` became `/x`, and
+//     `--data "A`core`B"` became `AB`.
+//   - `partText` INVENTED text for unquoted expansions: `$B` came back as `${B}`
+//     and `$((1+2))` as `…` — the parser rewriting the caller's command.
+//   - `SglQuoted.Value` and `Lit.Value` drop a CR, so a quoted CRLF lost its CR.
+//
+// The payload never came through here (it is sliced whole), which is why `run` was
+// unaffected by all three while `--data` was mangled by each.
+func wordLiteral(src string, w *syntax.Word) string {
 	if w == nil {
 		return ""
 	}
-	if lit := w.Lit(); lit != "" || len(w.Parts) == 0 {
-		return lit
-	}
 	var b strings.Builder
 	for _, part := range w.Parts {
-		switch p := part.(type) {
-		case *syntax.Lit:
-			b.WriteString(p.Value)
-		case *syntax.SglQuoted:
-			b.WriteString(p.Value)
-		case *syntax.DblQuoted:
-			for _, inner := range p.Parts {
-				if lit, ok := inner.(*syntax.Lit); ok {
-					b.WriteString(lit.Value)
-				}
-			}
-		default:
-			// A construct the parser must not evaluate ($VAR, $(cmd), a process
-			// substitution). It is kept VERBATIM so the shell downstream expands
-			// it; the parser's job is to hand it over intact, never to guess.
-			b.WriteString(partText(part))
-		}
+		writeWordPart(&b, src, part)
 	}
 	return b.String()
 }
 
-// partText renders an unexpanded part from its source text. The syntax package
-// offers no literal for a parameter expansion (that would be evaluating it), so
-// the source slice is the honest answer — quoted so the shell reads it as the
-// single word it was.
-func partText(part syntax.Node) string {
+// writeWordPart appends one part's bytes to b: quotes removed, everything else
+// verbatim.
+func writeWordPart(b *strings.Builder, src string, part syntax.WordPart) {
 	switch p := part.(type) {
-	case *syntax.ParamExp:
-		return "${" + p.Param.Value + "}"
-	case *syntax.CmdSubst:
-		return "$(…)"
+	case *syntax.DblQuoted:
+		// The quotes are the caller's quoting, so they are dropped; what is INSIDE
+		// them is theirs and is copied byte for byte, recursively — including the
+		// parts that are not literals.
+		for _, inner := range p.Parts {
+			writeWordPart(b, src, inner)
+		}
+	case *syntax.SglQuoted:
+		b.WriteString(quotedBody(src, p))
 	default:
-		return "…"
+		// A literal, or a construct the parser must not evaluate ($VAR, $(cmd),
+		// `cmd`, $((…)), <(…)). All of them are handed over as the caller spelled
+		// them: the parser's job is to hand a value through intact, never to guess
+		// at it or to rewrite it into a spelling it likes better.
+		b.WriteString(sourceSpan(src, part))
 	}
+}
+
+// quotedBody is a single-quoted part's bytes without its quotes.
+//
+// It cannot come from Value: that form drops a CR from a CRLF, so a quoted
+// `a\r\nb` arrived as `a\nb` and the caller's line ending was gone.
+func quotedBody(src string, q *syntax.SglQuoted) string {
+	body := sourceSpan(src, q)
+	// $'…' has two bytes of opening delimiter, '…' has one, and both close with one.
+	open := 1
+	if q.Dollar {
+		open = 2
+	}
+	if len(body) < open+1 {
+		return q.Value
+	}
+	return body[open : len(body)-1]
+}
+
+// sourceSpan is a node's own bytes, or "" if the range is not inside src.
+//
+// The bounds check is not defensive noise: a caller may Parse a slice of a larger
+// string, and an out-of-range position must yield no bytes rather than panic in the
+// middle of a reply.
+func sourceSpan(src string, node syntax.Node) string {
+	start, end := int(node.Pos().Offset()), int(node.End().Offset())
+	if start < 0 || end > len(src) || start >= end {
+		return ""
+	}
+	return src[start:end]
+}
+
+// storeFlag records an explicit value.
+//
+// Every write goes through here or through a `nil` assignment, so the three states
+// (absent / no-value / empty-value) have exactly two spellings in this file and
+// neither can be produced by accident.
+func storeFlag(flags map[string]*string, key, val string) {
+	v := val
+	flags[key] = &v
 }
 
 // splitFlag reads --name and --name=value.
@@ -1120,11 +1410,11 @@ func allowedFlag(op Op, key string) bool {
 // in its source spelling and then fails to resolve visibly. The payload never
 // comes through here — it is sliced, because the shell downstream must see the
 // quotes.
-func literalWord(w *syntax.Word) (string, bool) {
+func literalWord(src string, w *syntax.Word) (string, bool) {
 	if w == nil {
 		return "", false
 	}
-	return wordLiteral(w), true
+	return wordLiteral(src, w), true
 }
 
 // SplitArgv turns a --argv value into the executable and its arguments.
@@ -1170,7 +1460,7 @@ func shellWords(raw string) ([]string, error) {
 	}
 	words := make([]string, 0, len(call.Args))
 	for _, w := range call.Args {
-		words = append(words, wordLiteral(w))
+		words = append(words, wordLiteral(raw, w))
 	}
 	return words, nil
 }

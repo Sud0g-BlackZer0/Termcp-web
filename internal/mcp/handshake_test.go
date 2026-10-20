@@ -84,10 +84,14 @@ func TestMcpHandshakeRunsOncePerHandle(t *testing.T) {
 // call (which is what the original code did), the second walks straight in and
 // sends its own — two.
 //
-// It drives jrpcReady directly because Server is not safe for concurrent Term
-// calls: s.currentReply is assigned per call and unguarded, a pre-existing issue
-// outside this change, so a Term-level test would report that unrelated race and
-// prove nothing about this one.
+// It drives jrpcReady directly because the property under test is that ONE helper
+// holds its lock across the handshake. A Term-level test would exercise the whole
+// dispatch path and could pass or fail for reasons unrelated to this lock; the
+// helper is where the guarantee lives.
+//
+// (This used to say Server was unsafe for concurrent Term calls, because
+// s.currentReply was per-call state on the shared value. That field is gone — see
+// TestLearnModeUsageIsPerReply — so a concurrent Term is now legal.)
 func TestJrpcReadyHoldsItsLockAcrossTheHandshake(t *testing.T) {
 	release := make(chan struct{})
 	srv, inits := countingPeer(t, release)

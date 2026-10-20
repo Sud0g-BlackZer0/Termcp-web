@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **句柄只有一个形式，通道与容器不再有歧义（破坏性）**。通道句柄现在永远是 `<session>:<index>`（`pty internal` 也返回 `abc:1` 而不是裸 `abc`），而裸 session id 是容器。`run` / `type` / `key` / `read` / `resize` / `reader` / `watch` / `span` 这些操作**通道**的指令只接受通道形，传裸 session id 在**解析期**就回 400 并附 usage，不再回退到 primary shell。之前正是这个回退让 `close <session> --force` 变成静默 no-op（#132），也让 `run <session>` 在多通道会话上默默猜一个；`span <session>` 同样在读 primary 通道的记录。`shell_id` 退回内部实现：磁盘目录、SSH channel、日志、审阅队列仍按它索引，但它不再是调用方看得到的第二种写法。
+
+- **序号是稳定身份，不会漂移**。`nextShellIndex` 只增不减且在 `shellStateMu` 内递增，**关闭的通道序号永不复用**（`TestChannelIndexIsMonotonicAndNeverReused`），重启时从 manifest 的 `maxShellIndex` 续接（`TestChannelIndexSurvivesRestart`）。所以 `sid:N` 在整个会话生命周期内指向唯一一个通道：通道关闭后它指向一个 exited 通道，绝不会指向后来新建的那个。
+
+- **`close` 按意图路由，不再靠“能不能解析成 shell”猜（#132）**。带了 `--force` 或 `--grace`，或者目标是一个会话而不是它的某个通道，就走 `session_terminate`；其余走 `shell_close`。目标既不是会话也不是通道时是这个类别的第三处静默：以前也回 204，现在回 `session_not_found` 的 404。
+
+- **flag 值不再被静默改写（#131 P0-1）**。`--data` 这类取值走的是 `mvdan.cc/sh` 的字面量，而那个字面量不是调用方所写字节的副本：双引号里只有 `*syntax.Lit` 被拷贝，其余部分直接消失，于是 `--data "A`core`B"` 写成 `AB`、`--data "$HOME/x"` 写成 `/x`；单引号与双引号里的 CRLF 丢掉 CR；`$B` 被改写成 `${B}`、`$((1+2))` 被改成 `…`。现在按 part 取源码切片并递归，只去掉引号本身。payload 一直是整片切出来的，所以 `run` 从未受影响 —— 这也是为什么只有 flag 值需要修。顺带把 `help file` 写明：`--data` 会按 `--mode` 解码（`text` 下 `\n` 是换行），要二进制请用 `hex` 或 `--local-path`。
+
+- **`cmd` 不是字符串时是 400，不再退化成引导页（#131 P0-3）**。旧读取器对任何不合用的 `cmd` 都返回 `""`，而 `""` 正是引导页 —— 于是桥接层把参数弄坏的那次调用，回的是一个像成功一样的、描述整套协议的回复，没有任何地方说命令丢了。absent / null / 字符串以外的三态现在分开判定，两个入口（MCP 与 `POST /api/term`）读同一处。
+
+- **数字 flag 与窗口参数不再有「猜一个默认值」的兜底**。`flagNumber` 解析失败曾返回 0，而 0 在几乎所有落点都是合法值：`resize abc xyz` 变成 24x80 的一次真实 resize 并回 204，`--tail abc` 变成「没有 tail」，`--grace abc` 变成「没有 grace」，`--port abc` 变成端口 0。现在解析失败按 flag 名回 400，`resize` 的零/负尺寸同样拒绝。窗口参数（`timeout` / `*_limit` / 三个 `on_*_overflow`）同理：absent 取声明的默认值，写了但类型不对或越界是 400，边界只在 `termArgDecls` 声明一次并向 schema、解析器、`docs/api.md` 三处同时生效。
+
+- **flag 的三态（缺席 / 写了没值 / 显式空值）不再被压成两态**。`--remote-path` 没写值时，此前和 `--remote-path ''` 一样到达处理器，读者无法区分「调用方想要一个空值」和「值在引号或续行里掉了」，两种情况只能猜；`--data ''` 也因同一处被当成未设置，于是连空文件都写不出来。现在 `--name` 无值是 `flag_needs_value` 400 并点名该 flag，显式空值照常传递。
+
+- **`Server` 可以对并发的 `Term` 调用安全并发**。`s.currentReply` 是每次调用赋值的共享字段（用于 learn_mode 去重），两个调用会互相覆盖对方的记账；它同时也是多余的——`runStatements` 本来就为每条语句附加 usage。字段删掉后累计器是局部值。`alias` 表原本是一张裸 map，`alias x …` 与任何解析并发就是 map 读写竞态，现在有一把 RWMutex。
+
+- **`X-Termcp-Text` 不再静默丢掉 `\r`**。同一个字段在 JSON body 与这个 header 里曾渲染出两个不同的字符串（`Path` 里的 CR 在 body 里保留、在 header 里消失），读 header 的调用方拿到一个不存在的路径而没有任何提示。现在 `\r` 与 `\n` 一样转义，两个投影逐字节一致。
+
+- **`help type` 有了自己的说明**。`type` 有意不回车，于是 `type h make` 之后接 `run h test` 会在 shell 命令行上留下 `maketest` —— 两条指令看起来可以互换，实际不能。这一页现在明说这一点，并给出「type 配 key enter」或「直接用 run」的写法。
+
 - **本地转发可以绑定非回环地址（`--bind-host`）**。`-L` / `-D` 此前把监听地址写死成 `127.0.0.1`，而 `--local-host` 这个 flag 从语法到文档都说支持覆盖、实际没有任何一个 local/dynamic 调用点读它——设了也照旧只绑回环。现在监听地址有自己的名字（`bind_host`，`--bind-host`），与 `-R` 的 `local_host`（目标机器绑哪里）分开：`0.0.0.0` 或 `*` 表示发布到本机所有接口。默认仍是回环，因为转发承载的是一条已认证的隧道。扩展模板同理，`bind_host` 是新字段，写在 local/dynamic 声明上的旧 `local_host` 按原意生效而不是继续被忽略。
 
 - **`-D`（SOCKS5）拒绝非回环绑定**。这套 SOCKS5 握手不带认证（与 `ssh -D` 一致），绑到别的接口就等于给能连上它的人一个开放代理。要发布一个具体服务请用 `-L`：它承载一个固定目标，而不是「随便拨」。

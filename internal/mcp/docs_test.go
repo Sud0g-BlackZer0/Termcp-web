@@ -595,7 +595,7 @@ func TestStreamableTransportScopesByNamespaceHeader(t *testing.T) {
 	})
 
 	t.Run("a peer cannot drive the other's session", func(t *testing.T) {
-		res := bob.callTerm(t, "type "+aliceSid+" echo pwned")
+		res := bob.callTerm(t, "type "+aliceSid+":1 echo pwned")
 		if !res.IsError {
 			t.Fatal("bob wrote to alice's session")
 		}
@@ -723,11 +723,16 @@ func (c *mcpSession) startSession(t *testing.T) string {
 	if res.IsError {
 		t.Fatalf("pipe failed: %+v", res)
 	}
-	// The handle is <session> when the session's primary shell is the channel, so
-	// the reply's Handle header is the id these tests scope by.
+	// The reply's Handle is now always `<session>:<index>` — a handle names a
+	// channel, including the primary one, so that a channel handle and a session
+	// id have different shapes. These tests scope by SESSION id, so strip the
+	// index here once rather than at every use.
 	text := res.Content[0].(mcpgo.TextContent).Text
 	for _, line := range strings.Split(text, "\n") {
 		if h, ok := strings.CutPrefix(line, "Handle: "); ok {
+			if sid, _, found := strings.Cut(h, ":"); found {
+				return sid
+			}
 			return h
 		}
 	}

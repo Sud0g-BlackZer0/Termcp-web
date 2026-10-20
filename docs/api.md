@@ -1805,7 +1805,7 @@ Response 200:
 ```
 
 <!-- BEGIN termdoc: args -->
-| `cmd` | Empty or omitted returns the guide (where am I, what can I do, what is here) — never an error |
+| `cmd` | Empty or omitted returns the guide (where am I, what can I do, what is here) — never an error. A `cmd` that is present but not a string is a 400: a command that was sent and did not survive the transport is not the same request as one never sent |
 | `timeout` | Seconds to wait (default 2; a pipe returns as soon as its process exits) |
 | `bytes_limit` | Max bytes per slot (default 8192; `0` = the handle only, no bytes) |
 | `lines_limit` | Max lines per slot (default 200; `0` = no line limit) |

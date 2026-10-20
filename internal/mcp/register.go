@@ -44,6 +44,17 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 
 	mcpServer := mcpserver.NewMCPServer("termcp", version,
 		mcpserver.WithInstructions(mcpServerInstructions),
+		// Validate tool arguments against the published schema. The args table
+		// carries types, enums and bounds, so a client that sends `timeout: "abc"`
+		// or an unknown overflow policy is refused at the protocol layer, before any
+		// handler runs.
+		//
+		// This does NOT replace parseTermArgs' own checks, and the reason is the two
+		// entrances: mcp-go validates on the MCP transport, while POST /api/term calls
+		// Term directly and would bypass it. The parser is the one path both share,
+		// so it keeps the same rules; this layer exists so a client sees the refusal
+		// for the call it made, with its own schema in hand.
+		mcpserver.WithInputSchemaValidation(),
 		// Resources are read-only docs (resources/list + resources/read) and the
 		// list is fixed at startup, so no subscribe/listChanged: mcp-go v0.50 has
 		// no subscribe handler, and claiming it would break clients that try.

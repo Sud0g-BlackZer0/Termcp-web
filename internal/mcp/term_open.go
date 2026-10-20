@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
@@ -47,7 +48,7 @@ func (s *Server) directiveOpen(ctx context.Context, stmt directive.Statement, wi
 		return []envelope.Slot{slot}
 	}
 
-	argv := strings.TrimSpace(stmt.Flags["argv"])
+	argv, _ := stmt.Flag("argv")
 	args := argsOf("mode", mode)
 	if argv != "" {
 		cmd, argvParts, err := directive.SplitArgv(argv)
@@ -72,13 +73,13 @@ func (s *Server) directiveOpen(ctx context.Context, stmt directive.Statement, wi
 			args["args"] = list
 		}
 	}
-	if name, ok := stmt.Flags["name"]; ok {
+	if name, ok := stmt.Flag("name"); ok {
 		args["name"] = name
 	}
-	if onExit, ok := stmt.Flags["on-exit"]; ok {
+	if onExit, ok := stmt.Flag("on-exit"); ok {
 		args["on_exit"] = onExit
 	}
-	if size, ok := stmt.Flags["size"]; ok {
+	if size, ok := stmt.Flag("size"); ok {
 		rows, cols := parseSize(size)
 		if rows > 0 {
 			args["rows"] = float64(rows)
@@ -159,22 +160,63 @@ func parseSize(raw string) (rows, cols int) {
 
 // runtimeAliases is this process's alias table.
 //
-// ponytail: a plain map with one lock, because an alias table is written a handful
-// of times per session and read once per statement; upgrading to sharded storage
-// would be code that never runs in the hot path it was written for.
+// The lock is NOT decoration: a Term call is allowed to run concurrently with
+// another (the MCP server hands each request to its own goroutine, and HTTP does
+// the same), so an `alias jira …` in flight races every statement being parsed
+// against a plain map. That is a data race the Go runtime panics on under -race and
+// corrupts under load — the worst kind, because it shows up as an alias resolving
+// to a mangled expansion rather than as a crash.
+//
+// ponytail: one RWMutex over one map. An alias table holds a handful of entries and
+// is read once per statement, so sharding it would be code that never runs in the
+// hot path it was written for.
 type aliasTable struct {
-	m map[string]string
+	mu sync.RWMutex
+	m  map[string]string
 }
 
-// aliases is the process-wide table, guarded by the server's own lifecycle: it is
-// only touched from directive handling, which is serialised per call.
+// aliases is the process-wide table.
 var aliases = &aliasTable{m: map[string]string{}}
+
+// get reads one entry.
+func (a *aliasTable) get(name string) (string, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	v, ok := a.m[name]
+	return v, ok
+}
+
+// set writes one entry.
+func (a *aliasTable) set(name, expansion string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.m[name] = expansion
+}
+
+// drop removes one entry.
+func (a *aliasTable) drop(name string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.m, name)
+}
+
+// snapshot copies the table for a listing, so the reply is rendered from one
+// consistent moment instead of iterating a map another goroutine may be editing.
+func (a *aliasTable) snapshot() map[string]string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make(map[string]string, len(a.m))
+	for k, v := range a.m {
+		out[k] = v
+	}
+	return out
+}
 
 // Expand resolves a directive's first word through the alias table. The
 // expansion may itself name an alias, so resolution repeats until it reaches a
 // real directive (with a cycle guard).
 func (a *aliasTable) Expand(stmt directive.Statement) directive.Statement {
-	if _, ok := a.m[stmt.Op]; !ok {
+	if _, ok := a.get(stmt.Op); !ok {
 		return stmt
 	}
 	if resolved, ok := a.resolve(stmt.Op, strings.TrimSpace(stmt.Target+" "+stmt.Payload)); ok {
@@ -199,7 +241,7 @@ func (a *aliasTable) expandError(err error) (directive.Statement, bool) {
 func (a *aliasTable) resolve(name, rest string) (directive.Statement, bool) {
 	seen := map[string]bool{}
 	for {
-		expansion, ok := a.m[name]
+		expansion, ok := a.get(name)
 		if !ok || seen[name] {
 			return directive.Statement{}, false
 		}
@@ -207,7 +249,7 @@ func (a *aliasTable) resolve(name, rest string) (directive.Statement, bool) {
 		f, err := directive.Parse(strings.TrimSpace(expansion + " " + rest))
 		if err == nil && len(f.Statements) == 1 {
 			stmt := f.Statements[0]
-			if _, next := a.m[stmt.Op]; !next {
+			if _, next := a.get(stmt.Op); !next {
 				return stmt, true
 			}
 			name, rest = stmt.Op, strings.TrimSpace(stmt.Target+" "+stmt.Payload)
@@ -228,11 +270,12 @@ func (s *Server) directiveAlias(_ context.Context, stmt directive.Statement, win
 	// re-quoted: what the caller writes is what the alias runs.
 	body := strings.TrimSpace(stmt.Payload)
 	if body == "" {
-		if len(aliases.m) == 0 {
+		entries := aliases.snapshot()
+		if len(entries) == 0 {
 			return envelope.Slot{Code: 200, Headers: headers, Body: "(no aliases)\n"}
 		}
 		var b strings.Builder
-		for name, expansion := range aliases.m {
+		for name, expansion := range entries {
 			b.WriteString(name + " = " + expansion + "\n")
 		}
 		capped, code := capGenerated(b.String(), win)
@@ -241,13 +284,13 @@ func (s *Server) directiveAlias(_ context.Context, stmt directive.Statement, win
 	name, expansion, _ := strings.Cut(body, " ")
 	name, expansion = strings.TrimSpace(name), strings.TrimSpace(expansion)
 	if expansion == "--off" {
-		delete(aliases.m, name)
+		aliases.drop(name)
 		return envelope.Slot{Code: 204, Headers: headers}
 	}
 	if expansion == "" {
 		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
 			Body: "alias needs a directive to expand to: alias jira mcp open https://..."}
 	}
-	aliases.m[name] = expansion
+	aliases.set(name, expansion)
 	return envelope.Slot{Code: 204, Headers: headers}
 }

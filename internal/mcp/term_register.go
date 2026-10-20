@@ -45,10 +45,21 @@ func termArgToolOptions() []mcpgo.ToolOption {
 			}
 			out = append(out, mcpgo.WithString(d.Name, opts...))
 		case argNumber:
-			out = append(out, mcpgo.WithNumber(d.Name,
+			// The declared bounds ride on the schema so a client can refuse a bad value
+			// BEFORE the call. parseTermArgs enforces the same numbers, because the REST
+			// entrance never reaches mcp-go's validator — one declaration, two
+			// enforcement points, no drift.
+			opts := []mcpgo.PropertyOption{
 				mcpgo.Description(d.Desc),
 				mcpgo.DefaultNumber(numDefault(d.Name)),
-			))
+			}
+			if v, ok := boundValue(d.Min); ok {
+				opts = append(opts, mcpgo.Min(v))
+			}
+			if v, ok := boundValue(d.Max); ok {
+				opts = append(opts, mcpgo.Max(v))
+			}
+			out = append(out, mcpgo.WithNumber(d.Name, opts...))
 		case argBool:
 			out = append(out, mcpgo.WithBoolean(d.Name,
 				mcpgo.Description(d.Desc),

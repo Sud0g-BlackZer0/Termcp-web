@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -61,6 +63,19 @@ type termArgDecl struct {
 
 	// Enum lists the accepted values for argEnum.
 	Enum []string
+
+	// Min and Max are the accepted range for an argNumber. A nil bound means
+	// "unbounded on that side".
+	//
+	// They are declared HERE, next to the default, because the three readers must
+	// not be able to disagree: the schema publishes them (so a client can refuse a
+	// bad value before the call), parseTermArgs enforces them (so the REST entrance,
+	// which never reaches mcp-go's schema validator, refuses exactly the same
+	// values), and docs/api.md renders them. Before this, the schema carried only a
+	// `default`, the parser carried an if-chain of ranges, and the doc carried prose
+	// — three copies of one rule.
+	Min any
+	Max any
 }
 
 // termArgDecls is THE table. Order is publication order: the schema and the doc
@@ -71,7 +86,7 @@ var termArgDecls = []termArgDecl{
 		Name:    "cmd",
 		Kind:    argString,
 		Desc:    "One terminal line, e.g. `run a1f3:1 ls -la`. Empty = guide: usage summary plus what is available to act on now.",
-		DocNote: "Empty or omitted returns the guide (where am I, what can I do, what is here) — never an error",
+		DocNote: "Empty or omitted returns the guide (where am I, what can I do, what is here) — never an error. A `cmd` that is present but not a string is a 400: a command that was sent and did not survive the transport is not the same request as one never sent",
 		Def:     "",
 		DefText: "",
 	},
@@ -82,6 +97,8 @@ var termArgDecls = []termArgDecl{
 		DocNote: fmt.Sprintf("Seconds to wait (default %d; a pipe returns as soon as its process exits)", defaultTimeoutSeconds),
 		Def:     defaultTimeoutSeconds,
 		DefText: strconv.Itoa(defaultTimeoutSeconds),
+		Min:     0,
+		Max:     3600,
 	},
 	{
 		Name:    "bytes_limit",
@@ -90,6 +107,7 @@ var termArgDecls = []termArgDecl{
 		DocNote: fmt.Sprintf("Max bytes per slot (default %d; `0` = the handle only, no bytes)", defaultBytesLimit),
 		Def:     defaultBytesLimit,
 		DefText: strconv.Itoa(defaultBytesLimit),
+		Min:     0,
 	},
 	{
 		Name:    "lines_limit",
@@ -98,6 +116,7 @@ var termArgDecls = []termArgDecl{
 		DocNote: fmt.Sprintf("Max lines per slot (default %d; `0` = no line limit)", defaultLinesLimit),
 		Def:     defaultLinesLimit,
 		DefText: strconv.Itoa(defaultLinesLimit),
+		Min:     0,
 	},
 	{
 		Name:    "total_bytes_limit",
@@ -106,6 +125,7 @@ var termArgDecls = []termArgDecl{
 		DocNote: fmt.Sprintf("Absolute cap for the whole reply (default %d)", defaultTotalBytesLimit),
 		Def:     defaultTotalBytesLimit,
 		DefText: strconv.Itoa(defaultTotalBytesLimit),
+		Min:     1,
 	},
 	{
 		Name:    "on_time_overflow",
@@ -185,45 +205,205 @@ func termArgDeclFor(name string) (termArgDecl, bool) {
 	return termArgDecl{}, false
 }
 
-// parseTermArgs reads the window parameters and range-checks them. A value
-// outside its domain is an argument error, not a silent substitution: a caller
-// that typed 0 where it meant 8192 should be told, not quietly given a different
-// read.
+// parseTermArgs reads the window parameters and checks them. A value outside its
+// domain is an argument error, not a silent substitution: a caller that typed 0
+// where it meant 8192 should be told, not quietly given a different read.
 //
-// The defaults come from termArgDecls, so an argument added to the table is
-// parsed with the default the table publishes — the two cannot drift, and a
-// default that exists in the schema but not in the parser (or the reverse) is not
-// expressible.
+// IT ALSO REFUSES A MISSTyped VALUE, which is the whole reason it reads the raw
+// map instead of calling the loose getters. `getFloat64(args, "timeout", 2)` cannot
+// tell "absent" from "present but not a number", so `timeout: "abc"` used to
+// become 2 seconds with a 200 reply — the caller's typo silently bought a different
+// window. Absent still takes the table's default (that is a documented default,
+// not an accident); present-and-wrong is a 400 that names the argument.
+//
+// This is the one place both entrances pass through: the MCP transport goes via
+// handleTerm and REST calls Term directly, so a check that lived only in mcp-go's
+// schema validator would cover one of the two.
+//
+// The defaults and bounds come from termArgDecls, so an argument added to the table
+// is parsed with the default and the range the table publishes — the schema, this
+// function and docs/api.md read one declaration and cannot drift.
 func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
-	w := termArgs{
-		TimeoutSeconds:    getFloat64(args, "timeout", numDefault("timeout")),
-		BytesLimit:        int(getFloat64(args, "bytes_limit", numDefault("bytes_limit"))),
-		LinesLimit:        int(getFloat64(args, "lines_limit", numDefault("lines_limit"))),
-		TotalBytesLimit:   int(getFloat64(args, "total_bytes_limit", numDefault("total_bytes_limit"))),
-		OnTimeOverflow:    overflowPolicy(args, "on_time_overflow"),
-		OnBytesOverflow:   overflowPolicy(args, "on_bytes_overflow"),
-		OnLinesOverflow:   overflowPolicy(args, "on_lines_overflow"),
-		PipeTo:            strings.TrimSpace(getString(args, "pipe_to", "")),
-		LearnMode:         getBool(args, "learn_mode", false),
-		StructuredContent: getBool(args, "structured_content", false),
+	w := termArgs{}
+	if err := readNumberArg(args, "timeout", &w.TimeoutSeconds); err != nil {
+		return termArgs{}, err
 	}
-	switch {
-	case w.TimeoutSeconds < 0 || w.TimeoutSeconds > 3600:
-		return termArgs{}, &directive.Error{Msg: "timeout must be between 0 and 3600 seconds"}
-	case w.BytesLimit < 0:
-		return termArgs{}, &directive.Error{Msg: "bytes_limit must be >= 0 (0 = handle only, no bytes)"}
-	case w.LinesLimit < 0:
-		return termArgs{}, &directive.Error{Msg: "lines_limit must be >= 0 (0 = no line limit)"}
-	case w.TotalBytesLimit <= 0:
-		return termArgs{}, &directive.Error{Msg: "total_bytes_limit must be > 0: it is the absolute cap for the whole reply"}
-	case w.OnTimeOverflow == "":
-		return termArgs{}, &directive.Error{Msg: "on_time_overflow must be truncate or fold"}
-	case w.OnBytesOverflow == "":
-		return termArgs{}, &directive.Error{Msg: "on_bytes_overflow must be truncate or fold"}
-	case w.OnLinesOverflow == "":
-		return termArgs{}, &directive.Error{Msg: "on_lines_overflow must be truncate or fold"}
+	var bytesLimit, linesLimit, totalLimit float64
+	if err := readNumberArg(args, "bytes_limit", &bytesLimit); err != nil {
+		return termArgs{}, err
+	}
+	if err := readNumberArg(args, "lines_limit", &linesLimit); err != nil {
+		return termArgs{}, err
+	}
+	if err := readNumberArg(args, "total_bytes_limit", &totalLimit); err != nil {
+		return termArgs{}, err
+	}
+	w.BytesLimit, w.LinesLimit, w.TotalBytesLimit = int(bytesLimit), int(linesLimit), int(totalLimit)
+
+	if err := readEnumArg(args, "on_time_overflow", &w.OnTimeOverflow); err != nil {
+		return termArgs{}, err
+	}
+	if err := readEnumArg(args, "on_bytes_overflow", &w.OnBytesOverflow); err != nil {
+		return termArgs{}, err
+	}
+	if err := readEnumArg(args, "on_lines_overflow", &w.OnLinesOverflow); err != nil {
+		return termArgs{}, err
+	}
+	if err := readStringArg(args, "pipe_to", &w.PipeTo); err != nil {
+		return termArgs{}, err
+	}
+	w.PipeTo = strings.TrimSpace(w.PipeTo)
+	if err := readBoolArg(args, "learn_mode", &w.LearnMode); err != nil {
+		return termArgs{}, err
+	}
+	if err := readBoolArg(args, "structured_content", &w.StructuredContent); err != nil {
+		return termArgs{}, err
 	}
 	return w, nil
+}
+
+// readNumberArg fills dst with the argument's value, its declared default when the
+// argument is ABSENT, or a 400 when it is present and unusable.
+func readNumberArg(args map[string]any, name string, dst *float64) *directive.Error {
+	d, ok := termArgDeclFor(name)
+	if !ok {
+		panic("no termArgDecls entry for " + name)
+	}
+	raw, present := args[name]
+	if !present || raw == nil {
+		*dst = numDefault(name)
+		return nil
+	}
+	v, ok := asFloat(raw)
+	if !ok {
+		return &directive.Error{Msg: name + " must be a number, got " + typeNameOf(raw)}
+	}
+	if lo, ok := boundValue(d.Min); ok && v < lo {
+		return &directive.Error{Msg: name + " must be >= " + numText(lo) + ", got " + numText(v)}
+	}
+	if hi, ok := boundValue(d.Max); ok && v > hi {
+		return &directive.Error{Msg: name + " must be <= " + numText(hi) + ", got " + numText(v)}
+	}
+	*dst = v
+	return nil
+}
+
+// readEnumArg enforces a closed value set, and says what the set is: a caller that
+// typed a plausible word needs to see the accepted ones, not just "invalid".
+func readEnumArg(args map[string]any, name string, dst *string) *directive.Error {
+	d, ok := termArgDeclFor(name)
+	if !ok {
+		panic("no termArgDecls entry for " + name)
+	}
+	raw, present := args[name]
+	if !present || raw == nil {
+		*dst = fmt.Sprint(d.Def)
+		return nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return &directive.Error{Msg: name + " must be a string, got " + typeNameOf(raw)}
+	}
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		*dst = fmt.Sprint(d.Def)
+		return nil
+	}
+	for _, allowed := range d.Enum {
+		if s == allowed {
+			*dst = s
+			return nil
+		}
+	}
+	return &directive.Error{Msg: name + " must be one of " + strings.Join(d.Enum, ", ") + ", got \"" + s + "\""}
+}
+
+func readStringArg(args map[string]any, name string, dst *string) *directive.Error {
+	d, ok := termArgDeclFor(name)
+	if !ok {
+		panic("no termArgDecls entry for " + name)
+	}
+	raw, present := args[name]
+	if !present || raw == nil {
+		*dst = fmt.Sprint(d.Def)
+		return nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return &directive.Error{Msg: name + " must be a string, got " + typeNameOf(raw)}
+	}
+	*dst = s
+	return nil
+}
+
+func readBoolArg(args map[string]any, name string, dst *bool) *directive.Error {
+	d, ok := termArgDeclFor(name)
+	if !ok {
+		panic("no termArgDecls entry for " + name)
+	}
+	raw, present := args[name]
+	if !present || raw == nil {
+		*dst = d.Def == true
+		return nil
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		return &directive.Error{Msg: name + " must be true or false, got " + typeNameOf(raw)}
+	}
+	*dst = b
+	return nil
+}
+
+// asFloat accepts every numeric shape a transport may hand over.
+func asFloat(raw any) (float64, bool) {
+	switch n := raw.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		v, err := n.Float64()
+		return v, err == nil
+	}
+	return 0, false
+}
+
+// typeNameOf names what the caller actually sent, so the error is actionable.
+func typeNameOf(raw any) string {
+	switch raw.(type) {
+	case string:
+		return "a string"
+	case bool:
+		return "a boolean"
+	case []any:
+		return "an array"
+	case map[string]any:
+		return "an object"
+	}
+	return fmt.Sprintf("%T", raw)
+}
+
+// boundValue reads a declared Min/Max bound.
+func boundValue(v any) (float64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	return asFloat(v)
+}
+
+// numText renders a bound or a value the way the table spells it, so an error and
+// the schema do not print the same number two ways.
+func numText(v float64) string {
+	if v == math.Trunc(v) {
+		return strconv.FormatInt(int64(v), 10)
+	}
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // numDefault reads a numeric argument's default from the table.
@@ -244,20 +424,6 @@ func numDefault(name string) float64 {
 		return v
 	}
 	panic("termArgDecls entry " + name + " has a non-numeric default")
-}
-
-// overflowPolicy normalises an overflow behaviour. truncate is the default
-// because fold (return nothing this time) has to be asked for: a caller that runs
-// `ls` on a huge directory wants the head of it, not an empty reply.
-func overflowPolicy(args map[string]any, key string) string {
-	v := strings.TrimSpace(strings.ToLower(getString(args, key, "")))
-	switch v {
-	case "", "truncate":
-		return "truncate"
-	case "fold":
-		return "fold"
-	}
-	return "" // invalid; parseTermArgs turns this into a 400
 }
 
 // docTableRows renders the argument table for docs/api.md §16.

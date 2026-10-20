@@ -220,8 +220,11 @@ func TestHTTPTermEntranceIsRecorded(t *testing.T) {
 // does, which is the difference between testing a helper and testing the wire.
 func sourceSeenByHandler(t *testing.T, s *Server) string {
 	t.Helper()
-	sessionID, shellID := startGatedSession(t, s, 1, time.Minute)
-	rec := postTerm(t, s, `{"cmd":"run `+shellID+` echo probe"}`)
+	sessionID, _ := startGatedSession(t, s, 1, time.Minute)
+	// A channel directive takes a handle, and a handle is `<session>:<index>` — the
+	// form `ps` prints. A bare session id is refused at parse time, so this must
+	// not be built from the session id alone.
+	rec := postTerm(t, s, `{"cmd":"run `+sessionID+`:1 echo probe"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (a held command line is a slot, not a request failure)", rec.Code)
 	}
@@ -256,6 +259,72 @@ func TestHTTPTermMalformedBodyIsAnEnvelope(t *testing.T) {
 	}
 	if got := slots[0]["Error-Code"]; got != "invalid_argument" {
 		t.Errorf("Error-Code = %v, want invalid_argument", got)
+	}
+}
+
+// TestCmdThatIsNotAStringIsA400 pins issue #131 P0-3, the worst-reported failure in
+// the report.
+//
+// A `cmd` that is not a string used to be read with a loose getter that answered
+// "" for anything it could not use, and "" is the GUIDE PAGE. So a call whose
+// command had been mangled by a client bridge — the report's stdio wrapper — came
+// back as a successful reply describing the whole protocol, and nothing said the
+// command had been lost. From the caller's side, `run <h> echo OK` sometimes just
+// returned the guide, at random, for hours.
+//
+// The three states have three answers, and they must stay distinct:
+//
+//	absent      -> 200 + guide   (the documented wake-up call)
+//	null        -> 200 + guide   (JSON's spelling of "no value")
+//	not a string -> 400          (a command was sent and did not survive)
+func TestCmdThatIsNotAStringIsA400(t *testing.T) {
+	s := newTestServer(t)
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"number", `{"cmd": 42}`},
+		{"array", `{"cmd": ["ps"]}`},
+		{"object", `{"cmd": {"line": "ps"}}`},
+		{"bool", `{"cmd": true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postTerm(t, s, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for %s; a mangled cmd must not look like the guide", rec.Code, tc.name)
+			}
+			slots := termSlots(t, rec)
+			if got := slots[0]["Error-Code"]; got != "invalid_argument" {
+				t.Errorf("Error-Code = %v, want invalid_argument", got)
+			}
+			body, _ := slots[0]["body"].(string)
+			if !strings.Contains(body, "cmd must be a string") {
+				t.Errorf("the error must name the argument: %q", body)
+			}
+		})
+	}
+}
+
+// TestAbsentCmdIsStillTheGuide is the other half: refusing a mangled cmd must not
+// turn the one legal empty call into an error.
+func TestAbsentCmdIsStillTheGuide(t *testing.T) {
+	s := newTestServer(t)
+	for _, body := range []string{
+		`{}`,
+		`{"cmd": null}`,
+		`{"cmd": ""}`,
+	} {
+		rec := postTerm(t, s, body)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", body, rec.Code)
+			continue
+		}
+		slots := termSlots(t, rec)
+		text, _ := slots[0]["body"].(string)
+		if !strings.Contains(text, "termcp terminal") {
+			t.Errorf("%s did not return the guide: %q", body, text[:min(120, len(text))])
+		}
 	}
 }
 
@@ -479,5 +548,46 @@ func TestTermDocTableCoversTheSchema(t *testing.T) {
 		if _, ok := props[d.Name]; !ok {
 			t.Errorf("the table declares %q but the schema does not", d.Name)
 		}
+	}
+}
+
+// TestEscapeHeaderKeepsCarriageReturns pins that the text projection of a reply is
+// byte-identical to the JSON one.
+//
+// The two are generated from ONE value, so they must not disagree — and they did:
+// escapeHeader handled '\n' and let '\r' fall through `default`, which appended
+// nothing. A Path carrying a CR therefore survived in the body and vanished from
+// X-Termcp-Text, so a caller reading the header saw a path that does not exist with
+// no sign a byte had been removed.
+func TestEscapeHeaderKeepsCarriageReturns(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"a\nb", `a\nb`},
+		{"a\rb", `a\rb`},
+		{"a\r\nb", `a\r\nb`},
+		{"plain", "plain"},
+		{"", ""},
+	} {
+		if got := escapeHeader(tc.in); got != tc.want {
+			t.Errorf("escapeHeader(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestHeaderAndBodyAgreeOnAPathWithCR is the same property from the outside: one
+// reply, two projections, one answer.
+func TestHeaderAndBodyAgreeOnAPathWithCR(t *testing.T) {
+	s := newTestServer(t)
+	rec := postTerm(t, s, `{"cmd": "info \"a\rb\""}`)
+	slots := termSlots(t, rec)
+	bodyPath, _ := slots[0]["Path"].(string)
+	if !strings.Contains(bodyPath, "\r") {
+		t.Fatalf("the JSON Path lost the CR: %q; this test needs a path that has one", bodyPath)
+	}
+	// Undo the header escaping and compare: the header must still describe the same
+	// path, CR included.
+	header := rec.Header().Get("X-Termcp-Text")
+	unescaped := strings.NewReplacer(`\n`, "\n", `\r`, "\r").Replace(header)
+	if !strings.Contains(unescaped, bodyPath) {
+		t.Errorf("projections disagree:\n  body   Path = %q\n  header text = %q", bodyPath, unescaped)
 	}
 }
