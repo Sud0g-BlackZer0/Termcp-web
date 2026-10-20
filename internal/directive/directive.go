@@ -116,6 +116,15 @@ type Op struct {
 	// the program's arguments without an error, which is the worst failure
 	// mode. These flags must come last: a known flag after one is refused.
 	RestValue []string
+	// PayloadSpan is how a reference inside this directive's payload reaches its
+	// destination. The zero value (spanCommandLine) is the ordinary case.
+	//
+	// ONE FIELD, NOT TWO FLAGS. It was a pair of booleans (PerWordRaw, FramePayload)
+	// and every reader had to know which won when both were set — a question the
+	// declarations could not answer and nothing enforced. The mode is exclusive by
+	// construction: a payload is read by a shell (quoting applies), by an argv parser
+	// (whole words apply), or by a protocol peer (nothing shell-side applies).
+	PayloadSpan spanMode
 	// AlsoKnownAs lists extra spellings that resolve to this directive.
 	//
 	// They exist for the names a caller reaches for before reading `help` — the
@@ -243,6 +252,15 @@ type Error struct {
 	// Rest is the statement after Op, verbatim, so a caller-defined directive can
 	// be re-parsed once its meaning is known.
 	Rest string
+	// AfterPayload names the payload directive the failing statement FOLLOWED, and
+	// is set only when that is the plausible cause.
+	//
+	// `run h:1 pwd; whoami` fails with "unknown directive: whoami", which is a true
+	// statement and a useless one: the caller wrote shell commands, and the `;` that
+	// separates DIRECTIVES ended the run's payload. The reply cannot fix that by
+	// naming the directive table — the caller needs to know which `;` was the wrong
+	// one, and that is what this field lets the reply say.
+	AfterPayload string
 	// Parsed is how many statements parsed successfully BEFORE this failure.
 	//
 	// A cmd is parsed in full before any statement runs, so a failure means none
@@ -302,8 +320,10 @@ var ops = []Op{
 	{Name: "close", Core: true, Kind: KindFlags, Target: true, Flags: []string{"force", "grace"}, Valueless: []string{"force"},
 		Usage:  "close <handle|session> [--force] [--grace N]",
 		Detail: closeDetail},
-	{Name: "rm", Kind: KindFlags, Target: true,
-		Usage: "rm <session>"},
+	{Name: "rm", Kind: KindFlags, Target: true, TargetKind: TargetSession,
+		Flags: []string{"force"}, Valueless: []string{"force"},
+		Usage:  "rm <session> [--force]",
+		Detail: rmDetail},
 	{Name: "span", Kind: KindFlags, Target: true, TargetKind: TargetChannel,
 		Usage:  "span <handle>",
 		Detail: spanDetail},
@@ -344,16 +364,16 @@ var ops = []Op{
 		AlsoKnownAs: []string{"extensions"},
 		Usage:       "ext list|get|create|update|delete|retry …",
 		Detail:      extDetail},
-	{Name: "jrpc", Kind: KindPayload,
+	{Name: "jrpc", Kind: KindPayload, PayloadSpan: spanVerbatim,
 		Usage:  "jrpc open <url>   |   jrpc call|send|recv|close <handle> …",
 		Detail: jrpcDetail},
-	{Name: "mcp", Kind: KindPayload,
+	{Name: "mcp", Kind: KindPayload, PayloadSpan: spanVerbatim,
 		Usage:  "mcp open <url>   |   mcp tools|send|recv|call|close <handle> …",
 		Detail: mcpDetail},
-	{Name: "cdp", Kind: KindPayload,
+	{Name: "cdp", Kind: KindPayload, PayloadSpan: spanVerbatim,
 		Usage:  "cdp open <url|http-endpoint>   |   cdp call|send|recv|close <handle> …",
 		Detail: cdpDetail},
-	{Name: "alias", Kind: KindPayload,
+	{Name: "alias", Kind: KindPayload, PayloadSpan: spanWords,
 		Usage: "alias <name> <directive>   |   alias   |   alias <name> --off"},
 	{Name: "help", Core: true, Kind: KindFlags,
 		Usage: "help [directive]"},
@@ -430,7 +450,26 @@ the range it would have read).`
 // nothing — it is evidence nothing arrived within the window. Raising `timeout`
 // is the answer, not repeating `read`: `read` is a consuming cursor, so the
 // bytes the sample already took are gone from it.
-const runDetail = `COMPLETION. A pipe channel reports its process exiting, so run returns as soon as
+const runDetail = `SENDING SEVERAL SHELL COMMANDS. The payload is ONE line, and a semicolon in cmd
+separates DIRECTIVES, not shell commands: run h:1 pwd; whoami is two termcp
+statements, and the second one is an unknown directive called whoami. Pass the
+shell text through the args argument instead:
+
+  cmd: "run h:1 $1"                   args: ["pwd; whoami; date"]
+  cmd: "run h:1 $1; run h:1 $2; ps"   args: ["make build", "make test"]
+
+A positional value that IS the whole payload reaches the terminal VERBATIM, so
+semicolons, loops, heredocs and quotes are the shell's to read. One that sits
+beside other words (run h:1 echo $1, run h:1 $1 && echo done) is substituted as
+ONE QUOTED WORD, because there the caller named a word rather than the command
+line. When a command needs a prefix or a suffix, put the whole line in one
+argument: args: ["cd /app && make test"].
+
+$0 is refused (args is 1-based), and ${N} is the unambiguous spelling at 10 or
+more. Named values are a different channel: vars substitutes $NAME as one quoted
+word of DATA, which is right for a flag value and wrong for a command line.
+
+COMPLETION. A pipe channel reports its process exiting, so run returns as soon as
 it does. A pty does not: whatever runs inside it is the shell's child, and a
 terminal has no "the command finished" signal. run on a pty therefore SAMPLES —
 it returns what arrived within timeout seconds (default 2) and stops.
@@ -442,15 +481,6 @@ consuming cursor, so the bytes the sample already took are no longer there.
 For a program whose output you need in full, prefer pipe (--argv) on the same
 entry — its exit IS observable, so a read after it returns the whole output.`
 
-// typeDetail explains the one thing `type` does that its usage line cannot say in
-// the space it has.
-//
-// A word in Chinese is not enough for a caller writing English, and the failure it
-// prevents is real and reported (issue #131): `type` deliberately does NOT press
-// enter, so `type h make` followed by `run h test` leaves `maketest` on the shell's
-// line — one malformed command, submitted by whichever statement pressed enter.
-// The two directives look interchangeable and are not, which is exactly the kind of
-// difference a `help` page exists to state rather than let each caller discover.
 const typeDetail = `TYPING IS NOT SUBMITTING. type sends the bytes to the shell's input line and
 stops there; nothing runs until something presses enter. That is what makes it
 useful for driving a TUI, where enter would confirm a menu item instead of starting
@@ -893,49 +923,62 @@ func controlByteName(b byte) string {
 // wants (and one reply slot), whereas `run a:1 'x'; run b:1 'y'` asks two
 // questions and gets two slots.
 func Parse(src string) (*File, error) {
-	return ParseWithVars(src, nil)
+	return ParseWithSubst(src, Subst{})
 }
 
-// ParseWithVars reads cmd into statements, with values from vars substituted at
-// the AST level before anything is sliced out of the source.
+// ParseWithSubst reads cmd into statements, with the caller's values filled in at
+// the two places they can appear: shell syntax, and the directive's own arguments.
 //
-// WHY SUBSTITUTE IN THE AST AND NOT IN THE SHELL. A caller that wants to send a
-// payload containing a quote, a newline, a semicolon or a carriage return has no
-// way to write it into cmd: every one of those either ends the statement or is
-// re-interpreted by the shell that eventually receives it. Escaping it is a
-// guessing game about which layer will decode it. vars is the way out — the value
-// never appears in the command text, so nothing in the command text can mangle
-// it.
+// WHY SUBSTITUTE AT ALL. A caller that wants to send a payload containing a quote,
+// a newline, a semicolon or a carriage return has no way to write it into cmd: every
+// one of those either ends the statement or is re-interpreted by the shell that
+// eventually receives it. Escaping it is a guessing game about which layer will
+// decode it. The table is the way out — the value never appears in the command
+// text, so nothing in the command text can mangle it.
 //
-// It is NOT a process environment: nothing here is exported to the child, a key
-// vars defines but cmd never mentions is ignored, and a $NAME that vars does not
-// define is an error rather than an empty expansion. Those three differences are
-// why the argument is called vars and not env (see termArgs.Vars).
+// It is NOT a process environment: nothing here is exported to the child, a key the
+// caller supplies but cmd never mentions is ignored, and a name cmd uses that the
+// table does not define is an error rather than an empty expansion.
 //
-// The substitution is a NODE REPLACEMENT, not a reparse: the parameter expansion
-// node's byte range is replaced with the value, and every other byte of src stays
-// exactly where the caller put it. That keeps the zero-rewrite guarantee the rest
-// of this package rests on — the payload is still a slice of the source the caller
-// wrote, only with the named holes filled in.
+// THE TWO ROLES ARE DIFFERENT AND BOTH ARE NEEDED. A named value (vars) becomes one
+// shell WORD, because it is data: `--data $BODY` must not let a newline in BODY
+// become a second command. A positional value (args) becomes shell SYNTAX inside a
+// payload, because it is a command line: `run h:1 $1` with `pwd; whoami` must run
+// two commands, not look for a program called `pwd; whoami`. See Subst.
 //
-// A name in vars that does not appear in cmd is not an error: cmd and vars are two
-// independent inputs, and a caller may share one vars block across several calls.
-func ParseWithVars(src string, vars map[string]string) (*File, error) {
+// The substitution is a NODE REPLACEMENT, not a reparse: the parameter expansion's
+// byte range is replaced with the value, and every other byte of src stays exactly
+// where the caller put it. That keeps the zero-rewrite guarantee the rest of this
+// package rests on — the payload is still a slice of the source the caller wrote,
+// only with the named holes filled in.
+//
+// A name the caller supplies that does not appear in cmd is not an error: cmd and
+// the table are two independent inputs, and a caller may share one table across
+// several calls.
+func ParseWithSubst(src string, sub Subst) (*File, error) {
 	if strings.TrimSpace(src) == "" {
 		return &File{Empty: true}, nil
 	}
-	if len(vars) > 0 {
-		substituted, err := substituteVars(src, vars)
-		if err != nil {
-			return nil, &Error{Msg: "cannot parse cmd: " + err.Error()}
-		}
-		src = substituted
+	// RAW IS A PROPERTY OF THE PARSE, SO IT NEEDS A FIRST PASS. Which `$N` sits
+	// inside a payload cannot be known until the statement is parsed — the payload
+	// boundary is what decides — so the first pass is run against the caller's own
+	// text only to find those regions, and its failures are not reported: the real
+	// parse below is the one that answers.
+	raw := payloadSpans(src)
+	substituted, sentinels, err := substitute(src, sub, raw)
+	if err != nil {
+		return nil, &Error{Msg: "cannot parse cmd: " + err.Error()}
 	}
+	src = substituted
 	parser := syntax.NewParser()
 	file, err := parser.Parse(strings.NewReader(src), "")
 	if err != nil {
 		return nil, &Error{Msg: "cannot parse cmd: " + err.Error()}
 	}
+	// THE FIRST PASS'S OFFSETS ARE NOT REUSED: a raw value is a sentinel of a
+	// different length, so they no longer address the same bytes. Nothing after the
+	// parse needs them — the payload span is known at parse time, which is exactly
+	// what made the raw decision possible in the first place.
 	out := &File{}
 	for _, stmt := range file.Stmts {
 		if stmt == nil || stmt.Cmd == nil {
@@ -949,11 +992,19 @@ func ParseWithVars(src string, vars map[string]string) (*File, error) {
 			// carrying Op+Rest, which is what lets the caller resolve it.
 			if derr, ok := err.(*Error); ok {
 				derr.Parsed = len(out.Statements)
+				derr.AfterPayload = trailingPayloadOp(out.Statements)
 			}
 			return nil, err
 		}
 		if ok {
-			out.Statements = append(out.Statements, parsed)
+			filled := sentinels.expandStatement(parsed)
+			if err := checkTargetKindAfterSubst(filled); err != nil {
+				if derr, ok := err.(*Error); ok {
+					derr.Parsed = len(out.Statements)
+				}
+				return nil, err
+			}
+			out.Statements = append(out.Statements, filled)
 		}
 	}
 	if len(out.Statements) == 0 {
@@ -962,117 +1013,166 @@ func ParseWithVars(src string, vars map[string]string) (*File, error) {
 	return out, nil
 }
 
-// substituteVars fills every parameter expansion that names a key in vars with that
-// key's value, leaving every other byte of src untouched.
+// trailingPayloadOp names the last statement's directive when it was one that
+// hands raw bytes to a terminal, or "" when it was not.
 //
-// THE VALUE IS INSERTED AS A QUOTED WORD, not spliced in raw. That is the whole
-// point of the vars channel: a value may contain a space, a quote, a semicolon or a
-// newline, and any of those spliced bare into a command line becomes SHELL SYNTAX
-// instead of data. Quoting happens here, once, from the raw bytes the caller sent,
-// so the layer that decodes is the same layer that encoded.
+// It answers one question for the reply: was the caller writing SHELL text when
+// the parse broke, or termcp instructions? `run h:1 pwd; whoami` is the first case,
+// and the `;` the shell would have accepted is the thing that ended the payload. The
+// reply can say so, but only if the parser leaves a mark here — the failing
+// statement is a bare word (`whoami`) and carries no trace of what preceded it.
+func trailingPayloadOp(stmts []Statement) string {
+	if len(stmts) == 0 {
+		return ""
+	}
+	n := stmts[len(stmts)-1].Op
+	op, known := Lookup(n)
+	if !known {
+		return ""
+	}
+	if op.hasPayload() {
+		return op.Name
+	}
+	return ""
+}
+
+// payloadSpans reports the byte ranges of src that hold a directive PAYLOAD, which
+// is the only region where a caller's value is shell syntax rather than data.
 //
-// A name the caller used but vars does not define is a 400, not a pass-through.
-// Leaving it for the shell would make the two inputs disagree silently: the caller
-// wrote `$FOO` intending vars, and got whatever the shell happened to have. That is
-// the same class of quiet substitution this protocol keeps refusing: say which
-// word was wrong, before anything runs.
-//
-// Single quotes are used because they survive every shell: nothing inside them is
-// expanded, no escape is interpreted. A value containing a single quote is closed,
-// the quote escaped, and reopened — the standard `'` → `'\''` spelling.
-func substituteVars(src string, vars map[string]string) (string, error) {
+// It is a best-effort pass: a source that does not parse yields no spans, and the
+// caller's real parse then reports the problem. What it must not do is guess — a
+// statement whose directive is unknown has no payload boundary, so it contributes
+// nothing and the `$N` inside it stays in the data channel.
+func payloadSpans(src string) []span {
 	file, err := syntax.NewParser().Parse(strings.NewReader(src), "")
 	if err != nil {
-		// The error is reported by the caller's own Parse; this pass is only here to
-		// find the substitutions.
-		return src, nil
+		return nil
 	}
-
-	type replacement struct {
-		start, end int
-		text       string
-	}
-	var reps []replacement
-	var missing []string
-	seen := map[string]bool{}
-
-	var walk func(node syntax.Node)
-	visitWordPart := func(part syntax.WordPart) {
-		switch p := part.(type) {
-		case *syntax.ParamExp:
-			name := p.Param.Value
-			value, ok := vars[name]
-			if !ok {
-				if !seen[name] {
-					seen[name] = true
-					missing = append(missing, name)
-				}
-				return
-			}
-			reps = append(reps, replacement{
-				start: int(p.Pos().Offset()),
-				end:   int(p.End().Offset()),
-				text:  shellSingleQuote(value),
-			})
-		case *syntax.DblQuoted:
-			// Inside double quotes the value must stay inside those quotes, so the
-			// quoting above would nest wrongly. A double-quoted expansion is
-			// replaced with the value escaped for a double-quoted context.
-			for _, inner := range p.Parts {
-				if pe, ok := inner.(*syntax.ParamExp); ok {
-					value, found := vars[pe.Param.Value]
-					if !found {
-						if !seen[pe.Param.Value] {
-							seen[pe.Param.Value] = true
-							missing = append(missing, pe.Param.Value)
-						}
-						continue
-					}
-					reps = append(reps, replacement{
-						start: int(pe.Pos().Offset()),
-						end:   int(pe.End().Offset()),
-						text:  shellDoubleQuoteBody(value),
-					})
-				}
-			}
-		}
-	}
-	walk = func(node syntax.Node) {
-		switch n := node.(type) {
-		case *syntax.CallExpr:
-			for _, a := range n.Args {
-				for _, part := range a.Parts {
-					visitWordPart(part)
-				}
-			}
-		case *syntax.BinaryCmd:
-			walk(n.X)
-			walk(n.Y)
-		case *syntax.Stmt:
-			if n.Cmd != nil {
-				walk(n.Cmd)
-			}
-		}
-	}
+	var out []span
 	for _, stmt := range file.Stmts {
-		walk(stmt)
+		if stmt == nil || stmt.Cmd == nil {
+			continue
+		}
+		out = append(out, statementRawSpans(src, stmt)...)
+	}
+	return out
+}
+
+// statementRawSpans reports the ranges of a statement whose values are SHELL
+// SYNTAX rather than data. There are two, and both are read as a command line by
+// something downstream:
+//
+//   - the payload of run/type, which goes straight to the terminal;
+//   - the value of a RestValue flag (--argv on pipe/pty, --args on ext), which is
+//     handed to SplitArgv and parsed as a word list.
+//
+// The second one is why this returns a list, and why quoting a value for --argv is
+// wrong in a way that is easy to miss: the flag's value is sliced from the SOURCE
+// and then RE-PARSED, so a quoted `sh -c 'echo hi'` arrives as one word and the
+// server tries to exec a program with that name. A raw splice is what makes an argv
+// an argv.
+//
+// IT MIRRORS parseStatement'S THREE KINDS, because a span that disagrees with the
+// parser about where a payload starts is worse than no span at all: the value would
+// be spliced into the wrong bytes.
+func statementRawSpans(src string, stmt *syntax.Stmt) []span {
+	call := leadCall(stmt.Cmd)
+	if call == nil || len(call.Args) == 0 {
+		return nil
+	}
+	name, ok := literalWord(src, call.Args[0])
+	if !ok {
+		return nil
+	}
+	op, known := Lookup(name)
+	if !known {
+		return nil
+	}
+	bodyEnd := commandEnd(stmt)
+
+	rest := call.Args[1:]
+	// The target is consumed exactly where the parser consumes it, and it is RAW
+	// when it is there.
+	//
+	// A target is an IDENTIFIER (`<session>:<n>`, a profile name, an extension id),
+	// not a shell word: quoting it produced `info 's:1'`, which happens to still
+	// resolve because the resolver trims quotes — but the Path echo then showed a
+	// spelling nobody wrote, and any directive that compared the target as a string
+	// would have seen the quotes as part of the name.
+	var out []span
+	if op.Target && len(rest) > 0 && !strings.HasPrefix(mustLiteralWord(src, rest[0]), "--") {
+		out = append(out, span{
+			start: int(rest[0].Pos().Offset()),
+			end:   int(rest[0].End().Offset()),
+			mode:  spanVerbatim,
+		})
+		rest = rest[1:]
 	}
 
-	if len(missing) > 0 {
-		return "", fmt.Errorf("vars does not define %s; pass it in the `vars` argument, or drop the $ so the shell expands it",
-			"$"+strings.Join(missing, ", $"))
-	}
-	if len(reps) == 0 {
-		return src, nil
+	if op.Kind == KindFlags {
+		// A flag-kind directive takes flags ANYWHERE, with positional words in
+		// between (`ext <session> --args …` is a positional and then a flag). Only a
+		// RestValue flag contributes a span, and it swallows the rest of the line.
+		for i := 0; i < len(rest); i++ {
+			w := mustLiteralWord(src, rest[i])
+			if !strings.HasPrefix(w, "--") {
+				continue
+			}
+			key, _ := splitFlag(w)
+			if !allowedFlag(op, key) {
+				return out
+			}
+			if restValueFlag(op, key) && i+1 < len(rest) {
+				// PER-WORD: `--args` on ext is parsed again by SplitArgv, so each
+				// whole-word `$N` is one argv element and must arrive unquoted.
+				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: bodyEnd, mode: spanWords})
+			}
+			if !strings.Contains(w, "=") && !valuelessFlag(op, key) && i+1 < len(rest) {
+				i++ // the flag's value word
+			}
+		}
+		return out
 	}
 
-	// Apply from the end backwards so earlier offsets stay valid.
-	sort.Slice(reps, func(i, j int) bool { return reps[i].start > reps[j].start })
-	out := []byte(src)
-	for _, r := range reps {
-		out = append(out[:r.start], append([]byte(r.text), out[r.end:]...)...)
+	// The payload kinds: leading flags, then a payload that runs to the end of the
+	// statement. A flag AFTER the payload's first word belongs to the payload, which
+	// is the same rule the parser applies.
+	i := 0
+	for i < len(rest) && strings.HasPrefix(mustLiteralWord(src, rest[i]), "--") {
+		w := mustLiteralWord(src, rest[i])
+		key, _ := splitFlag(w)
+		if !allowedFlag(op, key) {
+			return out
+		}
+		if restValueFlag(op, key) {
+			// pipe/pty take their program this way, and the value is re-parsed by
+			// SplitArgv, so it is syntax like a payload is. PER-WORD, for the same
+			// reason as the flag kind above: each whole-word `$N` is one argv element
+			// and must arrive unquoted.
+			if i+1 < len(rest) {
+				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: bodyEnd, mode: spanWords})
+			}
+			return out
+		}
+		i++
+		if !strings.Contains(w, "=") && !valuelessFlag(op, key) && i < len(rest) {
+			i++
+		}
 	}
-	return string(out), nil
+	if i >= len(rest) || !op.hasPayload() {
+		return out
+	}
+	return append(out, span{
+		start: int(rest[i].Pos().Offset()),
+		end:   bodyEnd,
+		mode:  op.payloadSpanMode(),
+	})
+}
+
+// mustLiteralWord is literalWord for the span pass, which is allowed to give up.
+func mustLiteralWord(src string, w *syntax.Word) string {
+	s, _ := literalWord(src, w)
+	return s
 }
 
 // shellSingleQuote renders a value as a single-quoted shell word.
@@ -1086,6 +1186,29 @@ func shellSingleQuote(v string) string {
 func shellDoubleQuoteBody(v string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
 	return r.Replace(v)
+}
+
+// isSentinel reports whether a value is still a raw hole waiting to be filled.
+func isSentinel(v string) bool {
+	return strings.Contains(v, "__termcp_")
+}
+
+// checkTargetKindAfterSubst re-runs the target-kind rule on a statement whose
+// sentinels have been filled in.
+//
+// The rule belongs at PARSE time — refusing a bad target with a usage line before
+// anything runs is the whole point — but a substituted target has no value yet when
+// the parser sees it. Running the check in both places keeps the early refusal for a
+// literal target and closes the hole for one that came from args.
+func checkTargetKindAfterSubst(st Statement) error {
+	op, known := Lookup(st.Op)
+	if !known || !op.Target || st.Target == "" {
+		return nil
+	}
+	if err := checkTargetKind(op, st.Target); err != nil {
+		return err
+	}
+	return nil
 }
 
 // leadCall finds the first CallExpr of a statement, in source order.
@@ -1205,8 +1328,18 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		default:
 			out.Target = rest[0].text
 			rest = rest[1:]
-			if err := checkTargetKind(op, out.Target); err != nil {
-				return Statement{}, false, err
+			// THE KIND CHECK RUNS AGAIN AFTER SUBSTITUTION, not only here.
+			//
+			// A target that came from `args` is a sentinel at parse time
+			// (`__termcp_0__`), and this check reads the value: `read $1` was refused
+			// with `read needs a CHANNEL, not "__termcp_0__"`, which is true of the
+			// placeholder and false of the handle the caller passed. A literal target
+			// is refused here — before anything runs — and a substituted one is
+			// checked again once it is filled in.
+			if !isSentinel(out.Target) {
+				if err := checkTargetKind(op, out.Target); err != nil {
+					return Statement{}, false, err
+				}
 			}
 		}
 	}
@@ -1289,7 +1422,7 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 			}
 		}
 		start, end := rest[i].start, bodyEnd
-		if op.Kind == KindInterpreted {
+		if op.payloadStopsAtWord() {
 			// An interpreted payload is a NAME, not a command line: it stops at
 			// that word, because more words follow it (`alias jira mcp open …`).
 			end = int(rest[i].end)
@@ -1385,13 +1518,40 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 // resource locator with an index. A bare session id is none of them: it names a
 // container, and a container is not a channel.
 func checkTargetKind(op Op, target string) *Error {
-	if op.TargetKind != TargetChannel {
-		return nil
+	switch op.TargetKind {
+	case TargetChannel:
+		if NamesAChannel(target) {
+			return nil
+		}
+		return &Error{Op: op.Name, Msg: ChannelTargetProblem(op, target), Usage: op.Usage}
+
+	case TargetSession:
+		// BOTH HALVES OF THE DECLARATION ARE ENFORCED, and the second one was missing.
+		// TargetSession was declared and never checked, so `rm <session>:1` — a spelling
+		// its own usage line does not offer — resolved the locator, found the session
+		// and erased it. That is the same class of silent widening the channel check
+		// exists to prevent, one direction over: a caller who named a CHANNEL asked
+		// about that channel, and deleting the whole container is a bigger answer than
+		// the question.
+		if !NamesAChannel(target) {
+			return nil
+		}
+		return &Error{Op: op.Name, Msg: SessionTargetProblem(op, target), Usage: op.Usage}
 	}
-	if NamesAChannel(target) {
-		return nil
-	}
-	return &Error{Op: op.Name, Msg: ChannelTargetProblem(op, target), Usage: op.Usage}
+	return nil
+}
+
+// SessionTargetProblem is the message for a target that names a channel where a
+// container was required.
+//
+// It names the two spellings that do what the caller probably meant, because "you
+// gave me a channel" alone leaves them guessing which of close/rm applies: `close`
+// takes a channel and stops it, `rm` takes a session and erases the record.
+func SessionTargetProblem(op Op, target string) string {
+	return op.Name + " needs a SESSION, not the channel \"" + target + "\". " +
+		"A channel handle names one shell inside a session; this directive acts on the " +
+		"container. To stop a single channel use `close " + target + "`; to erase the " +
+		"whole session use its id without the `:N` suffix (`ps` prints it in the first column)."
 }
 
 // ChannelTargetProblem is the message for a target that names a container where a
@@ -1702,3 +1862,47 @@ func Names() []string {
 	sort.Strings(out)
 	return out
 }
+
+// hasPayload reports whether this directive takes bytes after its target at all.
+//
+// IT IS ASKED IN FOUR PLACES — does a statement contribute a raw span, may a payload
+// be sliced here, does the error hint apply — and each of them used to spell the
+// answer out as `Kind == KindPayload || Kind == KindInterpreted`. That spelling is
+// what made a fourth kind a four-line change with a silent failure mode when one copy
+// was missed: a directive that takes a payload but is not recognised as one simply
+// gets no substitution, and nothing says so.
+func (op Op) hasPayload() bool {
+	return op.Kind == KindPayload || op.Kind == KindInterpreted
+}
+
+// payloadStopsAtWord reports whether a payload is one NAME rather than a command
+// line, so it ends at that word instead of running to the end of the statement.
+func (op Op) payloadStopsAtWord() bool { return op.Kind == KindInterpreted }
+
+// rmDetail explains the one thing rm does that its usage line cannot say in the space
+// it has: it is PERMANENT, and it has a guard for that reason.
+//
+// close and rm are easy to confuse and the difference is not recoverable: close stops a
+// session and keeps its record (which is why a closed session's output stays readable
+// by shell_output and the archive still shows it), while rm erases the record —
+// manifests, transcript, the lot. Before the guard, rm accepted a running session
+// without comment, so one wrong word erased work that was still happening.
+const rmDetail = `Permanent. close stops a session and keeps its record readable; rm
+erases it — manifests, transcript, every trace — and there is no undo.
+
+A RUNNING session needs --force. Without it the call is refused with 409 and the
+session is left untouched, so the guard costs one extra word rather than a mistake.
+
+  rm <session>              a stopped session, no ceremony
+  rm <session> --force      a running one; its channels and forwards are released first
+
+The target is the SESSION, not a channel. rm <session>:1 is refused: a caller who
+named a channel asked about that channel, and erasing the container is a bigger
+answer than the question. Use close <session>:1 to stop one channel.`
+
+// payloadSpanMode is how a directive's payload region is substituted.
+//
+// A pipe or pty program takes its argv through a RestValue flag, and that value is a
+// word list no matter what the directive's payload would have been — so the flag's
+// own rule wins over the declaration.
+func (op Op) payloadSpanMode() spanMode { return op.PayloadSpan }

@@ -2,7 +2,7 @@ package directive
 
 import "testing"
 
-// TestParseWithVarsQuotesValuesByContext pins the quoting rule: a value substituted
+// TestParseWithSubstQuotesValuesByContext pins the quoting rule: a value substituted
 // into an unquoted word becomes a single-quoted shell word, and one substituted
 // inside an existing double-quoted string is escaped for that context.
 //
@@ -10,7 +10,7 @@ import "testing"
 // a quote, a semicolon or a newline must reach the shell as ONE word of DATA — if
 // the quoting were wrong, the value would become shell SYNTAX and the caller would
 // be running a command they never wrote.
-func TestParseWithVarsQuotesValuesByContext(t *testing.T) {
+func TestParseWithSubstQuotesValuesByContext(t *testing.T) {
 	cases := []struct {
 		name     string
 		cmd      string
@@ -20,49 +20,49 @@ func TestParseWithVarsQuotesValuesByContext(t *testing.T) {
 		{
 			name:     "unquoted word gets single quotes",
 			cmd:      "run h:1 echo $P",
-			vars:      map[string]string{"P": "A; B"},
+			vars:     map[string]string{"P": "A; B"},
 			wantPart: "echo 'A; B'",
 		},
 		{
 			name:     "single quote inside the value is escaped",
 			cmd:      "run h:1 echo $P",
-			vars:      map[string]string{"P": "it's"},
+			vars:     map[string]string{"P": "it's"},
 			wantPart: `echo 'it'\''s'`,
 		},
 		{
 			name:     "inside double quotes the value is escaped, not re-quoted",
 			cmd:      `run h:1 echo "$P"`,
-			vars:      map[string]string{"P": "a b"},
+			vars:     map[string]string{"P": "a b"},
 			wantPart: `echo "a b"`,
 		},
 		{
 			name:     "a dollar in the value is escaped inside double quotes",
 			cmd:      `run h:1 echo "$P"`,
-			vars:      map[string]string{"P": "$HOME"},
+			vars:     map[string]string{"P": "$HOME"},
 			wantPart: `echo "\$HOME"`,
 		},
 		{
 			name:     "braced form is replaced too",
 			cmd:      "run h:1 echo ${P}",
-			vars:      map[string]string{"P": "braced"},
+			vars:     map[string]string{"P": "braced"},
 			wantPart: "echo 'braced'",
 		},
 		{
 			name:     "both forms in one payload",
 			cmd:      "run h:1 echo $A ${B}",
-			vars:      map[string]string{"A": "one", "B": "two"},
+			vars:     map[string]string{"A": "one", "B": "two"},
 			wantPart: "echo 'one' 'two'",
 		},
 		{
 			name:     "an unused vars key is not an error",
 			cmd:      "run h:1 echo plain",
-			vars:      map[string]string{"UNUSED": "x"},
+			vars:     map[string]string{"UNUSED": "x"},
 			wantPart: "echo plain",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f, err := ParseWithVars(tc.cmd, tc.vars)
+			f, err := ParseWithSubst(tc.cmd, Subst{Named: tc.vars})
 			if err != nil {
 				t.Fatalf("ParseWithVars(%q): %v", tc.cmd, err)
 			}
@@ -76,11 +76,11 @@ func TestParseWithVarsQuotesValuesByContext(t *testing.T) {
 	}
 }
 
-// TestParseWithVarsUndefinedVariableIsAnError: a variable the caller used but env
+// TestParseWithSubstUndefinedVariableIsAnError: a variable the caller used but env
 // does not define is refused, and the message names it. Leaving it for the shell to
 // expand would let cmd and env disagree silently.
-func TestParseWithVarsUndefinedVariableIsAnError(t *testing.T) {
-	_, err := ParseWithVars("run h:1 echo $NOPE", map[string]string{"OTHER": "x"})
+func TestParseWithSubstUndefinedVariableIsAnError(t *testing.T) {
+	_, err := ParseWithSubst("run h:1 echo $NOPE", Subst{Named: map[string]string{"OTHER": "x"}})
 	if err == nil {
 		t.Fatal("an undefined variable must be an error when vars is in use")
 	}
@@ -89,10 +89,10 @@ func TestParseWithVarsUndefinedVariableIsAnError(t *testing.T) {
 	}
 }
 
-// TestParseWithoutVarsLeavesVariablesAlone: the shell expansion path is unchanged
+// TestParseWithoutSubstLeavesVariablesAlone: the shell expansion path is unchanged
 // when no vars is supplied. A caller that wants $HOME resolved remotely still gets
 // that, which is why substitution is opt-in per call.
-func TestParseWithoutVarsLeavesVariablesAlone(t *testing.T) {
+func TestParseWithoutSubstLeavesVariablesAlone(t *testing.T) {
 	f, err := Parse("run h:1 echo $HOME")
 	if err != nil {
 		t.Fatal(err)
