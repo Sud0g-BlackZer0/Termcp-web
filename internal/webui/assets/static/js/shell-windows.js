@@ -11,13 +11,15 @@ function sessdockEl() {
 
 /** The bare tab row's note.
  *
- *  The dock lists one tab per OPEN WINDOW, so an empty row means exactly that
- *  and nothing more: with no plate folded into the dock there is nothing behind
- *  the row to open, and the note stays a plain label. It is built here rather
- *  than declared in the markup because the row's shape is decided at paint time
- *  (the strip may already hold tabs), and it lives in the dock BAR rather than
- *  inside the strip: the strip is a role=tablist, and the only thing a tablist
- *  may hold is a tab. */
+ *  The dock lists one tab per RUNNING SESSION plus one per window with no session
+ *  (see dockEntries), so an empty row means there is nothing live to show at all —
+ *  no session on the server and no window in this page. The note stays a plain
+ *  label: there is nothing behind the row to open, so dressing it as a control
+ *  would promise a list the page does not have. It is built here rather than
+ *  declared in the markup because the row's shape is decided at paint time (the
+ *  strip may already hold tabs), and it lives in the dock BAR rather than inside
+ *  the strip: the strip is a role=tablist, and the only thing a tablist may hold
+ *  is a tab. */
 function paintSessdockEmpty(empty) {
   var bar = document.getElementById('sessdock-bar');
   if (!bar) return;
@@ -87,19 +89,133 @@ function sessionTabLabel(win) {
   return win._sid ? stripSessionPrefix(win._sid) : t('tab.session');
 }
 
-/** Rebuild tabs from open .shell-window elements; the topmost (max z-index) is active.
+/** The label of a session that has NO window on this page.
  *
- * The dock is permanent: zero windows is a legal state and the bar must stay,
- * because it is the one place the open windows are listed. The old floating tab
+ *  A tab used to exist only for an open window, so every label could be read off
+ *  the window (`_connName · shortId`). A session started elsewhere — by an agent
+ *  over MCP (`pty`, `session_start`), by a script through POST /api/sessions, or
+ *  by a connect whose window this page then closed — has no window to read, so
+ *  its label comes from the record. The shape stays the same as a window's, or
+ *  the two kinds of tab would be read as two kinds of thing.
+ */
+function sessionDockLabel(s) {
+  if (!s) return t('tab.session');
+  var id = stripSessionPrefix(s.id);
+  var conn = String(s.ssh_config || '');
+  var name = String(s.name || '').trim();
+  /* A name the user chose is the identity; the default name IS the profile's,
+     which the profile half of the label already shows. */
+  if (name && name.indexOf('session-') !== 0 && name !== conn) return name + ' · ' + id;
+  return (conn ? conn + ' · ' : '') + id;
+}
+
+/** The thing a window-less tab stands for: the session record, shaped like the
+ *  window the click would open.
+ *
+ *  The dock's batch row, a tab's context menu and the review badges all key off a
+ *  window's `_sid`/`_parentSid`. Giving each window-less session a stand-in with
+ *  the same two fields is what keeps ONE code path for all three instead of a
+ *  second branch in each of them (and the second branch is where one of the three
+ *  would eventually forget). `_windowless` is the one field that says there is no
+ *  DOM node to raise or close. */
+function dockSessionTarget(s) {
+  return { id: 'sess:' + s.id, _sid: s.id, _parentSid: s.id, _windowless: true };
+}
+
+/** One dock entry per RUNNING session, plus one per window that has no session.
+ *
+ *  The dock used to be built from `allShellWins()` alone, so it listed the windows
+ *  this page opened and nothing else. Every other way a session can start — an
+ *  agent over MCP, a script through POST /api/sessions, a connect whose window was
+ *  closed here — produced a live session the page could not see, address or stop,
+ *  and a session you cannot see is a session you cannot take back.
+ *
+ *  So the identity is the SESSION, not the window:
+ *
+ *    sess:<id>  a running session, with or without a window on this page;
+ *    win:<id>   a window that carries no session — a dial in flight, or an
+ *               extension's status card.
+ *
+ *  Keying the window case by its session is what makes a tab survive its window:
+ *  closing the window of a running session leaves the same tab in place (now
+ *  window-less) instead of dropping one tab and adding another, and a tick placed
+ *  on it follows the session rather than the piece of chrome.
+ *
+ *  Two things are deliberately NOT here. A session that is over belongs to the
+ *  archive column, the ledger of finished sessions. A subsystem's own connection
+ *  (an extension's `ext:` session) belongs to the extension column — the same rule
+ *  the plates apply, so one filter keeps both lists honest.
+ *
+ *  Order: open windows in DOM order, then window-less sessions by creation time.
+ *  The sort matters more than it looks — the snapshot comes from a Go map, so
+ *  ListAll order is random, and rendering it as it arrives would reshuffle the tabs
+ *  on every frame. A bar that jumps under the pointer is unusable for clicking.
+ */
+function dockEntries() {
+  var snapshot = window._lastSessionsSnapshot || [];
+  var byId = Object.create(null);
+  snapshot.forEach(function (s) { if (s && s.id) byId[s.id] = s; });
+  var entries = [];
+  var covered = Object.create(null);
+  allShellWins().forEach(function (w) {
+    /* A status card carries the extension's NAME in `_sid`, so it is not a session
+       and must not claim one's tab. */
+    var sid = (!w._extName && w._sid) ? w._sid : '';
+    if (!sid) { entries.push({ key: 'win:' + w.id, win: w, sid: '', session: null }); return; }
+    covered[sid] = true;
+    entries.push({ key: 'sess:' + sid, win: w, sid: sid, session: byId[sid] || null });
+  });
+  var extra = [];
+  snapshot.forEach(function (s) {
+    if (!s || !s.id || s.status !== 'running') return;
+    if (covered[s.id]) return;
+    /* sessions.js loads AFTER this file, and the page's first paint runs before
+       it, so the predicate is asked for by name rather than assumed present. */
+    if (typeof isHiddenSession === 'function' && isHiddenSession(s)) return;
+    extra.push(s);
+  });
+  extra.sort(function (a, b) {
+    var ta = Number(a.created_at) || 0, tb = Number(b.created_at) || 0;
+    if (ta !== tb) return ta - tb;
+    return String(a.id) < String(b.id) ? -1 : 1;
+  });
+  extra.forEach(function (s) {
+    entries.push({ key: 'sess:' + s.id, win: null, sid: s.id, session: s });
+  });
+  return entries;
+}
+
+/** The dock key of an open window, or '' when the dock has no tab for it.
+ *
+ *  Two spellings, one definition — and the tick has two entry points (the dock's
+ *  own glyph and the window header's monitor glyph). A key spelled twice is a
+ *  selection that works from one of them and silently does nothing from the other
+ *  (which is how the header glyph lost its tick when the dock started keying by
+ *  session).
+ */
+function dockKeyForWindow(win) {
+  if (!win || !win.id) return '';
+  if (!win._extName && win._sid) return 'sess:' + win._sid;
+  return 'win:' + win.id;
+}
+/** Rebuild tabs from the dock's entries; the topmost (max z-index) window is active.
+ *
+ * The dock is permanent: zero entries is a legal state and the bar must stay,
+ * because it is the one place the open sessions are listed. The old floating tab
  * bar hid itself when empty, which is exactly the trap this avoids — a control
- * that removes itself cannot be the one you need to see that nothing is open. */
+ * that removes itself cannot be the one you need to see that nothing is open.
+ *
+ * An entry is a WINDOW or a running session with no window (see dockEntries):
+ * the page used to list only the first kind, which made every session an agent
+ * started over MCP invisible here. */
 function refreshSessionTabbar() {
   var bar = sessionTabbarEl();
   if (!bar) return;
   var wins = allShellWins();
+  var entries = dockEntries();
   // The empty marker rides the tab strip's place: it says why the row is bare
   // (no windows) without pretending a window exists.
-  paintSessdockEmpty(wins.length === 0);
+  paintSessdockEmpty(entries.length === 0);
   var topWin = null;
   if (!_winsHidden && _layoutMode === 'tile') {
     topWin = (_paneActiveWin && isTiledWin(_paneActiveWin)) ? _paneActiveWin : null;
@@ -148,20 +264,29 @@ function refreshSessionTabbar() {
   document.body.classList.toggle('has-fullscreen-window', fs);
   var scroll = document.getElementById('session-tabs-scroll');
   if (!scroll) return;
-  var byId = {};
+  var validKeys = Object.create(null);
+  entries.forEach(function (e) { validKeys[e.key] = true; });
+  /* Reuse by KEY: a window-less tab has no window to key on, and a window that
+     gains a tab later must land on the tab it already had. Any tab whose entry
+     is no longer in the list (a session that died, a window that closed) is
+     removed. */
+  var byKey = {};
   Array.prototype.slice.call(scroll.children).forEach(function (t) {
-    if (t._win && t._win.parentNode) byId[t._win.id] = t;
-    else t.remove();
+    if (t._dockKey && validKeys[t._dockKey] && (t._entry && t._entry.win ? t._entry.win.parentNode : true)) {
+      byKey[t._dockKey] = t;
+    } else {
+      t.remove();
+    }
   });
   var order = [];
-  wins.forEach(function (w) {
-    var tab = byId[w.id];
+  entries.forEach(function (entry) {
+    var w = entry.win;
+    var tab = byKey[entry.key];
     if (!tab) {
       tab = document.createElement('button');
       tab.type = 'button';
       tab.className = 'session-tab';
       tab.setAttribute('role', 'tab');
-      tab._win = w;
       tab.innerHTML =
         /* The tick is a MONITOR glyph, and it is the tab's own control rather than a
            mode indicator: pressing it ticks the tab for a batch close while the
@@ -179,11 +304,11 @@ function refreshSessionTabbar() {
         '<svg viewBox="0 0 12 12" width="10" height="10"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M2 2l8 8M10 2L2 10"/></svg></span>';
       tab.addEventListener('click', function (e) {
         if (e.target.closest('.session-tab-close')) return;
-        /* The monitor glyph is the tick. Anything else on the tab raises the
+        /* The monitor glyph is the tick. Anything else on the tab opens its
            window — always, with no mode to check, because the two actions have
            two separate targets now. */
         if (e.target.closest('.session-tab-tick')) {
-          if (_dockBatch) _dockBatch.toggleSelection(w.id, tab);
+          if (_dockBatch) _dockBatch.toggleSelection(entry.key, tab);
           return;
         }
         /* The tab owns its window, so no lookup is needed — which is what makes
@@ -191,19 +316,32 @@ function refreshSessionTabbar() {
            connecting window has no session id yet (simultaneous dials would both
            resolve to the first null id), and a status card carries the
            extension's NAME in _sid, so resolving it as a session would dial a
-           terminal for it. Both are raised directly. */
-        focusShellWindow(w);
+           terminal for it. Both are raised directly. A window-less tab is the
+           other way round: it has a session and no window, so its click OPENS
+           one (through focusSessionWindow, which opens when none exists). */
+        var cur = tab._entry;
+        if (!cur || !cur.win) {
+          if (cur && cur.session) {
+            focusSessionWindow(cur.session.name || '', cur.session.id, windowPositionFromClick(e), null);
+          }
+          return;
+        }
+        focusShellWindow(cur.win);
       });
       tab.addEventListener('mousedown', function (e) {
-        if (e.button === 1) { // middle-click closes the window
+        if (e.button === 1) { // middle-click drops the WINDOW; the session keeps running
           e.preventDefault();
-          closeShellWindow(w);
+          /* The fast form of the tab's x, and deliberately only that: a window-less
+             tab has no window to drop, and turning the same gesture into "stop the
+             session" would put an irreversible act behind a middle click. */
+          var cur = tab._entry;
+          if (cur && cur.win) closeShellWindow(cur.win);
         }
       });
       var x = tab.querySelector('.session-tab-close');
       x.addEventListener('click', function (e) {
         e.preventDefault(); e.stopPropagation();
-        askCloseTabWindow(w);
+        closeDockEntry(tab._entry);
       });
       /* A tab is the ONLY place a session is listed now that the session plate is
          gone, so the per-session actions that used to live on its card have to be
@@ -214,19 +352,31 @@ function refreshSessionTabbar() {
          fourth unlabelled icon in a row of them. */
       tab.addEventListener('contextmenu', function (e) {
         e.preventDefault();
-        openSessionTabMenu(w, e.clientX, e.clientY);
+        openSessionTabMenu(tab._entry, e.clientX, e.clientY);
       });
     }
-    tab.querySelector('.session-tab-label').textContent = sessionTabLabel(w);
-    tab.title = sessionTabLabel(w);
-    tab.classList.toggle('active', w === topWin);
-    tab.setAttribute('aria-selected', w === topWin ? 'true' : 'false');
+    tab._entry = entry;
+    tab._dockKey = entry.key;
+    tab._win = w || null;
+    /* The label and the tooltip are the SESSION's, not the window's: a tab for a
+       session started elsewhere has no window to read, and the same session must
+       read the same whether or not this page happens to hold its window. */
+    var label = entry.session ? sessionDockLabel(entry.session) : sessionTabLabel(w);
+    tab.querySelector('.session-tab-label').textContent = label;
+    tab.title = label;
+    tab.classList.toggle('active', !!w && w === topWin);
+    tab.setAttribute('aria-selected', (!!w && w === topWin) ? 'true' : 'false');
+    /* A window-less entry is still a session with a state, so the tab says which:
+       no window here is a fact about the page, not about the session. */
+    tab.classList.toggle('is-windowless', !w);
+    if (!w) tab.setAttribute('data-sid', entry.sid);
+    else tab.removeAttribute('data-sid');
     /* The batch component owns both the mode and the ticked set, and paints the
        ticked class over the grid it was handed (this strip). All this loop does is
-       expose the id the component indexes by and show the empty tick slot while
+       expose the key the component indexes by and show the empty tick slot while
        the mode is on — the slot itself must exist in the DOM at all times, or the
        tab's width would change under the pointer the moment selection starts. */
-    tab.setAttribute('data-win-id', w.id);
+    tab.setAttribute('data-win-id', entry.key);
     /* The tick is always visible on every tab: there is no mode to reveal it in,
        and a glyph that appeared and disappeared would change the tab's width under
        the pointer whenever a selection started or ended. */
@@ -241,6 +391,33 @@ function refreshSessionTabbar() {
   // has to be visible. This runs at load time too (this module loads before
   // approval.js), hence the guard: the counts arrive with the first queue read.
   if (typeof applyApprovalCounts === 'function') applyApprovalCounts();
+}
+
+/** The session behind a dock entry: the record for a window-less tab, or the
+ *  last snapshot's copy for a window.
+ *
+ *  Read through the snapshot rather than off the window for the same reason
+ *  sessionForTabWindow does it: a window's `_sid` is not always a session id, so
+ *  a match is what proves there is a session to rename, gate or stop. */
+function dockEntrySession(entry) {
+  if (!entry) return null;
+  if (entry.win) return sessionForTabWindow(entry.win);
+  /* A window-less entry was built FROM the snapshot, so its record is the one
+     already in hand; a lookup would just find the same object again. */
+  return entry.session || null;
+}
+
+/** The tab's x: close the WINDOW, or stop the SESSION when there is no window.
+ *
+ *  Those are two different acts and the icon cannot express the difference, so a
+ *  window-less entry asks: stopping a session you cannot see the terminal of
+ *  should never be one misclick away. */
+function closeDockEntry(entry) {
+  if (!entry) return;
+  if (entry.win) { askCloseTabWindow(entry.win); return; }
+  var s = dockEntrySession(entry);
+  if (!s) return;
+  askCloseSession(s.id, dockSessionTarget(s));
 }
 
 /** The session data a tab's window stands for, or null when there is none yet.
@@ -308,20 +485,24 @@ function copySessionUrl(s) {
  *  tab is 28px of label, badge and close key, and a fourth unlabelled glyph in
  *  that row would be a mystery button.
  *
+ *  It takes a dock ENTRY rather than a window: a session started by an agent has
+ *  no window here, and that is exactly the case where the menu cannot be replaced
+ *  by "open it and use the other one".
+ *
  *  One menu element, built on demand and reused: a per-tab menu would be one
  *  stale closure per window, and this page opens and closes windows all day. */
-function openSessionTabMenu(w, x, y) {
-  var s = sessionForTabWindow(w);
+function openSessionTabMenu(entry, x, y) {
+  var w = entry && entry.win;
+  var s = dockEntrySession(entry);
   closeSessionTabMenu();
+  /* A window with no session behind it (a dial in progress, a status card) has
+     nothing here, so the menu is not offered at all rather than shown empty. */
+  if (!s) return;
   var menu = document.createElement('div');
   menu.className = 'sess-tab-menu';
   menu.id = 'sess-tab-menu';
   menu.setAttribute('role', 'menu');
-  menu.dataset.win = w.id;
-
-  /* A window with no session behind it (a dial in progress) has nothing here, so
-     the menu is not offered at all rather than shown empty. */
-  if (!s) return;
+  menu.dataset.win = entry.key;
 
   var gated = !!s.approval_mode;
   var items = [
@@ -1260,7 +1441,7 @@ var _dockBatch = (typeof createBatchBar === 'function') ? createBatchBar({
   nameAttr: 'data-win-id',
   selectKey: 'nethub.batch.select',
   names: function () {
-    return (typeof dockWindowIds === 'function') ? dockWindowIds() : [];
+    return (typeof dockTabKeys === 'function') ? dockTabKeys() : [];
   },
   /* The tab is its own painter: the component toggles `batch-selected`, and the
      dock's CSS keys the tick off that class. */
@@ -1301,24 +1482,29 @@ var _dockBatch = (typeof createBatchBar === 'function') ? createBatchBar({
       if (t.classList.contains('batch-selected')) ticked[t.getAttribute('data-win-id')] = 1;
     });
     Array.prototype.slice.call(document.querySelectorAll('.shell-header-icon-btn')).forEach(function (b) {
-      var id = b._switchWin && b._switchWin.id;
-      var on = !!(id && ticked[id]);
+      var key = dockKeyForWindow(b._switchWin);
+      var on = !!(key && ticked[key]);
       b.classList.toggle('active', on);
       b.setAttribute('aria-pressed', String(on));
     });
   },
-  onDelete: function (ids) { dockCloseWindows(ids); }
+  onDelete: function (ids) { dockCloseEntries(ids); }
 }) : null;
 
 
-/** The window ids the dock currently lists, in bar order.
+/** The dock keys currently listed, in bar order.
  *
- *  Read off the tab strip rather than a registry: every tab carries the window id
- *  in data-win-id, the strip is rebuilt from the live window list on each frame,
- *  and a batch must act on exactly what the user can see — not on a second list
- *  that could hold a window whose tab has gone.
+ *  Read off the tab strip rather than a registry: every tab carries its key in
+ *  data-win-id, the strip is rebuilt from the live entry list on each frame, and
+ *  a batch must act on exactly what the user can see — not on a second list that
+ *  could hold a tab that has gone.
+ *
+ *  The key is `win:<id>` for a tab backed by an open window and `sess:<id>` for a
+ *  session with no window here. Both forms exist because the tick and the close
+ *  act on two different things: a window is a DOM node to raise or drop, a
+ *  window-less session is a record to open or stop.
  */
-function dockWindowIds() {
+function dockTabKeys() {
   var scroll = document.getElementById('session-tabs-scroll');
   if (!scroll) return [];
   var out = [];
@@ -1329,30 +1515,30 @@ function dockWindowIds() {
   return out;
 }
 
-/** The window a tab id belongs to, or null once its tab has gone. */
-function dockWindowById(id) {
+/** The dock entry a tab key belongs to, or null once its tab has gone. */
+function dockEntryByKey(key) {
   var scroll = document.getElementById('session-tabs-scroll');
   if (!scroll) return null;
   for (var i = 0; i < scroll.children.length; i++) {
     var t = scroll.children[i];
-    if (t && t.getAttribute && t.getAttribute('data-win-id') === id) return t._win || null;
+    if (t && t.getAttribute && t.getAttribute('data-win-id') === key) return t._entry || null;
   }
   return null;
 }
 
-/** Close the ticked windows, one confirm for the whole batch.
+/** Close the ticked dock entries, one confirm for the whole batch.
  *
  *  The dialog names how many sessions will be stopped, because that is the part
  *  the tab row cannot show: closing a window looks the same as stopping a session,
  *  and only one of them keeps the output.
  */
-function dockCloseWindows(ids) {
-  var wins = (ids || []).map(dockWindowById).filter(function (w) { return !!w; });
-  if (!wins.length) return;
-  /* Three kinds of window, and the count has to describe what will ACTUALLY happen
+function dockCloseEntries(keys) {
+  var entries = (keys || []).map(dockEntryByKey).filter(function (e) { return !!e; });
+  if (!entries.length) return;
+  /* Three kinds of entry, and the count has to describe what will ACTUALLY happen
      rather than a subset of it.
    *
-   *   stopping  a session that is still behind this window — it will be archived.
+   *   stopping  a session that is still behind this entry — it will be archived.
    *             A CONNECTING window belongs here: it already carries its session id
    *             (that is how the dial is addressed), and the close path below sends
    *             that id to /terminate exactly like a connected one. The predicate
@@ -1362,9 +1548,11 @@ function dockCloseWindows(ids) {
    *             read as the scope of the action being confirmed.
    *   extension  a card with no session at all: closing it drops a window.
    *   already-over  a read-only transcript view: also just a window.
+   *   window-less  a running session with no window on this page: it is stopped,
+   *             and there is no window to drop afterwards.
    *
    * The split is reported as one sentence with the total, because that is the
-   * question the dialog is answering — "how many of my six windows am I closing?" */
+   * question the dialog is answering — "how many of my six tabs am I closing?" */
   /* `_sid` is the whole test, and `_placeholder` deliberately is NOT part of it.
    *
    * A window is a placeholder while it DIALS, and it starts with `_sid = null`; the
@@ -1374,12 +1562,12 @@ function dockCloseWindows(ids) {
    * so the count has to use the same test or the two disagree. Excluding
    * `_placeholder` was the bug: it dropped every half-connected window from the count
    * while the close still stopped their sessions, so "6 windows" announced 2. */
-  var stopping = wins.filter(function (w) {
-    return !!w._sid && !w._extName && !isSessionDeadInWindows(w._sid);
+  var stopping = entries.filter(function (e) {
+    return !!e.sid && !(e.win && e.win._extName) && !isSessionDeadInWindows(e.sid);
   });
   var msg = stopping.length
-    ? tCount('dock.close.msg.live.one', 'dock.close.msg.live.other', { count: wins.length })
-    : tCount('dock.close.msg.window.one', 'dock.close.msg.window.other', { count: wins.length });
+    ? tCount('dock.close.msg.live.one', 'dock.close.msg.live.other', { count: entries.length })
+    : tCount('dock.close.msg.window.one', 'dock.close.msg.window.other', { count: entries.length });
   confirmDialog({
     title: t('dock.close.title'),
     message: msg,
@@ -1392,24 +1580,25 @@ function dockCloseWindows(ids) {
        failed") instead of a race whose loser is invisible. */
     var failed = [];
     var chain = Promise.resolve();
-    wins.forEach(function (w) {
+    entries.forEach(function (entry) {
       chain = chain.then(function () {
+        var w = entry.win;
         /* `_sid` alone, and this used to exclude `_placeholder` — which meant a
            window whose dial HAD produced a session but had not finished connecting
            got its window dropped and its session left running on the server: an
            orphan with no tab, visible only in the archive later. A placeholder with
            no id yet has nothing to stop, and closeShellWindow hangs up its dial. */
-        if (w._sid && !w._extName) {
-          return archiveSessionById(w._sid).then(function () { closeShellWindow(w); });
+        if (entry.sid && !(w && w._extName)) {
+          return archiveSessionById(entry.sid).then(function () { if (w) closeShellWindow(w); });
         }
         /* No session behind it: dropping the window IS the close. */
-        closeShellWindow(w);
+        if (w) closeShellWindow(w);
       }).catch(function (err) { failed.push(String((err && err.message) || err)); });
     });
     chain.then(function () {
       if (_dockBatch) _dockBatch.setMode(false);
       if (failed.length) showCopyToast(t('toast.stop.failed', { msg: failed.join('; ') }));
-      else showCopyToast(tCount('dock.close.done.one', 'dock.close.done.other', { count: wins.length }));
+      else showCopyToast(tCount('dock.close.done.one', 'dock.close.done.other', { count: entries.length }));
     });
   });
 }

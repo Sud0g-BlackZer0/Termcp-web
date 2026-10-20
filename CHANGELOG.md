@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **底部会话栏列出的是会话，不再是窗口**。它原来只遍历 `allShellWins()`，于是底栏只认识「这个页面自己打开过的窗口」：MCP 的 `pty` / `session_start`、`POST /api/sessions`、以及「窗口关了但会话还在跑」这三种会话全都不在栏里——服务端一直在广播完整的 snapshot，是前端把列表建在了 DOM 上。现在 `dockEntries()` 取「所有打开窗口 ∪ snapshot 里运行中的会话」，以会话为键（`sess:<id>`；占位窗口与扩展状态卡仍是 `win:<id>`），所以关掉窗口标签不会消失，勾选也跟着会话走。没有窗口的会话以虚线上边框绘制，点一下即开终端（`focusSessionWindow`）；中键仍只丢窗口、不动会话。归档会话留在右列，扩展自己的连接留在扩展列——与两张卡片的 `isHiddenSession` 同一条规则。关闭对话框的计数与动作现在用同一个谓词（`entries`），连接中的窗口不再被排除在「要停止几个会话」之外。
+
+- **测试里那些「说现在的行为是 X」的注释，全部对回了代码**。`index.html`、`workspace.css`、`shell-windows.js` 里四处注释还写着「dock 每个标签对应一个打开的窗口」「用户工作的会话就是打开的窗口」，正是它们让这次的问题在文档上看起来已经修好了。这类句子要么有测试顶着，要么不该存在。
+
+- **`between()` 失败时不再只说「找不到」**。`marker` 缺失时列出同类幸存行（改名的函数一眼可见），`terminator` 缺失时打印 marker 之后的前 40 行——最常见的成因是闭包缩进不是 `\n}\n`，看到的缩进就是修法。
+
+- **`dockCloseEntries` 换成行为探针**。原来那三条断言是 `strings.Contains(fn, "count: entries.length")` 之类：改名即崩，撒谎即过。现在在 node 里真跑一遍关闭流程，回头读对话框的措辞、destructive 标记、实际 POST 的 id 与真正被丢掉的窗口，覆盖四种条目（有窗口会话 / 无窗口会话 / 扩展状态卡 / 连接中窗口）。验证过它抓得住历史 bug：把 `_placeholder` 重新加回计数谓词，`danger` 断言立刻红。
+
 - **initialize instructions 从 2586 B 降到 1231 B**。它原来是 12 条规则，把命令空间、TERM/1 回复格式、窗口参数语义、close/rm 生命周期、fwd/profile 语法全写了一遍——而这些都是模型一动手就能发现的：指令表在 `help` 里，参数语义在每个参数的 schema `Desc` 里，回复格式在回复自带的 Header 里。真正不能靠“边做边学”的只有四件事：只有一个工具、句柄不可猜、越过人的边界是不可逆的、被 held 的调用不能重试。现在只留这四条，其余靠渐进展开。这不是单纯的“变短”：很多客户端把它注入**每一轮** system prompt，所以重点是每条规则都在每一轮重复付费；删掉的七条在它们真正被用到的时刻都有更详细的解释。同一条约束的反方向仍然被锁着：`TestTokenBudgetGuard` 把上限从 2600 B 收到 1600 B（此前的数字只是当时文件大小的快照，几乎没有余量），`docs_test.go` 则盯着四条硬边界不许被挤掉。
 
 - **不再提供 MCP resources**。工具的公开面只有一个 `term`，而它的参数是一条命令行；这条命令行能描述自己：空 `cmd` 返回引导，`help` 返回全部指令表，`help <directive>` 返回单条用法与坑。所以一个走 MCP 的客户端没有任何理由去读 REST 端点表——它发 `pty internal`，不调 `POST /api/sessions`。`api.md` 本身还在，还在 `GET /api.md` 上，因为它是**传输层**唯一的手写参考（端点、请求体、cursor 语义、认证），这部分 `help` 盖不到；直接写脚本的调用方 curl 那个 URL 即可。把同一批字节再经过 `resources/read` 发一遍没有多买到什么，却多一个 capability 声明和四个钩子要维护。现在初始化不再声答应 `resources`，`resources/list` 由协议层直接拒绕（而不是回一个空列表——“空列表”意思是这个服务器没有文档，“拒绕”意思是它不做 resources）；`learn-api` prompt 保留，因为一个还不知道 `cmd` 就是全部表面的 agent 不会想到去发它。

@@ -283,15 +283,22 @@
 .workspace-exts .section-body > [class~="drawer-add-row"] { display: contents; }
 
 /* ---- The session dock --------------------------------------------------
-   Pinned to the bottom of the viewport, and the ONE place the open windows are
-   listed: one tab per window, plus the pane-layout keys. It replaced the
-   floating tab bar, which had to be draggable to stay out of the way — a dock
-   that is a band in the page needs no grip.
+   Pinned to the bottom of the viewport, and the ONE place the sessions are
+   listed: one tab per running session plus one per window with no session, then
+   the pane-layout keys. It replaced the floating tab bar, which had to be
+   draggable to stay out of the way — a dock that is a band in the page needs no
+   grip.
 
-   It used to fold a session plate up from the bottom as well. That layer is
-   gone: the sessions a user works in ARE the open windows, so a list under the
-   tab row was a second place for the same fact to be wrong, and the sessions
-   that are over have their own column on the right.
+   It used to hold one tab per OPEN WINDOW, which is not the same list: a session
+   started by an agent over MCP, by a script through POST /api/sessions, or by a
+   connect whose window was closed here has no window at all, so it was invisible
+   on the page that was supposed to control it. The tab is therefore keyed by the
+   session, and a tab with no window is drawn dashed (see
+   .session-tab.is-windowless in terminal.css) because clicking it opens one.
+
+   It also used to fold a session plate up from the bottom. That layer is gone —
+   the tab row answers the same question — and the sessions that are over have
+   their own column on the right.
 
    Its height is published to the stylesheet as --dock-h (shell-windows.js
    measures it, the way it already publishes --app-header-h), so the tiled
@@ -386,12 +393,14 @@
      this cluster whenever the batch group is empty. The strip absorbs the slack,
      so the controls sit at the edge whether or not a key is showing. */
 }
-/* Empty dock: zero windows is a legal state, and the bar stays rather than
-   vanish — it is the page's one place the open windows are listed, so a bar that
-   removed itself would leave nothing to say "no window is open" with. The note
-   is a LABEL, never a key: there is nothing behind it to open (the sessions a
-   user works in ARE the windows, by definition), so dressing it as a control
-   would promise a list that does not exist. */
+/* Empty dock: nothing live is a legal state, and the bar stays rather than
+   vanish — it is the page's one place the sessions are listed, so a bar that
+   removed itself would leave nothing to say "nothing is running" with. "Empty"
+   means no ENTRY: no running session on the server and no window in this page. A
+   page with a live agent session and no window is NOT empty, which is why the
+   note follows the entry count rather than the window count.
+   The note is a LABEL, never a key: there is nothing behind it to open, so
+   dressing it as a control would promise a list that does not exist. */
 /* The empty note, BETWEEN the batch group and the window controls.
  *
  * It was absolutely positioned across `left: 58px; right: 10px` — full width minus

@@ -42,28 +42,35 @@ func TestSessionSwitcherUsesOneDataSource(t *testing.T) {
 		t.Error("the switcher menu must not be parented inside the window")
 	}
 	// Session-based entry points resolve the session first; the tab bar already
-	// owns its window (including a pending dial without a session id).
+	// owns its window (including a pending dial without a session id), and a tab for
+	// a session with no window opens one through the resolver.
 	for _, tc := range []struct {
 		name, body, want string
 	}{
 		{"session tile", sessions, "focusSessionWindow("},
 		{"switcher item", termView, "focusSessionWindow("},
-		{"session tab", between(t, shellWins, "function refreshSessionTabbar", "\n}\n"), "focusShellWindow(w)"},
 	} {
 		if !strings.Contains(tc.body, tc.want) {
 			t.Errorf("%s should call %s", tc.name, tc.want)
 		}
 	}
-	// …and it must reach that normaliser without a session lookup, because the tab
-	// owns its window. That is the whole reason a status card is safe here: its _sid
-	// is the extension's NAME, so resolving it as a session would dial a terminal
-	// named after the extension (and a pending dial has no id to resolve at all).
+	// …and a tab that OWNS its window must reach the normaliser without a session
+	// lookup, because a status card's _sid is the extension's NAME (resolving it as a
+	// session would dial a terminal named after the extension) and a pending dial has
+	// no id to resolve at all. A tab with no window is the opposite case and goes
+	// through the resolver — see TestAWindowlessTabOpensTheSessionItStandsFor.
 	tabBody := between(t, shellWins, "var order = [];", "order.forEach(function (t) { scroll.appendChild(t); });")
-	if !strings.Contains(tabBody, "focusShellWindow(w);") {
-		t.Error("clicking a tab must raise the window it owns, not resolve a session for it")
+	if !strings.Contains(tabBody, "focusShellWindow(cur.win);") {
+		t.Error("clicking a tab must raise the window it owns")
 	}
-	if strings.Contains(tabBody, "focusSessionWindow(") {
-		t.Error("the tab bar must not resolve a session: a status card's _sid is a name, and a dial has no id yet")
+	/* The resolver belongs to the ONE branch that has no window to raise. A lookup
+	   on the window path is the bug this pins: a status card's `_sid` is a name, and
+	   a dial has no id yet. */
+	if n := strings.Count(tabBody, "focusSessionWindow("); n != 1 {
+		t.Errorf("the tab click resolves a session %d time(s); exactly the window-less branch may", n)
+	}
+	if !strings.Contains(between(t, tabBody, "if (!cur || !cur.win) {", "focusShellWindow(cur.win);"), "focusSessionWindow(") {
+		t.Error("the resolver must sit inside the window-less branch")
 	}
 	if strings.Contains(sessions, "openOrFocusShellWindow(") {
 		t.Error("sessions.js should use focusSessionWindow, not the old alias")
@@ -430,18 +437,110 @@ process.exit(bad === 0 ? 0 : 1);
 // It fails the test when either is absent: a missing terminator used to return
 // the whole remainder, which quietly widened the slice and made assertions test
 // code outside the function they named.
+//
+// Failure messages carry CONTEXT, because "marker not found" is the least useful
+// sentence a sliced-source test can print: it names a string the author already
+// knows, and nothing about the file it was looked for in. When the terminator is
+// missing the remainder is printed — the commonest cause is a function whose body
+// closes at a different indent than "\n}\n", and seeing the real shape is what
+// turns a hunt into a one-line fix.
 func between(t *testing.T, src, marker, end string) string {
 	t.Helper()
 	i := strings.Index(src, marker)
 	if i < 0 {
-		t.Fatalf("marker %q not found", marker)
+		t.Fatalf("marker %q not found; %s", marker, nearestInSource(src, marker))
 	}
 	rest := src[i:]
 	j := strings.Index(rest, end)
 	if j < 0 {
-		t.Fatalf("terminator %q not found after marker %q", end, marker)
+		t.Fatalf("terminator %q not found after marker %q; the slice runs to the end of %s. First 40 lines after the marker:\n%s",
+			end, marker, linesOf(src), headLines(rest, 40))
 	}
 	return rest[:j]
+}
+
+// nearestInSource describes why a marker was not found, in terms that shorten the
+// hunt: the lines that look like the one asked for.
+//
+// The first version reported the longest surviving common prefix — which for
+// `function gamma(` is "function ", a string every function in the file shares. That
+// is a fact about the language, not about the failure. The useful answer is the
+// candidates: when a function was renamed, seeing the declarations that DID survive
+// names the rename in one line, and when the whole block is gone the empty list
+// says so.
+func nearestInSource(src, want string) string {
+	keyword := leadingWord(want)
+	var candidates []string
+	if keyword != "" {
+		for _, line := range strings.Split(src, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || !containsWord(trimmed, keyword) {
+				continue
+			}
+			candidates = append(candidates, trimmed)
+			if len(candidates) == 5 {
+				break
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return "nothing in the file starts the way it does (" + linesOf(src) + ")"
+	}
+	return "lines that do: " + strings.Join(candidates, " | ") +
+		" (" + linesOf(src) + "; the marker was renamed or removed)"
+}
+
+// leadingWord returns the first identifier-ish run of s (`function ` -> `function`,
+// `var order = [` -> `var`), which is what "the same kind of line" means here.
+func leadingWord(s string) string {
+	s = strings.TrimLeft(s, " \t\n")
+	for i, r := range s {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// containsWord reports whether line contains word as a whole identifier, so a
+// marker starting with `var` does not list every line holding `variable`.
+func containsWord(line, word string) bool {
+	for from := 0; ; {
+		i := strings.Index(line[from:], word)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(word)
+		leftOK := start == 0 || !isIdentByte(line[start-1])
+		rightOK := end == len(line) || !isIdentByte(line[end])
+		if leftOK && rightOK {
+			return true
+		}
+		from = start + 1
+		if from >= len(line) {
+			return false
+		}
+	}
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// linesOf reports how much source was searched, so a slice failure cannot be
+// confused with an empty file.
+func linesOf(src string) string {
+	return strconv.Itoa(strings.Count(src, "\n")+1) + " lines"
+}
+
+// headLines returns the first n lines of s, or all of it.
+func headLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[:n], "\n") + "\n… (" + strconv.Itoa(len(lines)-n) + " more lines)"
 }
 
 // rungValue returns the integer value assigned to a named rung in z-layers.css.

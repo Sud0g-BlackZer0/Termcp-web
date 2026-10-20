@@ -228,9 +228,15 @@ for (const mode of ['float', 'tile']) {
 /* The empty row is a LABEL, never a key.
  *
  * The dock used to fold a session plate up from underneath, so the note could be
- * the way back to it. That layer is gone: the sessions a user works in ARE the
- * open windows, so there is nothing behind the row to open, and a note dressed as
- * a button would promise a list the page does not have. */
+ * the way back to it. That layer is gone, and the note stays a plain label: there
+ * is nothing behind the row to open, so dressing it as a button would promise a
+ * list the page does not have.
+ *
+ * What "empty" means changed with the dock's data source. It used to mean "no open
+ * windows"; now it means no ENTRY — no running session on the server and no window
+ * in this page. The two cases below pin the new meaning from both sides: a page
+ * whose only session belongs to a subsystem is empty (that session is the extension
+ * column's), and a page with a live session and no window is not. */
 {
   const f = fixture();
   f.ctx.window._lastSessionsSnapshot = [
@@ -238,18 +244,28 @@ for (const mode of ['float', 'tile']) {
   ];
   f.ctx.refreshSessionTabbar();
   const note = f.document.getElementById('sessdock-empty');
-  eq('no windows: the note says so', note.getAttribute('data-i18n'), 'dock.empty');
-  eq('no windows: the note is not a key', note.getAttribute('role'), null);
-  eq('no windows: no count badge is created for a folded layer', f.document.getElementById('sessdock-count'), null);
+  eq('a subsystem-only session: the note says so', note.getAttribute('data-i18n'), 'dock.empty');
+  eq('the note is not a key', note.getAttribute('role'), null);
+  eq('no badge is created for a layer that does not exist', f.document.getElementById('sessdock-count'), null);
   // It sits in the bar, before the strip: the strip is a tablist and may hold
   // nothing but tabs.
   eq('the note is not inside the tablist', note.parentNode === f.ids['sessdock-bar'], true);
   eq('the note precedes the strip', f.ids['sessdock-bar'].children.indexOf(note),
     f.ids['sessdock-bar'].children.indexOf(f.ids['session-tabs-scroll']) - 1);
 
+  // A live session with no window here is NOT an empty dock: it is the whole point
+  // of listing sessions rather than windows.
+  f.ctx.window._lastSessionsSnapshot = [
+    { id: 's2', name: 'agent', status: 'running', created_at: 1 }
+  ];
+  f.ctx.refreshSessionTabbar();
+  eq('a live session with no window removes the note', f.document.getElementById('sessdock-empty'), null);
+  eq('a live session with no window is a tab', f.ids['session-tabs-scroll'].children.length, 1);
+
   // One window: the note goes, and the tab is the row's whole content.
-  f.win(1, 'session-one');
-  eq('a window removes the note', f.document.getElementById('sessdock-empty'), null);
+  const f2 = fixture();
+  f2.win(1, 'session-one');
+  eq('a window removes the note', f2.document.getElementById('sessdock-empty'), null);
 }
 
 if (failures) process.exit(1);

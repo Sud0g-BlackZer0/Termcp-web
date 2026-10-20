@@ -65,12 +65,15 @@ function setupMobileSessionSwitcher(win) {
     var activate = function (e) {
       e.preventDefault();
       e.stopPropagation();
-      /* The tick lives in the dock's selection, and the dock is keyed by window.
-         A window whose id it has not seen yet (a placeholder mid-connect) simply
-         has nowhere to record the tick, so the press is a no-op rather than an
-         error: the window becomes tickable the moment the dock draws its tab. */
-      if (!_dockBatch || !win.id) return;
-      _dockBatch.toggleSelection(win.id, win);
+      /* The tick lives in the dock's selection, and the dock is keyed by its tab
+         (see dockKeyForWindow: `win:<id>`, or `sess:<id>` for a session with no
+         window). A window whose id the dock has not drawn a tab for yet (a
+         placeholder mid-connect) simply has nowhere to record the tick, so the
+         press is a no-op rather than an error: the window becomes tickable the
+         moment the dock draws its tab. */
+      var key = (typeof dockKeyForWindow === 'function') ? dockKeyForWindow(win) : '';
+      if (!_dockBatch || !key) return;
+      _dockBatch.toggleSelection(key, win);
     };
     icon.addEventListener('click', activate);
     icon.addEventListener('keydown', function (e) {

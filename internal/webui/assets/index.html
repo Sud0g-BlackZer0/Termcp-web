@@ -426,14 +426,15 @@
     </div>
   </div>
 
-  <!-- The session dock: the window layer, pinned to the bottom of the viewport.
-       It holds ONE tab per open window plus the pane-layout keys, and nothing
-       else. It used to fold a session plate up from the bottom as well; that is
-       gone on purpose — the sessions a user works in are the open windows, and a
-       list that duplicates the tab row is a second place for the same fact to be
-       wrong. Sessions that are over live in the archive column on the right.
-       Its height is published as --dock-h so the tiled overlay insets itself by
-       it instead of being covered. -->
+  <!-- The session dock: the list of sessions, pinned to the bottom of the
+       viewport. It holds ONE tab per RUNNING SESSION plus one per window that has
+       no session behind it (a dial in flight, an extension's status card), plus the
+       pane-layout keys. It used to list only the windows this page had opened,
+       which made every session an agent started over MCP — and every session whose
+       window was closed here — invisible on the page. Sessions that are over live in
+       the archive column on the right; a subsystem's own connection lives in the
+       extension column. Its height is published as --dock-h so the tiled overlay
+       insets itself by it instead of being covered. -->
   <!-- The dock: TWO rows, and the split is what makes the batch keys possible.
        One row could not hold a tab strip wide enough to be readable plus the
        window controls plus the verbs that act on a selection — measured on a

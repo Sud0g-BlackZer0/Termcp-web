@@ -13,6 +13,14 @@
   .session-tab:focus-visible { outline: 2px solid var(--term-accent); outline-offset: 1px; }
   .session-tab:hover { color: var(--term-fg-white); border-color: var(--term-border-hover); }
   .session-tab.active { color: var(--term-fg-white); background: var(--term-bg); border-color: var(--term-accent); box-shadow: inset 0 -2px 0 var(--term-accent); }
+  /* A tab for a session that has no window on this page (an agent's session, a
+     connect whose window was closed here). It is a real, running session and the
+     click opens it, so it must NOT look disabled — a dashed edge is the page's
+     established "not open here yet" mark, and it is the only difference: same
+     label shape, same tick, same close key. */
+  .session-tab.is-windowless { border-style: dashed; }
+  .session-tab.is-windowless .session-tab-label { color: var(--term-fg-muted); }
+  .session-tab.is-windowless:hover .session-tab-label { color: var(--term-fg-white); }
   .session-tab .session-tab-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; font-family: var(--font-mono); }
   .session-tab .session-tab-close { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border: none; border-radius: 4px; background: transparent; color: var(--term-fg-soft); cursor: pointer; padding: 0; flex-shrink: 0; }
   .session-tab .session-tab-close:hover { background: var(--term-danger); color: var(--term-fg-white); }

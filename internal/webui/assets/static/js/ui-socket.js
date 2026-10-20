@@ -548,6 +548,7 @@ function disposeWinResources(win) {
 }
 
 function closeShellWindow(win) {
+  if (!win || win._windowless) return;
   // Remember active tab for reconnect.
   if (win._parentSid && win._activeChannelSid) {
     if (!window._shellLastActive) window._shellLastActive = {};
