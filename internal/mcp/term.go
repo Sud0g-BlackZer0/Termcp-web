@@ -620,7 +620,7 @@ func statusFor(code string) int {
 		return 403
 	case CodeSessionNotFound, CodeShellNotFound, CodeForwardNotFound,
 		CodeSSHConfigNotFound, CodeRuleNotFound, CodeHistoryNotFound,
-		CodeReaderNotRegistered:
+		CodeReaderNotRegistered, CodeFileNotFound:
 		return 404
 	case CodeConflict, CodeSessionNotRunning:
 		return 409

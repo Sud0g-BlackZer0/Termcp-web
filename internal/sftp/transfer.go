@@ -46,10 +46,7 @@ func (s *Client) StreamReadTo(w io.Writer, remotePath string, offset, length int
 // offset. offset=0 truncates the file; offset>0 writes at that position without
 // truncation. Uses io.Copy to stream without buffering in memory.
 func (s *Client) StreamWriteFrom(r io.Reader, remotePath string, offset int64) (int64, error) {
-	flag := os.O_RDWR | os.O_CREATE
-	if offset <= 0 {
-		flag |= os.O_TRUNC
-	}
+	flag, offset := writeOpenFlags(offset)
 	f, err := s.client.OpenFile(remotePath, flag)
 	if err != nil {
 		return 0, fmt.Errorf("open remote file: %w", err)
@@ -197,16 +194,17 @@ func (s *Client) writeInline(remotePath string, offset int64, data string, mode 
 		return 0, fmt.Errorf("unknown mode %q", mode)
 	}
 
-	flag := os.O_RDWR | os.O_CREATE
-	if offset <= 0 {
-		flag |= os.O_TRUNC
-	}
+	flag, offset := writeOpenFlags(offset)
 	f, err := s.client.OpenFile(remotePath, flag)
 	if err != nil {
 		return 0, fmt.Errorf("open remote file: %w", err)
 	}
 	defer f.Close()
 
+	// SEEK ONLY WHEN NEEDED, BUT ALWAYS KNOW WHERE WE ARE. The file's own offset
+	// starts at 0, so writing at 0 needs no seek; writing anywhere else does. This
+	// is the half of the offset-0 bug that made it invisible: the flag was right
+	// and the position was right, so only the truncate decision was wrong.
 	if offset > 0 {
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
 			return 0, fmt.Errorf("seek: %w", err)
@@ -237,10 +235,7 @@ func (s *Client) writeFromLocal(remotePath string, offset int64, localPath strin
 		return 0, fmt.Errorf("seek local: %w", err)
 	}
 
-	flag := os.O_RDWR | os.O_CREATE
-	if offset <= 0 {
-		flag |= os.O_TRUNC
-	}
+	flag, offset := writeOpenFlags(offset)
 	remoteFile, err := s.client.OpenFile(remotePath, flag)
 	if err != nil {
 		return 0, fmt.Errorf("open remote file: %w", err)
@@ -258,4 +253,23 @@ func (s *Client) writeFromLocal(remotePath string, offset int64, localPath strin
 		return 0, fmt.Errorf("copy: %w", err)
 	}
 	return n, nil
+}
+
+// writeOpenFlags decides how a write opens its target.
+//
+// OFFSET -1 IS "NOT GIVEN"; 0 IS THE FIRST BYTE. The rule used to be `offset <= 0`,
+// which sent both down the truncate path: writing one byte at offset 0 turned a
+// ten-byte file into a one-byte file while the identical write at offset 3 patched
+// in place. The destructive form was the default and nothing said so, and there was
+// no spelling that overwrote a file from its first byte.
+//
+// A caller that wants the file replaced passes -1 (the "no offset" form); a caller
+// that named a position gets that position.
+func writeOpenFlags(offset int64) (int, int64) {
+	flag := os.O_RDWR | os.O_CREATE
+	if offset < 0 {
+		flag |= os.O_TRUNC
+		offset = 0
+	}
+	return flag, offset
 }
