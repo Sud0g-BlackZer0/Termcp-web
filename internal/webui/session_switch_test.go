@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -211,32 +212,41 @@ func TestMinimizedCSSCannotBeConfusedWithHidden(t *testing.T) {
 
 // Full-screen windows all share the stylesheet's z-index, so raising one needs an
 // inline value. It must be handed over rather than incremented: a counter
-// climbing past the drawer's 24000 would put terminals over the entries drawer.
+// climbing past the drawer's rung would put terminals over the entries drawer.
+//
+// Both numbers are now NAMED rungs from z-layers.css, and the JS reads them
+// through zRung() instead of restating them — a copy in JS cannot disagree with
+// the stylesheet out loud, so the two drift the first time either moves.
 func TestFullscreenZIndexIsHandedOverNotIncremented(t *testing.T) {
 	util := readAssetLF(t, "static/js/util.js")
 	body := between(t, util, "function bringShellWindowToFront", "\n}\n")
 
-	for _, want := range []string{"FULLSCREEN_Z", "win-fullscreen"} {
+	for _, want := range []string{"fullscreenZ()", "win-fullscreen"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("bringShellWindowToFront should reference %s", want)
 		}
 	}
-	if !strings.Contains(util, "var FULLSCREEN_Z =") {
-		t.Error("the full-screen z-index should be a single named constant")
+	// The rung comes from the ladder, not from a literal in this file.
+	if !strings.Contains(util, "function fullscreenZ() { return zRung('--z-fullscreen'") {
+		t.Error("the full-screen z-index must be read from the --z-fullscreen rung")
+	}
+	if strings.Contains(util, "var FULLSCREEN_Z =") {
+		t.Error("a JS copy of the full-screen rung is a second source for a stylesheet decision")
 	}
 	// No increment-and-store counter for the full-screen path.
 	if strings.Contains(body, "_shellFullZSeq") {
 		t.Error("the full-screen z-index must not be an incrementing counter")
 	}
 
-	// The constant has to sit between the dock and the drawer, or the terminal
-	// hides the drawer (or sinks behind the dock). The dock is what the floating
-	// tab bar became: it is pinned to the viewport bottom, so the full-screen
-	// window must still paint over it.
+	// The rung has to sit between the dock and the drawer, or the terminal hides
+	// the drawer (or sinks behind the dock). The dock is what the floating tab bar
+	// became: it is pinned to the viewport bottom, so the full-screen window must
+	// still paint over it. The VALUES live in z-layers.css; the rules that use
+	// them just name the rung.
 	css := readAppCSS(t)
 	full := between(t, css, ".shell-window.win-fullscreen {", "}")
-	if !strings.Contains(full, "z-index: 21000") {
-		t.Errorf("the stylesheet full-screen z-index should be 21000; got %q", strings.TrimSpace(full))
+	if !strings.Contains(full, "z-index: var(--z-fullscreen)") {
+		t.Errorf("the full-screen rule should use the full-screen rung; got %q", strings.TrimSpace(full))
 	}
 	// The dock's stacking is declared in workspace.css beside the rest of its
 	// geometry. Read that sheet rather than the bundle: terminal.css also carries
@@ -244,8 +254,16 @@ func TestFullscreenZIndexIsHandedOverNotIncremented(t *testing.T) {
 	// manifest order, so a bare lookup would land on the wrong one.
 	workspaceCSS := readAssetLF(t, "static/css/workspace.css")
 	dock := between(t, workspaceCSS, ".sessdock {", "}")
-	if !strings.Contains(dock, "z-index: 20000") {
-		t.Error("the dock should stay below the full-screen window")
+	if !strings.Contains(dock, "z-index: var(--z-dock)") {
+		t.Error("the dock should use the dock rung, below the full-screen window")
+	}
+	// And the order those rungs encode is what the paragraph above claims.
+	ladder := readAssetLF(t, "static/css/z-layers.css")
+	if rungValue(t, ladder, "--z-dock") >= rungValue(t, ladder, "--z-fullscreen") {
+		t.Error("the full-screen rung must be above the dock's")
+	}
+	if rungValue(t, ladder, "--z-fullscreen") >= rungValue(t, ladder, "--z-drawer") {
+		t.Error("the full-screen rung must stay below the drawer's, or a terminal hides the drawer")
 	}
 }
 
@@ -426,6 +444,42 @@ func between(t *testing.T, src, marker, end string) string {
 	return rest[:j]
 }
 
+// rungValue returns the integer value assigned to a named rung in z-layers.css.
+func rungValue(t *testing.T, ladder, name string) int {
+	t.Helper()
+	re := regexp.MustCompile(regexp.QuoteMeta(name) + `:\s*(-?\d+)`)
+	m := re.FindStringSubmatch(ladder)
+	if m == nil {
+		t.Fatalf("ladder declares no %s rung", name)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("%s has an unparsable value: %v", name, err)
+	}
+	return n
+}
+
+// rungValueOfRule looks up the rung named by sel's `z-index: var(--z-…)`
+// declaration in css, then resolves that rung against the ladder.
+//
+// Asserting a numeric z-index at the call site instead would re-create the second
+// copy the ladder exists to delete: the test would keep passing while the real
+// order lived somewhere else.
+func rungValueOfRule(t *testing.T, css, ladder, sel string) int {
+	t.Helper()
+	re := regexp.MustCompile(regexp.QuoteMeta(sel) + `\s*\{[^}]*z-index:\s*var\((--z-[a-z-]+)\)`)
+	m := re.FindStringSubmatch(css)
+	if m == nil {
+		// A dialog may inherit the base dialog rung through its class; fall back
+		// to .modal-backdrop when querying an undeclared modal id.
+		if strings.HasPrefix(sel, "#modal-") {
+			return rungValueOfRule(t, css, ladder, ".modal-backdrop")
+		}
+		t.Fatalf("%s declares no z-index rung via var(--z-…)", sel)
+	}
+	return rungValue(t, ladder, m[1])
+}
+
 // The load banner shows a dismiss button, so it has to be a flex row; and the
 // inline display value has to agree with the stylesheet, or the button lands
 // under the message instead of beside it.
@@ -490,22 +544,17 @@ func TestLoadBannerShowsDismissButtonInAFlexRow(t *testing.T) {
 // full-screen terminal's hamburger, so a modal below either one opens *behind*
 // it. Nothing errors when that happens — the class is removed and the dialog is
 // briefly in the DOM and invisible — so it is pinned here instead.
+//
+// Since every stacking declaration now names a rung (z-layers.css), this reads
+// the RUNG a rule uses and then looks its value up on the ladder. Asserting the
+// numbers here instead would re-create the second copy the ladder exists to
+// delete: the test would keep passing while the real order lived somewhere else.
 func TestModalsOutrankEverySurfaceThatOpensThem(t *testing.T) {
 	css := readAppCSS(t)
+	ladder := readAssetLF(t, "static/css/z-layers.css")
 	z := func(sel string) int {
 		t.Helper()
-		// A selector can appear in several rules (e.g. .drawer-scrim is first
-		// declared as display:none), so take the declaration that sets z-index.
-		re := regexp.MustCompile(regexp.QuoteMeta(sel) + `\s*\{[^}]*z-index:\s*(\d+)`)
-		m := re.FindStringSubmatch(css)
-		if m == nil {
-			t.Fatalf("%s declares no z-index", sel)
-		}
-		n, err := strconv.Atoi(m[1])
-		if err != nil {
-			t.Fatalf("%s has an unparsable z-index: %v", sel, err)
-		}
-		return n
+		return rungValueOfRule(t, css, ladder, sel)
 	}
 
 	modal := z(".modal-backdrop")
@@ -516,15 +565,223 @@ func TestModalsOutrankEverySurfaceThatOpensThem(t *testing.T) {
 		".sessdock",                    // the dock, which replaced the tab bar
 	} {
 		if got := z(below); got >= modal {
-			t.Errorf("%s is z-index %d, at or above the modal's %d: a dialog opened from it renders behind it", below, got, modal)
+			t.Errorf("%s is at rung %d, at or above the modal's %d: a dialog opened from it renders behind it", below, got, modal)
 		}
 	}
 	// Toasts stay on top, and so does the notify stack: a server-pushed
-	// notify_user message must not be swallowed by a dialog. The modal was
-	// already below both at 20000, so this pins the existing precedence.
+	// notify_user message must not be swallowed by a dialog.
 	for _, above := range []string{"#ui-copy-toast", "#ui-notify-stack"} {
 		if got := z(above); got <= modal {
-			t.Errorf("%s is z-index %d, below the modal's %d", above, got, modal)
+			t.Errorf("%s is at rung %d, below the modal's %d", above, got, modal)
+		}
+	}
+}
+
+// A dialog raised FROM a dialog must outrank it.
+//
+// This is the "确认框在对话框下面" bug, and it is invisible in source review: the
+// confirm element exists, `hidden` is off, the backdrop is full-screen — and the
+// editor that raised it paints over it, so the user presses Delete and nothing
+// happens. At one shared rung the winner is DOM order, and every editor is
+// declared after the confirm dialogs.
+//
+// The second tier is not a bigger number for its own sake: it exists because
+// these dialogs are the ones reachable from INSIDE another dialog.
+func TestDialogsRaisedFromDialogsOutrankTheirParent(t *testing.T) {
+	css := readAppCSS(t)
+	ladder := readAssetLF(t, "static/css/z-layers.css")
+	base := rungValueOfRule(t, css, ladder, ".modal-backdrop")
+
+	// The editors: each of these can raise confirmDialog from one of its keys.
+	parents := []string{"#modal-conn", "#modal-ext", "#modal-start", "#modal-forward"}
+	// The second tier: confirm (ext/conn delete), cmd (channel prompt), and the
+	// close-session dialog (raised from a dock batch action).
+	children := []string{"#modal-confirm", "#modal-cmd", "#modal-close-session"}
+
+	for _, child := range children {
+		got := rungValueOfRule(t, css, ladder, child)
+		if got <= base {
+			t.Errorf("%s is at rung %d, not above the dialog rung %d: a confirm raised from an open dialog renders behind it", child, got, base)
+		}
+		// Still a dialog: below the menus, toasts and the notify stack.
+		if got >= rungValue(t, ladder, "--z-popover") {
+			t.Errorf("%s is at rung %d, at or above the popover rung: a menu opened from it would be cut off", child, got)
+		}
+	}
+	for _, parent := range parents {
+		// The editors inherit the base rung from .modal-backdrop and must not
+		// declare a rung of their own — a second declaration is how one dialog
+		// silently ends up in the confirm tier.
+		if m := regexp.MustCompile(regexp.QuoteMeta(parent) + `\s*\{[^}]*z-index:`).FindString(css); m != "" {
+			t.Errorf("%s declares its own z-index; the editors must inherit the base dialog rung", parent)
+		}
+	}
+}
+
+// A menu anchored to the pointer is appended to <body> and positioned wherever
+// the pointer was — which can be over the dock, a drawer, or a dialog. It has to
+// outrank all of them, and it sat at 60, i.e. underneath every content surface:
+// right-clicking a session tab opened a menu the dock painted over.
+func TestPointerMenusOutrankEverythingTheyOpenOver(t *testing.T) {
+	css := readAppCSS(t)
+	ladder := readAssetLF(t, "static/css/z-layers.css")
+	popover := rungValue(t, ladder, "--z-popover")
+
+	for _, menu := range []string{".sess-tab-menu", ".shell-window-switch-menu", ".shell-file-ctx-menu"} {
+		if got := rungValueOfRule(t, css, ladder, menu); got != popover {
+			t.Errorf("%s should sit on the popover rung %d; got %d", menu, popover, got)
+		}
+	}
+	// Above every surface a menu can be opened over, and below the stacks the
+	// user did not ask for.
+	for _, below := range []string{"--z-modal-top", "--z-drawer", "--z-dock"} {
+		if popover <= rungValue(t, ladder, below) {
+			t.Errorf("the popover rung must be above %s", below)
+		}
+	}
+	for _, above := range []string{"--z-toast"} {
+		if popover >= rungValue(t, ladder, above) {
+			t.Errorf("the popover rung must stay below %s: a message the user did not ask for may not be hidden by a menu", above)
+		}
+	}
+}
+
+// A menu belongs to the surface that owns it: it must beat its siblings inside
+// that surface, but it must NEVER reach for a page-level rung to do it. A header
+// menu at the popover rung would float over the terminals on a page whose header
+// is supposed to stay behind them.
+func TestInSurfaceMenusStayOnTheDropdownRung(t *testing.T) {
+	css := readAppCSS(t)
+	ladder := readAssetLF(t, "static/css/z-layers.css")
+	dropdown := rungValue(t, ladder, "--z-dropdown")
+
+	for _, menu := range []string{".lang-menu", ".theme-menu", ".clients-panel", ".nethub-open-menu"} {
+		if got := rungValueOfRule(t, css, ladder, menu); got != dropdown {
+			t.Errorf("%s is an in-surface menu and should use the dropdown rung %d; got %d", menu, dropdown, got)
+		}
+	}
+	// The dropdown rung ranks menus against SIBLINGS only, so it may not try to
+	// climb over the content band; the header is what carries it up when needed.
+	if dropdown >= rungValue(t, ladder, "--z-workspace") {
+		t.Error("the dropdown rung must stay below the content band: the header carries its menu up, not the menu itself")
+	}
+}
+
+// The ladder is the ONLY place a page layer may be written as a number.
+//
+// This is what keeps the next "one more rung" from arriving as a literal. It
+// walks every shipped stylesheet (excluding the vendored xterm sheet, whose
+// stacking is internal to that library) and fails on any numeric z-index outside
+// the ladder file. `z-index: auto` is allowed: it removes a stacking context
+// rather than ranking one, and one of those resets is load-bearing.
+func TestNoStylesheetRanksALayerWithALiteral(t *testing.T) {
+	// Reads the sheets directly instead of through the manifest: the point is to
+	// cover every file a page can load, including the ones no manifest imports.
+	files := []string{
+		"static/css/base.css", "static/css/approval.css", "static/css/terminal.css",
+		"static/css/timeline.css", "static/css/workspace.css", "static/css/theme.css",
+		"static/css/theme-controls.css", "static/css/panels.css",
+		"static/css/terminal-theme.css", "static/css/noglass.css", "static/css/docs.css",
+		"static/css/tokens.css",
+	}
+	themes, err := fs.Glob(Assets(), "themes/*/assets/static/css/*.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files = append(files, themes...)
+
+	// A z-index declaration with a numeric value — including a negative one, and
+	// including the shorthand `inset: 0; z-index: 3` forms on one line.
+	literal := regexp.MustCompile(`z-index:\s*(-?\d+)`)
+	for _, path := range files {
+		body, err := readAsset(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		// Comments describe the ladder and may quote a number; rules may not. Rather
+		// than pattern-match comment syntax per line, strip every /* … */ run
+		// first — a prose line inside a block comment is otherwise indistinguishable
+		// from a declaration.
+		stripped := stripCSSComments(normalizeNL(body))
+		for i, line := range strings.Split(stripped, "\n") {
+			if m := literal.FindStringSubmatch(line); m != nil {
+				t.Errorf("%s:%d ranks a layer with the literal %s; name it in static/css/z-layers.css and use var(--z-…)",
+					path, i+1, m[1])
+			}
+		}
+	}
+}
+
+// Every rung the ladder declares is actually used, and every rung a stylesheet
+// names is actually declared: a typo in `var(--z-modal-tp)` renders as no
+// declaration at all, which silently drops the element to the flow layer, i.e.
+// under everything. That failure looks like "the dialog is behind the page".
+func TestEveryZIndexRungIsDeclaredAndUsed(t *testing.T) {
+	ladder := readAssetLF(t, "static/css/z-layers.css")
+	declared := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(-\-z-[a-z-]+):`).FindAllStringSubmatch(ladder, -1) {
+		declared[m[1]] = true
+	}
+	if len(declared) < 20 {
+		t.Fatalf("the ladder declares only %d rungs; it looks truncated", len(declared))
+	}
+
+	bundle := readAppCSS(t)
+	used := map[string]bool{}
+	for _, m := range regexp.MustCompile(`var\((--z-[a-z-]+)\)`).FindAllStringSubmatch(bundle, -1) {
+		used[m[1]] = true
+		if !declared[m[1]] {
+			t.Errorf("a stylesheet reads var(%s), which the ladder does not declare: the declaration is dropped and the element falls to the flow layer", m[1])
+		}
+	}
+	// The JS reads two rungs by name through zRung(); a rename there would be
+	// silently ignored too (zRung falls back to the literal).
+	util := readAssetLF(t, "static/js/util.js")
+	for _, m := range regexp.MustCompile(`zRung\('(--z-[a-z-]+)'`).FindAllStringSubmatch(util, -1) {
+		used[m[1]] = true
+		if !declared[m[1]] {
+			t.Errorf("util.js reads zRung(%s), which the ladder does not declare", m[1])
+		}
+	}
+
+	for rung := range declared {
+		if !used[rung] {
+			t.Errorf("the ladder declares %s but no rule uses it; a rung nothing reads is a number that will drift", rung)
+		}
+	}
+}
+
+// A JS fallback for a rung is a copy of that rung's value, and a copy is only
+// safe while it agrees. util.js states both numbers it may need before the
+// stylesheet has applied; this pins them to the ladder.
+func TestJSZIndexFallbacksMatchTheirRungs(t *testing.T) {
+	util := readAssetLF(t, "static/js/util.js")
+	ladder := readAssetLF(t, "static/css/z-layers.css")
+
+	pairs := map[string]string{
+		"--z-fullscreen": "fullscreenZ",
+	}
+	_ = pairs
+	for _, tc := range []struct{ fn, rung string }{
+		{"function fullscreenZ() { return zRung('--z-fullscreen'", "--z-fullscreen"},
+		{"var low = zRung('--z-window'", "--z-window"},
+		{"var dock = zRung('--z-dock'", "--z-dock"},
+	} {
+		i := strings.Index(util, tc.fn)
+		if i < 0 {
+			t.Fatalf("util.js no longer reads %s", tc.rung)
+		}
+		seg := util[i:]
+		if end := strings.Index(seg, "\n"); end >= 0 {
+			seg = seg[:end]
+		}
+		m := regexp.MustCompile(`,\s*(-?\d+)\)`).FindStringSubmatch(seg)
+		if m == nil {
+			t.Fatalf("%s has no fallback literal: %q", tc.rung, seg)
+		}
+		want := strconv.Itoa(rungValue(t, ladder, tc.rung))
+		if m[1] != want {
+			t.Errorf("%s falls back to %s but the ladder says %s; the copy has drifted", tc.rung, m[1], want)
 		}
 	}
 }
@@ -716,7 +973,7 @@ func TestNetHubRegressionFixes(t *testing.T) {
 		t.Error("the narrow breakpoint must remove .nethub's stacking context so the drawer can outrank the scrim")
 	}
 	if !strings.Contains(css, "#sec-entries-body {\n    position: fixed") ||
-		!strings.Contains(css, "z-index: 24000") || !strings.Contains(css, `#sec-entries-body.drawer-open {
+		!strings.Contains(css, "z-index: var(--z-drawer)") || !strings.Contains(css, `#sec-entries-body.drawer-open {
     transform: translateX(0); visibility: visible;`) {
 		t.Error("the narrow drawer must be fixed, high in the root stack, and open through its transform")
 	}
@@ -913,11 +1170,17 @@ func TestBackdropIsAFixedDropInLayer(t *testing.T) {
 			t.Errorf("the backdrop should be %q; got %q", want, rule)
 		}
 	}
-	// z-index: -1 is what puts it BEHIND the page. A positioned element at auto
+	// A NEGATIVE rung is what puts it BEHIND the page. A positioned element at auto
 	// paints with the z-index:0 layer, above static content, so dropping this one
-	// declaration puts the artwork on top of the app.
-	if !strings.Contains(rule, "z-index: -1") {
-		t.Errorf("the backdrop needs z-index: -1 to stay behind the page; got %q", rule)
+	// declaration puts the artwork on top of the app. The number lives in
+	// z-layers.css; what is pinned here is that the rule reads that rung and that
+	// the rung is negative.
+	if !strings.Contains(rule, "z-index: var(--z-behind)") {
+		t.Errorf("the backdrop needs the behind rung to stay behind the page; got %q", rule)
+	}
+	ladder := readAssetLF(t, "static/css/z-layers.css")
+	if rungValue(t, ladder, "--z-behind") >= 0 {
+		t.Error("--z-behind must be negative, or the artwork paints over the page's static content")
 	}
 
 	// The artwork lives on body's layer, not the root's: body must not paint its

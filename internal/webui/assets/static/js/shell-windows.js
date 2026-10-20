@@ -115,7 +115,7 @@ function refreshSessionTabbar() {
          value. Ties are real at that point — same computed z-index — and the one
          later in the DOM paints on top, so >= picks the visible one. */
       var z = parseInt(w.style.zIndex, 10);
-      if (isNaN(z)) z = FULLSCREEN_Z;
+      if (isNaN(z)) z = fullscreenRung();
       if (z >= topZ) { topZ = z; topWin = w; }
     });
   }

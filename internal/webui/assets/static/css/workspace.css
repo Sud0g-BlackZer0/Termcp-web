@@ -244,13 +244,13 @@
 .sessdock {
   /* The dock is a BAND IN THE PAGE, not an overlay: body is a column, the dock
      is its last row, and the workspace above it is what flexes. That is what
-     makes it share space instead of covering it — a fixed dock at z-index 20000
+     makes it share space instead of covering it — a fixed dock at the dock rung
      painted over the bottom of the extension column, which is where the panel's
      own "add extension" keys live, so the keys a user needs were the ones
      hidden. Being in flow also means --dock-h is only needed for the TILED
      overlay (a fixed layer that really does cover the viewport), not for the
      page itself. */
-  position: relative; z-index: 20000;
+  position: relative; z-index: var(--z-dock);
   flex: 0 0 auto;
   display: flex; flex-direction: column;
   background: var(--term-panel-94);
@@ -370,7 +370,7 @@
    session rail has no narrow form of its own — the dock IS the session list at
    this width, so the rail is hidden rather than duplicated. */
 .nethub {
-  position: sticky; top: 68px; z-index: 20;
+  position: sticky; top: 68px; z-index: var(--z-sticky);
   min-width: 0; min-height: 0; align-self: start;
   display: flex; flex-direction: column;
   color: var(--text-secondary);
@@ -1474,7 +1474,7 @@
    somewhere else". min-width: 100% makes it at least as wide as the key it
    drops from, so the items are the key's width instead of a squat box. */
 .nethub-open-menu {
-  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: var(--z-dropdown);
   min-width: 100%;
   display: flex; flex-direction: column; padding: 4px;
   border: 1px solid var(--border-subtle); border-radius: 0;
@@ -1502,7 +1502,7 @@
    vertical menu of verbs — but it is positioned fixed at the pointer, since its
    anchor is a tab in a bar that scrolls and it must not be clipped by it. */
 .sess-tab-menu {
-  position: fixed; z-index: 60; min-width: 186px;
+  position: fixed; z-index: var(--z-popover); min-width: 186px;
   display: flex; flex-direction: column; padding: 4px;
   border: 1px solid var(--border-subtle); border-radius: 0;
   background: var(--bg-elevated); box-shadow: 0 10px 28px var(--shadow-card);
@@ -1546,7 +1546,7 @@
   width: 28px; height: 46px; padding: 0;
   border: 1px solid var(--border-strong); border-radius: 0;
   background: var(--bg-elevated); color: var(--accent);
-  cursor: pointer; z-index: 2; touch-action: manipulation;
+  cursor: pointer; z-index: var(--z-drawer-key); touch-action: manipulation;
   transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
 /* Outboard of the body's own padding, so the key is never over the content it
@@ -1587,7 +1587,7 @@
 .drawer-close:hover, .drawer-close:active { background: var(--accent-surface); border-color: var(--accent-border); color: var(--accent-hover); }
 .drawer-close svg { display: block; }
 .drawer-scrim {
-  display: none; position: fixed; inset: 0; z-index: 23900;
+  display: none; position: fixed; inset: 0; z-index: var(--z-scrim);
   background: var(--overlay-scrim); backdrop-filter: blur(3px);
   opacity: 0; pointer-events: none; transition: opacity .22s ease;
 }
@@ -1629,11 +1629,12 @@
      what the page IS rather than a column beside anything. */
   .workspace-frame > .workspace-exts { grid-column: auto; flex: 1 1 100%; order: 3; }
   /* z-index: auto is load-bearing, not tidying: the base rule gives .nethub
-     z-index: 20 for its sticky column, and a positioned ancestor with a
+     the sticky rung for its sticky column, and a positioned ancestor with a
      z-index creates a stacking context. The drawer inside it is position:fixed
-     at z-index 24000, but it would then paint at the ANCESTOR's 20 — under the
-     scrim, which is a sibling at 23900. That is the frosted pane over an open
-     drawer. Resetting the ancestor lets the fixed child reach the root context. */
+     at the drawer rung, but it would then paint at the ANCESTOR's sticky rung —
+     under the scrim, which is a sibling on its own rung above it. That is the
+     frosted pane over an open drawer. Resetting the ancestor lets the fixed
+     child reach the root context. */
   .nethub { position: relative; top: auto; z-index: auto; }
   .extpanel { position: relative; top: auto; z-index: auto; }
   /* width: auto is the shrink: the key takes the room its own label needs and
@@ -1677,7 +1678,7 @@
      they have in common, and spelling them twice keeps each drawer readable on
      its own. */
   #sec-entries-body {
-    position: fixed; top: 0; bottom: 0; z-index: 24000;
+    position: fixed; top: 0; bottom: 0; z-index: var(--z-drawer);
     display: flex; flex-direction: column;
     width: min(86vw, 360px); padding: 12px; overflow: hidden;
     min-height: 0; max-height: none; margin-top: 0;
@@ -1689,7 +1690,7 @@
     will-change: transform;
   }
   .extpanel-body {
-    position: fixed; top: 0; bottom: 0; z-index: 24000;
+    position: fixed; top: 0; bottom: 0; z-index: var(--z-drawer);
     display: flex; flex-direction: column;
     width: min(86vw, 360px); padding: 12px; overflow: hidden;
     min-height: 0; max-height: none; margin-top: 0;

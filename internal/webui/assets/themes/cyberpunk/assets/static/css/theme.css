@@ -625,7 +625,7 @@
    keeps its slow breathing; these states only add a brief local disturbance and
    never turn the page into an esports HUD. */
 body::after {
-  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: -1;
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: var(--z-behind);
   opacity: 0; background: radial-gradient(circle at var(--bw-x, 50%) var(--bw-y, 50%), rgba(var(--cyan-rgb), .13), transparent 22%);
 }
 body.bw-session-active::after { opacity: .22; transition: opacity .35s ease; }

@@ -516,7 +516,7 @@ function topVisibleShellWindow() {
     var w = wins[i];
     if (w.classList.contains('win-minimized') || w.classList.contains('win-hidden')) continue;
     var z = parseInt(w.style.zIndex, 10);
-    if (isNaN(z)) z = w.classList.contains('pane-active') ? FULLSCREEN_Z : 10001;
+    if (isNaN(z)) z = w.classList.contains('pane-active') ? fullscreenRung() : windowRung();
     if (z >= bestZ) { bestZ = z; best = w; }
   }
   return best;

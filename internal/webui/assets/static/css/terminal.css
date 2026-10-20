@@ -1,5 +1,5 @@
   /* Floating terminal: dark theme; main page stays light */
-  .shell-windows-container { position: fixed; inset: 0; pointer-events: none; z-index: 10000; }
+  .shell-windows-container { position: fixed; inset: 0; pointer-events: none; z-index: var(--z-workspace); }
   .shell-windows-container > * { pointer-events: auto; }
   /* The dock: pinned to the bottom of the viewport, and the ONE place the open
      windows and the session plates both live. It replaces the floating tab bar
@@ -42,7 +42,7 @@
      header or the dock. The dock is where the pane-layout keys live, so covering
      it would hide the only way out of tile mode — this inset is what makes
      "push, never cover" true without a push/overlay rule to maintain. */
-  .pane-workspace { position: fixed; inset: var(--app-header-h, 0px) 0 var(--dock-h, 0px) 0; z-index: 10000; background: var(--term-pane-72); display: none; flex-direction: column; }
+  .pane-workspace { position: fixed; inset: var(--app-header-h, 0px) 0 var(--dock-h, 0px) 0; z-index: var(--z-workspace); background: var(--term-pane-72); display: none; flex-direction: column; }
   .pane-workspace.open { display: flex; }
   .pane-grid { flex: 1; display: grid; gap: 6px; padding: 6px; min-height: 0; overflow: hidden; align-content: stretch; }
   .pane-grid > .shell-window { position: static !important; inset: auto; width: 100% !important; height: 100% !important; min-width: 0; min-height: 0; z-index: auto !important; box-shadow: none; }
@@ -97,8 +97,8 @@
   .session-tabbar-select { height: 26px; padding: 0 4px; border: 1px solid var(--term-border-2); border-radius: 0; background: var(--term-surface); color: var(--term-fg-muted); cursor: pointer; font-size: 11px; }
   .session-tabbar-select:hover { color: var(--term-fg-white); border-color: var(--term-border-hover); }
   .session-tabbar-select option { color: var(--term-fg); }
-  .shell-window { position: fixed; width: 640px; height: 480px; min-width: 320px; min-height: 240px; background: var(--term-bg); border-radius: 8px; box-shadow: 0 8px 32px var(--term-black-4); border: 1px solid var(--term-border); display: flex; flex-direction: column; overflow: hidden; z-index: 10001; }
-  .shell-window-header { display: flex; justify-content: space-between; align-items: stretch; gap: 0; padding: 0 8px 0 0; border-bottom: 1px solid var(--term-border); background: var(--term-surface); cursor: move; user-select: none; flex-shrink: 0; z-index: 2; min-height: 34px; flex-wrap: nowrap; }
+  .shell-window { position: fixed; width: 640px; height: 480px; min-width: 320px; min-height: 240px; background: var(--term-bg); border-radius: 8px; box-shadow: 0 8px 32px var(--term-black-4); border: 1px solid var(--term-border); display: flex; flex-direction: column; overflow: hidden; z-index: var(--z-window); }
+  .shell-window-header { display: flex; justify-content: space-between; align-items: stretch; gap: 0; padding: 0 8px 0 0; border-bottom: 1px solid var(--term-border); background: var(--term-surface); cursor: move; user-select: none; flex-shrink: 0; z-index: var(--z-win-header); min-height: 34px; flex-wrap: nowrap; }
   .shell-window-title-cluster { display: flex; align-items: center; gap: 6px; min-width: 0; padding-left: 8px; }
   .shell-window-title {
     margin: 0;
@@ -291,7 +291,7 @@
      edge). It is a child of .shell-channel-body, whose box ends at the footer, so
      clearing the grip needs its height plus a gap — not the footer's too. */
   .shell-term-scroll-fab {
-    position: absolute; right: calc(var(--term-rail-gap, 10px) + var(--term-rail-w, 14px) + 8px); bottom: 36px; z-index: 15;
+    position: absolute; right: calc(var(--term-rail-gap, 10px) + var(--term-rail-w, 14px) + 8px); bottom: 36px; z-index: var(--z-win-fab);
     width: 30px; height: 30px; padding: 0;
     border: 1px solid var(--term-white-18); border-radius: 50%;
     background: var(--term-fab-92); color: var(--term-fg-dim);
@@ -324,7 +324,7 @@
      a diagonal drag from the corner resizes both axes. */
   .shell-window { --shell-resize-grip: 6px; --shell-resize-len: 44px; }
   .shell-window-resize-handle {
-    position: absolute; z-index: 33; touch-action: none;
+    position: absolute; z-index: var(--z-win-grip); touch-action: none;
     width: var(--shell-resize-grip); height: var(--shell-resize-len);
   }
   /* One rule per corner, stating all three properties. Grouping them by axis
@@ -434,7 +434,7 @@
     /* Above the corner grips (30) and the control rows (31/32): the panel is an
        interactive surface the user opened, and a resize affordance must not sit
        on top of its buttons. The grip under it is unusable until it is closed. */
-    position: absolute; right: 8px; top: 8px; z-index: 40;
+    position: absolute; right: 8px; top: 8px; z-index: var(--z-win-sheet);
     width: min(420px, calc(100% - 16px));
     max-height: min(60%, 340px);
     display: flex; flex-direction: column;
@@ -533,7 +533,7 @@
     transition: background .1s, color .1s;
   }
   .shell-channel-tab:hover { background: var(--term-hover); color: var(--term-fg); }
-  .shell-channel-tab:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; z-index: 1; }
+  .shell-channel-tab:focus-visible { outline: 2px solid var(--term-accent); outline-offset: -2px; z-index: var(--z-focus-lift); }
   .shell-channel-tab.active { background: var(--term-bg); color: var(--term-fg-soft-2); border-top: 2px solid var(--term-accent); }
   .shell-channel-tab-label {
     overflow: hidden;
@@ -744,10 +744,10 @@
     max-width: none; max-height: none;
     border: none; border-radius: 0;
     box-shadow: none;
-    /* Above the session tab bar (20000): when the terminal is the screen,
-       nothing in the page layer may float over it. Modals (24500), toasts and
-       notifications are not page content and may still do so. */
-    z-index: 21000;
+    /* Above the dock: when the terminal is the screen, nothing in the page
+       layer may float over it. Modals, toasts and notifications are not page
+       content and may still do so. */
+    z-index: var(--z-fullscreen);
   }
   /* The resize grip and drag cursor are meaningless when the window is the
      screen: there is nothing to drag or resize it against. */
@@ -882,8 +882,14 @@
   @media (pointer: coarse) and (hover: none) {
     .shell-window-drawer-btn { display: inline-flex; }
   }
+  /* Menus anchored at the pointer, appended to <body> so no scrolling bar or
+     clipped panel can cut them. They are above any dialog (a menu opened from a
+     dialog must be visible over it) and below the toast and notify stacks: those
+     are messages the user did not ask for and must not be swallowed by a control
+     they did. It sat at 30001, which put it over both — an arithmetic answer to
+     "above the dock", when the ladder already had a rung for it. */
   .shell-window-switch-menu {
-    position: fixed; z-index: 30001;
+    position: fixed; z-index: var(--z-popover);
     min-width: 200px; max-width: calc(100vw - 16px);
     max-height: 60dvh; overflow-y: auto;
     padding: 4px; border: 1px solid var(--term-border-4); border-radius: 8px;
@@ -905,8 +911,10 @@
   .shell-switch-empty { padding: 10px 12px; color: var(--term-fg-muted); font-size: 0.78rem; }
   .shell-switch-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-  /* File context menu (dark, matches shell-window) */
-  .shell-file-ctx-menu { display:none; position:fixed; z-index:30001; background:var(--term-panel); border:1px solid var(--term-border-4); border-radius:6px; box-shadow:0 4px 16px var(--term-black-4); min-width:150px; padding:4px 0; }
+  /* File context menu (dark, matches shell-window). Same rung as the other
+     pointer-anchored menu above: both are menus, and two menus never need to
+     outrank each other. */
+  .shell-file-ctx-menu { display:none; position:fixed; z-index:var(--z-popover); background:var(--term-panel); border:1px solid var(--term-border-4); border-radius:6px; box-shadow:0 4px 16px var(--term-black-4); min-width:150px; padding:4px 0; }
   .file-ctx-item { padding:6px 14px; cursor:pointer; font-size:0.8rem; color:var(--term-fg); white-space:nowrap; }
   .file-ctx-item:hover { background:var(--term-current); color:var(--term-fg-white); }
   .file-ctx-item.file-ctx-danger { color:var(--term-danger-2); }
