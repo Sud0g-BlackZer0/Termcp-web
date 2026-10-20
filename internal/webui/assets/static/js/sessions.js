@@ -134,26 +134,8 @@ function exportArchivedTranscripts(sessions) {
                 ''
               ].join('\n');
               var path = folder + '/shell-' + (i + 1) + '-' + safeZipSegment(String(sid)) + '.txt';
-              return fetch(apiPath('/api/shells/' + encodeURIComponent(sid) + '/output-range?max=524288&tail=1'))
-                .then(function (r) { return r.ok ? r.json() : null; })
-                .then(function (j) {
-                  /* output-range answers a JSON envelope, not raw text: it is the
-                     terminal-replay route, so the reply carries `start`/`end`/`total`
-                     beside the bytes, and several frames when the window spans more
-                     than one span. Writing `JSON.stringify` of that into a .txt would
-                     hand the reader escape sequences wrapped in an object literal —
-                     the first attempt did exactly that. The bytes are collected out
-                     of every frame and joined, which is what a transcript IS. */
-                  var body = '';
-                  if (j) {
-                    if (Array.isArray(j.frames)) {
-                      j.frames.forEach(function (f) { body += (f && f.d) || ''; });
-                    } else if (typeof j.d === 'string') {
-                      body += j.d;
-                    } else if (typeof j.data === 'string') {
-                      body += j.data;
-                    }
-                  }
+              return fetchAllShellOutput(sid)
+                .then(function (body) {
                   files.push({ path: path, text: head + body + '\n' });
                 })
                 .catch(function () { files.push({ path: path, text: head + '(output unavailable)\n' }); });
@@ -164,16 +146,9 @@ function exportArchivedTranscripts(sessions) {
                purge that kept the row) still gets its single transcript, so the export
                never silently drops a ticked session. */
             if (!shells.length) {
-              return fetch(apiPath('/api/sessions/' + encodeURIComponent(s.id) + '/lines?limit=100000'))
-                .then(function (r) { return r.ok ? r.json() : { lines: [] }; })
-                .then(function (j) {
-                  var lines = (j && (j.lines || j.marks)) || [];
-                  files.push({
-                    path: folder + '/session-output.txt',
-                    text: lines.map(function (l) {
-                      return typeof l === 'string' ? l : (l && (l.text || l.data)) || '';
-                    }).join('')
-                  });
+              return fetchAllSessionLines(s.id)
+                .then(function (body) {
+                  files.push({ path: folder + '/session-output.txt', text: body });
                 });
             }
           });
@@ -232,6 +207,113 @@ function safeZipSegment(name) {
   s = s.replace(/[. ]+$/, '');                         // trailing dot/space: Windows strips them
   if (s.length > 64) s = s.slice(0, 64);
   return s || '_';
+}
+
+/** Read a shell's COMPLETE output, paging until the server says there is no more.
+ *
+ *  An export is a copy of the record, so a window is the wrong shape for it. The
+ *  first version asked for `output-range?max=524288&tail=1` — one request, the LAST
+ *  512 KiB — which is not a truncated export only if the shell never printed more
+ *  than that. When it did, the folder silently held the tail of a transcript with
+ *  nothing anywhere saying the beginning was gone: the worst kind of loss, because
+ *  the archive looks complete.
+ *
+ *  `output-range` is already a paging route: it answers `start`/`end`/`total` beside
+ *  the bytes, where `total` is the whole stream and `end` is where this window
+ *  stopped. So the loop is "read from where the last window ended, until end reaches
+ *  total". The cap per request (the server's hard max is 512 KiB) is a window size,
+ *  not a limit on what can be exported.
+ *
+ *  Two details are load-bearing:
+ *
+ *  - `end` is the byte offset AFTER the window, so it is the next `start`. Using
+ *    `start + length` instead would be wrong: the server may clamp or re-align the
+ *    window, and the returned offsets are the truth about what was served.
+ *  - a window that does not advance (end <= start) ends the loop. Without that guard
+ *    a server-side clamp (start below the retained base offset, for instance) would
+ *    make this spin forever, and a hung export button is worse than a short file.
+ *
+ *  The reply is a JSON envelope, not raw text: it is the terminal-replay route, so
+ *  several `frames` may come back for one window. Writing `JSON.stringify` into the
+ *  .txt would hand the reader escape sequences wrapped in an object literal; the
+ *  bytes are collected out of every frame and joined, which is what a transcript IS.
+ */
+function fetchAllShellOutput(sid) {
+  var WINDOW = 512 * 1024;   // the server's hard max; one request per chunk
+  var parts = [];
+  var start = 0;
+
+  function frameBytes(j) {
+    if (!j) return '';
+    if (Array.isArray(j.frames)) {
+      var s = '';
+      j.frames.forEach(function (f) { s += (f && f.d) || ''; });
+      return s;
+    }
+    if (typeof j.d === 'string') return j.d;
+    if (typeof j.data === 'string') return j.data;
+    return '';
+  }
+
+  function step() {
+    return fetch(apiPath('/api/shells/' + encodeURIComponent(sid) + '/output-range?max=' + WINDOW + '&start=' + start))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (!j) return parts.join('');
+        parts.push(frameBytes(j));
+        var end = typeof j.end === 'number' ? j.end : start;
+        var total = typeof j.total === 'number' ? j.total : end;
+        /* No progress, or nothing left: done. `end >= total` is the normal exit;
+           `end <= start` is the guard that keeps a clamped window from looping. */
+        if (end <= start || end >= total) return parts.join('');
+        start = end;
+        return step();
+      });
+  }
+
+  return step();
+}
+
+/** Read a session's complete output by LINES, for records whose shells the server
+ *  no longer lists (older snapshots, or a purge that kept the row).
+ *
+ *  The previous version asked for `/lines?limit=100000`, and both halves of that
+ *  were wrong: the route takes `from` + `count`, not `limit`, so the parameter was
+ *  ignored and the default of 50 lines applied — a record exported as fifty lines.
+ *  `count` is also capped server-side (1000), so completeness needs paging here
+ *  too, not a bigger number.
+ *
+ *  `from` is 1-based and absolute, `total_lines` is the whole record, so the loop is
+ *  "ask for the next page until it has handed over total_lines". A page that returns
+ *  nothing ends it, so a server that clamps cannot spin.
+ */
+function fetchAllSessionLines(sid) {
+  var PAGE = 1000;   // the server's hard max count
+  var parts = [];
+  var from = 1;
+
+  function step() {
+    return fetch(apiPath('/api/sessions/' + encodeURIComponent(sid) + '/lines?from=' + from +
+      '&count=' + PAGE + '&content=1'))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (!j) return parts.join('');
+        var lines = j.lines || [];
+        if (!lines.length) return parts.join('');
+        lines.forEach(function (l) {
+          /* `content` is present because content=1 was asked for. The fallbacks keep
+             an older reply shape readable rather than printing "[object Object]". */
+          if (typeof l === 'string') parts.push(l);
+          else if (l) parts.push(l.content != null ? l.content : ((l.text || l.data) || ''));
+        });
+        var totalLines = typeof j.total_lines === 'number' ? j.total_lines : 0;
+        from += lines.length;
+        if (from > totalLines) return parts.join('');
+        return step();
+      });
+  }
+
+  return step();
 }
 
 /** Build an uncompressed (STORE) ZIP from [{path, text}] and return a Blob.

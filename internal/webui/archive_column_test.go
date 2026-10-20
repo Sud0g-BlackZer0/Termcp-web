@@ -282,12 +282,13 @@ func TestTheArchiveExportsAFolderPerSession(t *testing.T) {
 	}
 	// A folder per session, named from the session, holding a record and its shells.
 	for _, want := range []string{
-		"/session.txt",    // the session's own record
-		"/shell-",         // one file per channel
-		"/shells",         // the list that says how many there are
-		"/output-range",   // where a shell's bytes come from
-		"zipStore(",       // packed, not concatenated
-		"safeZipSegment(", // names are user-controlled
+		"/session.txt",           // the session's own record
+		"/shell-",                // one file per channel
+		"/shells",                // the list that says how many there are
+		"fetchAllShellOutput(",   // where a shell's complete bytes come from
+		"fetchAllSessionLines(",  // the fallback for records with no live shells
+		"zipStore(",              // packed, not concatenated
+		"safeZipSegment(",        // names are user-controlled
 	} {
 		if !strings.Contains(fn, want) {
 			t.Errorf("the export is missing %s: a session must be a folder with its shells in it", want)
@@ -306,7 +307,10 @@ func TestTheArchiveExportsAFolderPerSession(t *testing.T) {
 	if strings.Contains(fn, "r.text()") {
 		t.Error("the shell body is read as text; output-range answers JSON and the envelope would land in the file")
 	}
-	if !strings.Contains(fn, "j.d") {
+	// The frame's `d` field is unpacked by fetchAllShellOutput now that the read is
+	// paged; the caller only receives the joined bytes.
+	reader := between(t, js, "function fetchAllShellOutput(", "\n}\n")
+	if !strings.Contains(reader, "j.d") {
 		t.Error("the shell bytes must be taken out of the frame's `d` field")
 	}
 }
@@ -1102,4 +1106,79 @@ func TestTheArchiveColumnKeepsItsCollapseAnimation(t *testing.T) {
 		t.Error("the collapsed archive is a 56px rail; that width must stay a plain length")
 	}
 
+}
+
+// The export must be COMPLETE — every byte the shell ever printed.
+//
+// The first version asked for `output-range?max=524288&tail=1`: one request, the
+// LAST 512 KiB. That is not a truncated export only if the shell never printed more
+// than 512 KiB. When it did, the folder silently held the tail of a transcript with
+// nothing anywhere saying the beginning was gone — the worst kind of loss, because
+// the archive looks complete and the reader has no way to notice.
+//
+// `output-range` is already a paging route: it answers `start`/`end`/`total` beside
+// the bytes. So completeness is a loop, and this pins the loop rather than the
+// request that used to be there.
+func TestTheArchiveExportIsComplete(t *testing.T) {
+	js := readAssetLF(t, "static/js/sessions.js")
+
+	fn := between(t, js, "function fetchAllShellOutput(", "\n}\n")
+	if fn == "" {
+		t.Fatal("fetchAllShellOutput is gone: the export must page, not take one window")
+	}
+
+	// The window size is the server's hard max, and it is a CHUNK size — the loop is
+	// what makes the export complete, not a bigger number.
+	if !strings.Contains(fn, "512 * 1024") {
+		t.Error("the per-request window should be the server's hard max (512 KiB); the loop makes it complete")
+	}
+	// Page from where the last window ended, using the SERVER's `end` (an absolute
+	// offset), not a locally computed length: the server may clamp or re-align.
+	for _, want := range []string{
+		"&start=",          // paging by absolute offset
+		"j.end",            // the server's end offset is the next start
+		"j.total",          // and total is what says when to stop
+		"start = end",      // advance from what was served
+		"end >= total",     // normal exit
+		"end <= start",     // no-progress guard, or a clamped window spins forever
+	} {
+		if !strings.Contains(fn, want) {
+			t.Errorf("fetchAllShellOutput is missing %q: paging must advance on the server's own offsets "+
+				"and stop on a window that does not move", want)
+		}
+	}
+	// The tail-only request is the bug. Check the request the code BUILDS, not the
+	// file: the prose above quotes `tail=1` to explain why it is wrong, so comments
+	// have to go before the pattern can mean anything.
+	code := stripJSComments(js)
+	if regexp.MustCompile(`output-range\?[^'"\s]*tail=1`).MatchString(code) {
+		t.Error("the export must not read `tail=1`: that returns the LAST window only, so a shell that " +
+			"printed more than 512 KiB exports as its tail with nothing saying the rest is missing")
+	}
+
+	/* The fallback for records whose shells the server no longer lists had its own
+	   two bugs: it asked for `/lines?limit=100000`, and the route takes `from`+`count`
+	   — so `limit` was ignored and the default of 50 applied, exporting a record as
+	   fifty lines. `count` is capped server-side too, so completeness is again a loop. */
+	lines := between(t, js, "function fetchAllSessionLines(", "\n}\n")
+	if lines == "" {
+		t.Fatal("fetchAllSessionLines is gone: records without live shells still need their transcript")
+	}
+	if regexp.MustCompile(`lines\?[^'"\s]*limit=`).MatchString(code) {
+		t.Error("the lines route takes `from` + `count`; `limit` is ignored and the default of 50 applies")
+	}
+	for _, want := range []string{"from=", "count=", "content=1", "total_lines"} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("fetchAllSessionLines is missing %q: the route is line-addressed and paged", want)
+		}
+	}
+}
+
+// stripJSComments removes /* ... */ and // ... runs so a test can assert on the code
+// a file RUNS rather than on the prose it uses to explain that code. Several of the
+// comments in sessions.js quote the exact request they replaced.
+func stripJSComments(src string) string {
+	src = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(src, "")
+	src = regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(src, "")
+	return src
 }
