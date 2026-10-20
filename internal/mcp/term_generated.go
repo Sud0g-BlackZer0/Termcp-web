@@ -259,9 +259,14 @@ func (s *Server) directiveSpan(ctx context.Context, stmt directive.Statement, wi
 	if !ok {
 		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
 	}
-	// One span per line: status, time, byte range, line range. Terminal columns,
-	// because a span list is something a caller scans and greps, not a document it
-	// parses field by field.
+	// One span per line: status, time, byte range, line range, and the byte where
+	// the line range starts.
+	//
+	// THE FOURTH AND FIFTH COLUMNS ANSWER DIFFERENT QUESTIONS. `start` is where the
+	// command began; `line_start` is where `read --from-line <from>` begins, which is
+	// earlier by the width of the prompt on that line (37 bytes in the case that
+	// surfaced this). A caller paging by position needs the second one, and showing
+	// only the first next to a line number is what made the two look interchangeable.
 	var b strings.Builder
 	spans, _ := doc["spans"].([]any)
 	for _, raw := range spans {
@@ -269,18 +274,40 @@ func (s *Server) directiveSpan(ctx context.Context, stmt directive.Statement, wi
 		if !ok {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("%s\t%d\t%d-%d\tL%d-%d\n",
+		lineStart := int64(getFloatAny(span, "line_start", -1))
+		lineStartCell := "-"
+		if lineStart >= 0 {
+			lineStartCell = fmt.Sprintf("%d", lineStart)
+		}
+		b.WriteString(fmt.Sprintf("%s\t%d\t%d-%d\tL%d-%d\t@%s\n",
 			getString(span, "s", ""),
 			int64(getFloatAny(span, "t", 0)),
 			int64(getFloatAny(span, "start", 0)), int64(getFloatAny(span, "end", 0)),
-			int64(getFloatAny(span, "from_line", 0)), int64(getFloatAny(span, "to_line", 0))))
+			int64(getFloatAny(span, "from_line", 0)), int64(getFloatAny(span, "to_line", 0)),
+			lineStartCell))
 	}
 	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: b.String()}
 }
 
 // directiveReader registers or drops an output reader.
 func (s *Server) directiveReader(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	if v, ok := stmt.Flag("drop"); ok {
+	// `--drop` WITHOUT A NUMBER IS A MISTAKE, NOT A REGISTRATION.
+	//
+	// The old test was `if v, ok := stmt.Flag("drop"); ok`, and a valueless flag
+	// reports ok=true with v="". flagNumber("") then failed, the failure was
+	// DISCARDED, and control fell through to the register branch — so
+	// `reader h:1 --drop` created a new reader and answered 200 with its id. A typo
+	// that leaves a resource behind is the one kind of typo that must not be quiet.
+	//
+	// FlagState separates the three cases the boolean could not: absent (register),
+	// present without a value (this refusal), and present with a value (unregister).
+	switch stmt.FlagState("drop") {
+	case directive.FlagAbsent:
+		// fall through to register below
+	case directive.FlagNoValue:
+		return badRequest(stmt, "reader --drop needs a reader id: `reader <handle> --drop <id>`")
+	default:
+		v, _ := stmt.Flag("drop")
 		readerID, err := flagNumber(v)
 		if err != nil {
 			return numericFlagProblem(stmt, "drop", err)
