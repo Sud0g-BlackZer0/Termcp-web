@@ -1064,7 +1064,7 @@ func TestNetHubSidebarKeepsThePageFromScrolling(t *testing.T) {
 	const ceiling = "calc(100dvh - var(--app-header-h, 60px) - var(--dock-h, 44px) - 90px)"
 	for _, m := range []struct{ name, rule string }{
 		{"the panel", body},
-		{"the collapsed rail", between(t, css, ".workspace-frame.nethub-collapsed .nethub-rail {", "}")},
+		{"the collapsed rail", between(t, css, ".workspace-frame.nethub-collapsed #nethub .nethub-rail {", "}")},
 		/* The archive wears the hosts column's frame, so its body is a .nethub-body
 		   and inherits the ceiling above; it restates it on its own class anyway,
 		   because a column that relies on an invariant should say so where it

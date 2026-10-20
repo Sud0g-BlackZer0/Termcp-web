@@ -392,10 +392,23 @@
 .nethub-caret { display: inline-flex; margin-left: auto; flex: 0 0 auto; opacity: .7; transition: transform .2s ease; }
 /* Collapsed: the header key keeps only the glyph, and the caret turns to point
    the way the panel will move. Alignment is centred so the icon sits on the
-   rail's axis instead of the plate's left edge. */
-.workspace-frame.nethub-collapsed .nethub-btn { padding-inline: 0; justify-content: center; }
-.workspace-frame.nethub-collapsed .nethub-label,
-.workspace-frame.nethub-collapsed .nethub-caret { display: none; }
+   rail's axis instead of the plate's left edge.
+
+   SCOPED TO #nethub, and that is the whole fix for "collapsing the hosts column
+   also put the archive away". The archive wears this column's frame — same
+   .nethub-btn, same .nethub-label, same .nethub-caret, same .nethub-body —
+   because the page teaches ONE shape for "a column you put away". The shared
+   classes are the reuse; the COLLAPSE is not shared. Unscoped, these four rules
+   matched both columns, so the hosts toggle hid the archive's label and caret
+   and collapsed its body to zero height while the archive's own state (and its
+   own aria-expanded) still said open.
+
+   The archive's mirror of each rule is under .workspace-frame.ext-collapsed near
+   the bottom of this file. Two state classes, two scopes, no overlap — and a test
+   pins that neither scope can reach the other column. */
+.workspace-frame.nethub-collapsed #nethub .nethub-btn { padding-inline: 0; justify-content: center; }
+.workspace-frame.nethub-collapsed #nethub .nethub-label,
+.workspace-frame.nethub-collapsed #nethub .nethub-caret { display: none; }
 /* The resource column: a plate of its own, translucent like the session plates
    so the Blackwall still reads through the control layer. */
 .nethub-body {
@@ -429,11 +442,11 @@
     opacity: 0; pointer-events: none;
     transition: max-height .24s ease, opacity .16s ease, padding .24s ease;
   }
-  .workspace-frame.nethub-collapsed .nethub-body {
+  .workspace-frame.nethub-collapsed #nethub .nethub-body {
     max-height: 0; min-height: 0; margin-top: 0; padding-block: 0;
     opacity: 0; visibility: hidden; transform: translateX(-6px); pointer-events: none;
   }
-  .workspace-frame.nethub-collapsed .nethub-rail {
+  .workspace-frame.nethub-collapsed #nethub .nethub-rail {
     /* Same ceiling as the body it replaces: the rail takes the panel's place in
        the column, so it must not be allowed to grow past it either. */
     max-height: calc(100dvh - var(--app-header-h, 60px) - var(--dock-h, 44px) - 90px);

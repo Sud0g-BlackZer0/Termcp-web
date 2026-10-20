@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -862,5 +863,61 @@ func TestTheDockStaysStillWhenSelectionStarts(t *testing.T) {
 	}
 	if strings.Contains(rule, "height: 24px") {
 		t.Error("24px is shorter than a tab (26px), so the strip has to clip it")
+	}
+}
+
+// Collapsing one column must not put the other one away.
+//
+// The archive deliberately wears the hosts column's frame — same .nethub-btn,
+// .nethub-label, .nethub-caret, .nethub-body, .nethub-rail — because the page
+// teaches ONE shape for "a column you put away". The shared classes are the
+// reuse; the COLLAPSE STATE is not shared. The hosts rules were written against
+// the bare class (`.workspace-frame.nethub-collapsed .nethub-btn`), so they
+// matched both columns: collapsing the hosts column hid the archive's label and
+// caret and dropped its body to zero height, while the archive's own state and
+// its aria-expanded still said open. Measured in a real browser before the fix:
+// archive label display:none, archive body visibility:hidden height:2px.
+//
+// Each collapse rule must therefore be scoped to the column it belongs to, and
+// the two scopes must not overlap. This walks every stateful selector that
+// mentions a shared .nethub-* part and asserts its scope.
+func TestCollapsingOneColumnLeavesTheOtherAlone(t *testing.T) {
+	css := readAssetLF(t, "static/css/workspace.css")
+
+	// The hosts column's collapse rules: all of them scoped under #nethub.
+	for _, sel := range []string{
+		".workspace-frame.nethub-collapsed #nethub .nethub-btn",
+		".workspace-frame.nethub-collapsed #nethub .nethub-label",
+		".workspace-frame.nethub-collapsed #nethub .nethub-caret",
+		".workspace-frame.nethub-collapsed #nethub .nethub-body",
+		".workspace-frame.nethub-collapsed #nethub .nethub-rail",
+	} {
+		if !strings.Contains(css, sel+" ") && !strings.Contains(css, sel+",") && !strings.Contains(css, sel+" {") {
+			t.Errorf("the hosts collapse rule must be scoped as %q, or it also collapses the archive", sel)
+		}
+	}
+
+	// The reverse leak: an UNscoped `nethub-collapsed` rule reaching a shared part
+	// is the exact shape of the bug, so no such selector may exist at all.
+	unscoped := regexp.MustCompile(`\.workspace-frame\.nethub-collapsed\s+\.(nethub-btn|nethub-label|nethub-caret|nethub-body|nethub-rail|nethub-glyph)\b`)
+	if m := unscoped.FindString(css); m != "" {
+		t.Errorf("%q matches BOTH columns: scope it to #nethub (hosts) or .extpanel (archive)", m)
+	}
+
+	// The archive's collapse rules are scoped by the ext-collapsed state and the
+	// .extpanel column, and must not reach into #nethub either.
+	leakBack := regexp.MustCompile(`\.workspace-frame\.ext-collapsed\s+#nethub\b`)
+	if m := leakBack.FindString(css); m != "" {
+		t.Errorf("%q lets the archive's fold collapse the hosts column", m)
+	}
+
+	// And the archive's own body still has its collapsed rule — scoping the hosts
+	// rules must not have removed the archive's, which is the other half of the
+	// same pair.
+	body := between(t, css, ".workspace-frame.ext-collapsed .extpanel-body {", "}")
+	for _, want := range []string{"max-height: 0", "visibility: hidden"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the archive body must still collapse with %q; got %q", want, strings.TrimSpace(body))
+		}
 	}
 }
