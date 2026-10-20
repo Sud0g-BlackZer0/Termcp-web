@@ -42,6 +42,10 @@ const (
 	// send data the command text cannot carry safely writes it as a named value here
 	// and references the name in cmd.
 	argMap
+	// argStringArray is a JSON array of strings, for a parameter that is a LIST of
+	// independent values rather than one blob. It exists for `args`: each element is
+	// one positional value, referenced as $1, $2, … in cmd.
+	argStringArray
 )
 
 // termArgDecl is one argument of the term tool.
@@ -98,7 +102,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "timeout",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Time axis: max seconds to wait. A pipe returns early when its process exits; a pty waits the window out. 0 = do not wait. Default: %d.", defaultTimeoutSeconds),
+		Desc:    fmt.Sprintf("Max seconds to wait. A pipe returns when its process exits; a pty waits the whole window. 0 = don't wait. Default: %d.", defaultTimeoutSeconds),
 		DocNote: fmt.Sprintf("Seconds to wait (default %d; a pipe returns as soon as its process exits)", defaultTimeoutSeconds),
 		Def:     defaultTimeoutSeconds,
 		DefText: strconv.Itoa(defaultTimeoutSeconds),
@@ -108,7 +112,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "bytes_limit",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Max raw bytes returned; 0 = handle only. Default: %d.", defaultBytesLimit),
+		Desc:    fmt.Sprintf("Max raw bytes; 0 = handle only. Default %d.", defaultBytesLimit),
 		DocNote: fmt.Sprintf("Max bytes per slot (default %d; `0` = the handle only, no bytes)", defaultBytesLimit),
 		Def:     defaultBytesLimit,
 		DefText: strconv.Itoa(defaultBytesLimit),
@@ -117,7 +121,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "lines_limit",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Max lines returned; 0 = no limit. Default: %d.", defaultLinesLimit),
+		Desc:    fmt.Sprintf("Max lines; 0 = no limit. Default %d.", defaultLinesLimit),
 		DocNote: fmt.Sprintf("Max lines per slot (default %d; `0` = no line limit)", defaultLinesLimit),
 		Def:     defaultLinesLimit,
 		DefText: strconv.Itoa(defaultLinesLimit),
@@ -126,7 +130,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "total_bytes_limit",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Absolute cap for the whole reply. Default: %d.", defaultTotalBytesLimit),
+		Desc:    fmt.Sprintf("Absolute cap for the whole reply. Default %d.", defaultTotalBytesLimit),
 		DocNote: fmt.Sprintf("Absolute cap for the whole reply (default %d)", defaultTotalBytesLimit),
 		Def:     defaultTotalBytesLimit,
 		DefText: strconv.Itoa(defaultTotalBytesLimit),
@@ -136,7 +140,7 @@ var termArgDecls = []termArgDecl{
 		Name:    "on_time_overflow",
 		Kind:    argEnum,
 		Enum:    []string{"truncate", "fold"},
-		Desc:    "Time window overflow: truncate = return what arrived, fold = return no bytes. Default: truncate.",
+		Desc:    "Time overflow: truncate = what arrived, fold = nothing.",
 		DocNote: "`truncate` (default) or `fold` (return no bytes this time)",
 		Def:     "truncate",
 		DefText: "truncate",
@@ -145,7 +149,7 @@ var termArgDecls = []termArgDecl{
 		Name:    "on_bytes_overflow",
 		Kind:    argEnum,
 		Enum:    []string{"truncate", "fold"},
-		Desc:    "Byte window overflow: truncate = return the head, fold = return no bytes. Default: truncate.",
+		Desc:    "Byte overflow: truncate = the head, fold = nothing.",
 		DocNote: "`truncate` (default) or `fold` (return no bytes this time)",
 		Def:     "truncate",
 		DefText: "truncate",
@@ -154,7 +158,7 @@ var termArgDecls = []termArgDecl{
 		Name:    "on_lines_overflow",
 		Kind:    argEnum,
 		Enum:    []string{"truncate", "fold"},
-		Desc:    "Line window overflow: truncate = return the first N lines, fold = return no bytes. Default: truncate.",
+		Desc:    "Line overflow: truncate = first N lines, fold = nothing.",
 		DocNote: "`truncate` (default) or `fold` (return no bytes this time)",
 		Def:     "truncate",
 		DefText: "truncate",
@@ -193,7 +197,7 @@ var termArgDecls = []termArgDecl{
 		// text instead; `content_only` was the same intent spelled backwards, which
 		// made "no duplicate" the thing you had to ask for. One positive flag with the
 		// quiet default says what it does: pass true and you get the JSON twin.
-		Desc:    "Also send structuredContent. Default: false (text only; both carry the same bytes).",
+		Desc:    "Also send structuredContent. Default: false (both carry the same bytes).",
 		DocNote: "Also send the JSON projection as `structuredContent`. **Off by default**: the two projections carry the same bytes, so the JSON copy is a duplicate a human sees on every call. Pass `true` for a client that reads structured content",
 		Def:     false,
 		DefText: "false",
@@ -201,16 +205,24 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "allow_escapes",
 		Kind:    argBool,
-		Desc:    "Permit raw control bytes (CR, ^C, ^D, ^Z, ESC) in cmd. Default: false.",
-		DocNote: "Permit raw control bytes in cmd. Default: false. Pass `vars` for data with newlines/quotes",
+		Desc:    "Permit raw control bytes (CR, ^C, ^D, ^Z, ESC) in cmd.",
+		DocNote: "Permit raw control bytes in cmd. Default: false. Pass `vars` for data (newlines/quotes) or `args` for command lines",
 		Def:     false,
 		DefText: "false",
 	},
 	{
+		Name:    "args",
+		Kind:    argStringArray,
+		Desc:    "Values for $1, $2, … One that IS the whole payload reaches the shell as syntax; elsewhere it is one quoted word.",
+		DocNote: "Positional values for `$1`, `$2`, … (1-based; `$0` is refused). A reference that is the WHOLE payload of `run`/`type` is sent to the terminal verbatim — that is how `pwd; whoami` gets to run as two commands — while a reference beside other words is substituted as one quoted word. `${10}` is the unambiguous form for ten or more",
+		Def:     nil,
+		DefText: "",
+	},
+	{
 		Name:    "vars",
 		Kind:    argMap,
-		Desc:    "Values for `$FOO` in cmd, substituted and quoted at parse time.",
-		DocNote: "Dictionary substituted into `cmd` at AST parse time ($FOO replaced, safely quoted)",
+		Desc:    "Named values for $NAME in cmd, each one quoted word.",
+		DocNote: "Dictionary substituted into `cmd` at parse time ($NAME replaced by one safely quoted word). Use `args` for values that must reach the terminal as shell syntax",
 		Def:     nil,
 		DefText: "",
 	},
@@ -288,7 +300,41 @@ func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
 		return termArgs{}, derr
 	}
 	w.Vars = vars
+	posArgs, derr := readArgsArg(args)
+	if derr != nil {
+		return termArgs{}, derr
+	}
+	w.Args = posArgs
 	return w, nil
+}
+
+// readArgsArg reads the positional values.
+//
+// A string is refused rather than treated as a one-element list: `args: "pwd"` and
+// `args: ["pwd"]` would then be the same request spelled two ways, and a caller that
+// wrote a shell-looking string would never learn that its quoting reached the server
+// as data. Every element must be a string for the same reason vars values must be:
+// guessing that a JSON number meant its decimal spelling would put a value in the
+// substitution that the caller never sent.
+func readArgsArg(args map[string]any) ([]string, *directive.Error) {
+	raw, present := args["args"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, &directive.Error{Msg: "args must be an array of strings, got " + typeNameOf(raw) +
+			"; write it as [\"first\", \"second\"]"}
+	}
+	out := make([]string, len(list))
+	for i, v := range list {
+		s, isString := v.(string)
+		if !isString {
+			return nil, &directive.Error{Msg: "args[" + strconv.Itoa(i) + "] must be a string, got " + typeNameOf(v)}
+		}
+		out[i] = s
+	}
+	return out, nil
 }
 
 // readVarsArg reads the vars dictionary.

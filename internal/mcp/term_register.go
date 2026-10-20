@@ -86,6 +86,15 @@ func termArgToolOptions() []mcpgo.ToolOption {
 				mcpgo.Description(d.Desc),
 				mcpgo.AdditionalProperties(map[string]any{"type": "string"}),
 			))
+		case argStringArray:
+			// A list of strings. `items` is what lets a client refuse `[1, 2]` before
+			// the call; readArgsArg enforces the same rule for the REST entrance.
+			// minItems is NOT pinned to 1: an empty list is the same request as an
+			// omitted one, and refusing it would make two spellings of one call differ.
+			out = append(out, mcpgo.WithArray(d.Name,
+				mcpgo.Description(d.Desc),
+				mcpgo.Items(map[string]any{"type": "string"}),
+			))
 		}
 	}
 	return out
