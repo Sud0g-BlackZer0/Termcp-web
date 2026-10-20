@@ -274,7 +274,26 @@
           </div>
         </div>
         <div class="section-body" id="sec-exts-body">
+          <!-- The plate's own inscription: two lines that sit UNDER the cards as a
+               watermark on the panel, so an otherwise empty surface is not a blank
+               rectangle.
 
+               It lives in the BODY, not in the empty state, and that is the whole
+               point: the empty placeholder used to come and go with the list, which
+               made the column one height while empty and another once a card arrived.
+               The paper here never changes — it is the surface the cards are laid on,
+               present at zero extensions and at fifty. The body's own `min-height`
+               (inherited from .workspace-sessions) is what holds the panel steady, so
+               the inscription cannot affect layout at all.
+
+               `aria-hidden`, because it is decoration: a reader who is told the column
+               has 0 extensions does not need a slogan, and a screen reader announcing
+               it before every list would be noise. The words are translated anyway so
+               that a sighted reader in any locale gets prose, not English. -->
+          <p class="ext-inscription" id="ext-inscription" aria-hidden="true">
+            <span class="ext-inscription-line" data-i18n="ext.inscription.a"></span>
+            <span class="ext-inscription-line" data-i18n="ext.inscription.b"></span>
+          </p>
           <div id="ext-grid" class="conn-grid"></div>
         </div>
       </div>

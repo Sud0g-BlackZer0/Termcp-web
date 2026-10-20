@@ -150,16 +150,22 @@ function renderExtensionGrid(rows) {
   extRepaintWindows();
 }
 
-/* The empty state is the panel's reason to exist when nothing is configured: it
-   says what an extension is, so an empty column is not a blank track. It carries
-   no key of its own — the column closes with New and Import, and a third
-   "create one" in the middle would be the same action twice. A socket frame that
-   arrives before the first paint renders it too. */
+/* The empty state carries NO copy any more, and that is deliberate.
+ *
+ * The panel's words are printed on the plate itself (see #ext-inscription in
+ * index.html): a watermark under the grid that is there at zero extensions and at
+ * fifty. Copy that lives in the empty state can only exist while the list is empty,
+ * which is what made the column one height before the first card and another after —
+ * and a slogan that appears and vanishes with the data reads as a rendering glitch
+ * rather than as the surface's own inscription.
+ *
+ * So this function is down to keeping the flow's shape: the grid keeps its place, and
+ * the inscription behind it never moves. Nothing is added, so nothing changes height.
+ */
 function renderExtensionEmpty() {
-  var row = document.createElement('div');
-  row.className = 'ext-empty';
-  row.innerHTML = '<p class="ext-empty-text">' + escapeHtml(t('ext.empty.text')) + '</p>';
-  return row;
+  var slot = document.createElement('div');
+  slot.className = 'ext-empty';
+  return slot;
 }
 
 /* The column's count, painted on the header trigger.

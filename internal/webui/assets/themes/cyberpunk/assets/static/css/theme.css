@@ -378,6 +378,32 @@
   opacity: .85;
 }
 
+/* The plate's inscription, in this theme's voice.
+ *
+ * The base sheet sets it as a quiet watermark; here it is a phosphor read-out burned
+ * into the plate: the accent colour, a soft bloom, and the upper line tracked out like
+ * a console banner. Kept faint enough to sit BEHIND the cards without competing with
+ * them — the empty state is a resting surface, not an event, so nothing pulses.
+ *
+ * The split is deliberate: the first line is a mono HUD string (uppercase, tracked),
+ * the second is the sentence a reader actually parses. That is how the rest of this
+ * theme labels its panels. */
+.ext-inscription {
+  color: var(--accent);
+  opacity: .32;
+  text-shadow: 0 0 10px var(--accent-surface);
+}
+.ext-inscription-line:first-child {
+  color: var(--accent);
+  opacity: .9;
+  letter-spacing: .18em;
+}
+.ext-inscription-line:last-child {
+  color: var(--accent);
+  opacity: .75;
+  letter-spacing: .06em;
+}
+
 /* Host cards: a hacker's target list. The left rail is the row's state, the
    label carries the name, and the host line is mono so addresses line up. */
 .conn-tile.entry-card {

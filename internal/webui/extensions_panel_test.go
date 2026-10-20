@@ -2,6 +2,7 @@ package webui
 
 import (
 	"os"
+	"regexp"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -513,6 +514,13 @@ func TestExtensionCountRidesTheHeader(t *testing.T) {
 		t.Error("renderExtensionGrid must call paintExtensionStat, or the count never updates")
 	}
 
+	// The retired sentence is gone from the catalog too — an unreferenced key is the
+	// failure TestNoOrphanKeys exists to catch.
+	cat := readAssetLF(t, "static/js/i18n-catalog.js")
+	if strings.Contains(cat, "'ext.empty.text'") {
+		t.Error("ext.empty.text is retired: nothing references it any more")
+	}
+
 	// EXACTLY ONE auto margin in the row. The shared `.nethub-caret` rule carries
 	// `margin-left: auto` too, so leaving both in place splits the free space and puts
 	// the badge mid-bar with a hole before the caret (measured: badge at 768, caret at
@@ -594,3 +602,96 @@ func TestTheCapacityMeterIsAThemeRestyle(t *testing.T) {
 }
 
 
+// The plate's inscription is a WATERMARK, and the panel's height is independent of it.
+//
+// Two requirements meet here:
+//
+//   - an empty column must not read as a blank rectangle (it felt bare);
+//   - creating the first extension must not move anything.
+//
+// Copy that lives in the EMPTY STATE satisfies the first and breaks the second: it can
+// only exist while the list is empty, so the column is one height before the first card
+// and another after — measured, 16px empty against 77px with one card, a 61px jump.
+//
+// So the words moved onto the plate itself (#ext-inscription) and out of the flow:
+// `position: absolute` takes no layout height. The panel's floor is what makes the
+// column steady, and it comes from the plate's own section body. Measured after the
+// fix: body 180px and plate 232px at 0, 1 and 2 extensions alike.
+func TestThePlateInscriptionIsAWatermarkOutsideTheFlow(t *testing.T) {
+	index := readAssetLF(t, "index.html")
+
+	// It is part of the COLUMN, not of the empty state: present regardless of the list.
+	body := between(t, index, `id="sec-exts-body"`, "</div>")
+	if !strings.Contains(body, `id="ext-inscription"`) {
+		t.Fatal("the plate needs its inscription inside the column body")
+	}
+	if strings.Contains(body, `id="ext-stat"`) {
+		t.Error("no separate readout line may come back: the title and count live on the header")
+	}
+	// Decoration, so a screen reader is not read a slogan before every list.
+	if !strings.Contains(body, `id="ext-inscription" aria-hidden="true"`) {
+		t.Error("the inscription is decoration and must be aria-hidden: a reader told \"0 extensions\" " +
+			"does not need a slogan announced before every list")
+	}
+
+	css := readAssetLF(t, "static/css/workspace.css")
+	insc := between(t, css, ".ext-inscription {", "}")
+	if insc == "" {
+		t.Fatal("the inscription lost its rule")
+	}
+	/* Out of the flow is THE requirement, not a stylistic choice: an in-flow block adds
+	   its own height, and the point is that the empty column and the populated one are
+	   the same height. */
+	if !strings.Contains(insc, "position: absolute") {
+		t.Error("the inscription must be `position: absolute` — in the flow it would add height " +
+			"to an empty column and reintroduce the jump this replaced")
+	}
+	if !strings.Contains(insc, "pointer-events: none") {
+		t.Error("the inscription is a watermark: it must not intercept clicks meant for the cards")
+	}
+	if !strings.Contains(insc, "user-select: none") {
+		t.Error("a watermark is not text to select; dragging across the plate would otherwise paint it")
+	}
+	// The body is the positioning context and owns the floor.
+	if !strings.Contains(css, ".workspace-exts .section-body {\n  position: relative;") {
+		t.Error("the column body must be the inscription's positioning context")
+	}
+
+	// The words are translated, so a sighted reader in any locale gets prose, not English.
+	cat := readAssetLF(t, "static/js/i18n-catalog.js")
+	for _, key := range []string{"'ext.inscription.a'", "'ext.inscription.b'"} {
+		if n := strings.Count(cat, key); n != 3 {
+			t.Errorf("%s must be defined in all three languages; found %d", key, n)
+		}
+	}
+
+	// The empty state itself carries no copy: that is what used to make it height-depend.
+	ext := readAssetLF(t, "static/js/extensions.js")
+	fnStart := strings.Index(ext, "function renderExtensionEmpty()")
+	if fnStart < 0 {
+		t.Fatal("renderExtensionEmpty is gone")
+	}
+	// Its body only: from the opening brace to the matching one.
+	fnBody := ext[fnStart:]
+	if end := strings.Index(fnBody, "\n}\n"); end >= 0 {
+		fnBody = fnBody[:end]
+	}
+	/* Any i18n KEY in here means copy that appears and vanishes with the list. Match the
+	   key shape, not the `t('` call: `createElement('div')` contains `t('` too, which is
+	   how this check first reported a false positive against a function with no copy. */
+	if regexp.MustCompile(`t\('[a-z][\w-]*\.[\w.-]+'`).MatchString(fnBody) {
+		t.Errorf("the empty state must not carry copy — it appears and vanishes with the list, "+
+			"which changes the column's height:\n%s", fnBody)
+	}
+
+	// Cyberpunk speaks in its own voice here, like everywhere else.
+	strings_ := readAssetLF(t, "themes/cyberpunk/strings.json")
+	if !strings.Contains(strings_, "肉身苦弱") {
+		t.Error("cyberpunk must give the plate its own inscription")
+	}
+	cyber := readAssetLF(t, "themes/cyberpunk/assets/static/css/theme.css")
+	if !strings.Contains(cyber, ".ext-inscription {") {
+		t.Error("cyberpunk must dress the inscription: a watermark in the default palette reads as " +
+			"a rendering artefact on a neon plate")
+	}
+}

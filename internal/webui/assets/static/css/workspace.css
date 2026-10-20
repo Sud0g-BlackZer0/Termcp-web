@@ -260,8 +260,19 @@
 .workspace-exts .nethub-caret { transition: transform .2s ease; }
 
 .workspace-exts .section-body {
+  position: relative;
   display: flex; flex-wrap: wrap; gap: 12px; align-content: flex-start;
-  min-height: 0; flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain;
+  /* `min-height: 0` used to be here, and it is what let an empty plate collapse to
+     16px while a populated one was 77px. The plate has an inscription printed on it
+     and an authoring surface to aim at, so it keeps a floor: the empty column and the
+     first card are now the same height. */
+  /* 77px: EXACTLY ONE CARD (61px + 16px padding).
+   *
+   * An empty plate used to collapse to 16px (its padding) while a single card made it
+   * 77px — a jump of 61px the moment the first extension was created. With the floor
+   * matched to the card, the empty plate, a plate with 1 card and a plate with 2 cards
+   * on one line are all 77px: zero shift when the author creates their first extension. */
+  min-height: 77px; flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain;
 }
 .workspace-exts .conn-grid { display: contents; }
 /* Only this plate reparents the row; the drawer's own rule below is untouched,
@@ -722,11 +733,51 @@
 /* The empty column's whole content: a sentence and the one key that acts on
    it. Nothing else is in the panel, so both are centred on the column's own
    axis rather than pinned to its top-left the way the cards are. */
-.ext-empty {
-  flex: 1 1 auto; min-height: 120px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px; padding: 18px 14px; text-align: center;
+/* The plate's inscription: a WATERMARK under the cards, not an empty state.
+ *
+ * It solves the "adding an extension must not change the panel's height" constraint
+ * by getting out of the flow entirely: `position: absolute` takes no layout height, so
+ * the panel's height is decided by the body's min-height and the cards themselves. The
+ * words are there whether there are 0 extensions or 20, which is why an empty plate
+ * does not feel bare — the paper itself is printed.
+ *
+ * `pointer-events: none` so cards can be clicked through it; low opacity so it reads
+ * as a watermark rather than as a disabled control. */
+.workspace-exts .section-body { position: relative; }
+.ext-inscription {
+  /* CENTRED on the plate, both axes, and out of the flow.
+   *
+   * `inset: 0` + `margin: auto` + the flex centring is what puts it in the middle of
+   * the surface rather than pinned to the top-left corner: a watermark belongs to the
+   * plate, and a plate's inscription is written in the middle of it. `inset: 0` also
+   * keeps `position: absolute` from collapsing to the text's own size, so the box is
+   * the whole body and the centring has something to centre against.
+   *
+   * Absolute means it adds NO height, which is the requirement this whole approach
+   * exists for: the empty column and the populated one are the same height because the
+   * words are not in the layout at all. */
+  position: absolute; inset: 0;
+  margin: auto;
+  padding: 16px 24px;
+  pointer-events: none; user-select: none;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 5px;
+  text-align: center;
+  font: 500 .72rem/1.4 var(--font-mono);
+  color: var(--text-faint); opacity: .45;
+  letter-spacing: .04em;
 }
+.ext-inscription-line:first-child {
+  font-weight: 700; font-size: .68rem; letter-spacing: .12em;
+  text-transform: uppercase; opacity: .75;
+}
+.ext-inscription-line:last-child {
+  font: 400 .7rem/1.4 var(--font-sans);
+  max-width: 46ch;
+}
+.ext-empty { display: none; }
+
 .ext-empty-text {
   margin: 0; max-width: 34ch;
   font: 400 .72rem/1.5 var(--font-sans); color: var(--text-muted);
@@ -1351,10 +1402,7 @@
 .workspace-exts.is-folded .ext-fold-btn .nethub-caret { transform: rotate(180deg); }
 .workspace-exts .nethub-caret { transition: transform .2s ease; }
 
-.workspace-exts .section-body {
-  display: flex; flex-wrap: wrap; gap: 12px; align-content: flex-start;
-  min-height: 0; flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain;
-}
+/* duplicate removed; see rule near line 262 */
 
 /* ---- The extension plate's batch row, sized for a WIDE region -------------
    The shared row (.drawer-toolbar + .nethub-select-toggle above) is a DRAWER
