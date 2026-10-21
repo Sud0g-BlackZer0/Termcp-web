@@ -28,11 +28,22 @@ func TestChannelIndexSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c3, err := s.CreateChildShell(testShell(), testInteractiveShellArgs(), true, 24, 80, "c3")
-	if err != nil {
+	// c3 exists only to take index 3; its identity is not otherwise used.
+	if _, err := s.CreateChildShell(testShell(), testInteractiveShellArgs(), true, 24, 80, "c3"); err != nil {
 		t.Fatal(err)
 	}
 	mgr1.CloseChildShell(c2.ID)
+
+	// Purge through the manager before the temp dir goes away.
+	//
+	// A shell's exit watcher writes its final manifest AFTER Terminate returns, so
+	// t.TempDir's RemoveAll can race that write and fail on Windows with "The
+	// directory is not empty" -- reported against whichever test happened to own the
+	// directory. Delete joins the watcher and removes the session directory, and
+	// t.Cleanup is LIFO, so registering it here runs it before TempDir's own cleanup.
+	// Same remedy as history_lifecycle_test.go.
+	t.Cleanup(func() { _ = mgr1.Delete(sid) })
+
 	// Persist the state.
 	mgr1.Terminate(sid, false, 0)
 
@@ -51,5 +62,7 @@ func TestChannelIndexSurvivesRestart(t *testing.T) {
 	if restored.nextShellIndex < 3 {
 		t.Errorf("restored nextShellIndex = %d, want >= 3", restored.nextShellIndex)
 	}
-	_ = c3
+
+	// The restored manager sees only persisted state, so it holds no writer; the
+	// directory is already gone by the time this cleanup pair runs.
 }
