@@ -36,6 +36,17 @@ func termText(t *testing.T, s *Server, args map[string]any) string {
 	return toolResultText(termCall(t, s, args))
 }
 
+// termTextWithCtx runs a term call on a caller-supplied context, which is how a test
+// supplies the client session that sampling forwarding looks for.
+func termTextWithCtx(t *testing.T, s *Server, ctx context.Context, args map[string]any) string {
+	t.Helper()
+	res, err := s.call(ctx, "term", args)
+	if err != nil {
+		t.Fatalf("term(%v): %v", args, err)
+	}
+	return toolResultText(res)
+}
+
 // headerValue reads one header out of a rendered slot. It is deliberately a
 // text-level helper: the point of these tests is what a caller READS, and both
 // projections come from one value.
