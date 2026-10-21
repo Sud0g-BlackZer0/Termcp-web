@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
@@ -282,50 +283,113 @@ func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) term
 // the learn_mode attach below already runs for every statement. Removing it is why
 // the MCP server is now safe for concurrent Term calls.
 func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement, win termArgs) termReply {
-	out := termReply{win: win, seenUsage: map[string]bool{}}
-	// previousOK is the answer a `&&`/`||` statement is gated on: whether the
-	// statement before it came back 2xx.
+	out := termReply{win: win, seenUsage: map[string]bool{}, previousOK: true}
+
+	// GROUPS ARE THE UNIT OF CONCURRENCY. `a & b` is two statements that run
+	// together; `a & b; c` is a parallel pair followed by a sequential one.
 	//
-	// THE SKIP IS VISIBLE, NOT SILENT. A statement that did not run gets its own
-	// slot saying so, at the code the reason implies (the previous statement's
-	// failure for `&&`, its success for `||`). Dropping it would make a cmd answer
-	// with fewer slots than statements, and a caller counting slots — or reading
-	// them positionally, which is how they are addressed — would be reading the
-	// wrong one without being told.
-	previousOK := true
-	for _, stmt := range stmts {
-		if stmt.Cond == "&&" && !previousOK {
-			out.slots = append(out.slots, skippedSlot(stmt, "&&", "the previous statement failed"))
+	// The grouping exists because `&` otherwise did NOTHING: the shell parser reports
+	// `a & b` as two statements and records the parallelism in a Background flag that
+	// nothing read, so the line ran sequentially while reading as parallel. A silent
+	// semantic reversal is worse than a refusal, which is why this is implemented
+	// rather than rejected.
+	for _, group := range partitionGroups(stmts) {
+		if len(group) == 1 {
+			slots := s.runStatementSequential(ctx, &out, group[0], win)
+			out.slots = append(out.slots, slots...)
 			continue
 		}
-		if stmt.Cond == "||" && previousOK {
-			out.slots = append(out.slots, skippedSlot(stmt, "||", "the previous statement succeeded"))
-			continue
+		// PARALLEL: every statement in the group starts together, and the reply waits
+		// for all of them. Slots are emitted in the ORIGINAL order, because a caller
+		// reads them positionally — collecting them by completion order would make the
+		// reply order depend on which command happened to finish first.
+		results := make([][]envelope.Slot, len(group))
+		var wg sync.WaitGroup
+		for i, stmt := range group {
+			wg.Add(1)
+			go func(i int, stmt directive.Statement) {
+				defer wg.Done()
+				results[i] = s.runStatementSlots(ctx, stmt, win)
+			}(i, stmt)
 		}
-		expanded, cycle := aliases.Expand(stmt)
-		if cycle != nil {
-			// The chain came back to where it started, so there is no directive to
-			// dispatch. Saying "unknown directive" here would blame the wrong thing.
-			out.slots = append(out.slots, aliasCycleSlot(stmt, cycle))
-			continue
+		wg.Wait()
+		for _, slots := range results {
+			out.slots = append(out.slots, slots...)
 		}
-		slots := s.runDirective(ctx, expanded, win)
-		// learn_mode is a property of the reply, so it is attached here rather
-		// than in each directive: generated replies (ps, help, detect, …) carry
-		// it exactly like streamed ones. withUsage de-duplicates per directive.
-		if win.LearnMode && len(slots) > 0 {
-			if slots[0].Headers == nil {
-				slots[0].Headers = map[string]string{}
-			}
-			s.addUsage(&out, expanded, slots[0].Headers)
-		}
-		previousOK = slotsAllOK(slots)
-		out.slots = append(out.slots, slots...)
 	}
+
 	if win.PipeTo != "" {
 		out.slots = s.forwardSlotsToStdin(ctx, win.PipeTo, out.slots)
 	}
 	return out
+}
+
+// partitionGroups groups statements by concurrency: consecutive Background
+// statements, plus the first non-background statement that closes the batch, form
+// one group. A trailing run of background statements is a group of its own — the
+// caller asked for fire-and-forget, and waiting for a non-existent follower would
+// hang the reply.
+func partitionGroups(stmts []directive.Statement) [][]directive.Statement {
+	var groups [][]directive.Statement
+	var cur []directive.Statement
+	for _, st := range stmts {
+		cur = append(cur, st)
+		if !st.Background {
+			groups = append(groups, cur)
+			cur = nil
+		}
+	}
+	if len(cur) > 0 {
+		groups = append(groups, cur)
+	}
+	return groups
+}
+
+// runStatementSlots expands, dispatches and annotates one statement. It is the
+// concurrency-safe half: it writes nothing shared, which is what lets a parallel
+// group call it from several goroutines.
+func (s *Server) runStatementSlots(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
+	expanded, cycle := aliases.Expand(stmt)
+	if cycle != nil {
+		return []envelope.Slot{aliasCycleSlot(stmt, cycle)}
+	}
+	slots := s.runDirective(ctx, expanded, win)
+	if win.LearnMode && len(slots) > 0 {
+		// A parallel group has no single reply to dedup against, so usage is attached
+		// directly. Two identical directives in one parallel batch would repeat their
+		// usage line, which is the honest outcome: they ran twice.
+		if slots[0].Headers == nil {
+			slots[0].Headers = map[string]string{}
+		}
+		slots[0].Headers["Usage"] = expanded.Op
+	}
+	return slots
+}
+
+// runStatementSequential runs one statement in command order, applying the
+// `&&`/`||` gate and the unknown-directive hint. Only this path touches reply
+// state (previousOK, seenUsage, lastRan), which is why the parallel path cannot
+// reuse it.
+func (s *Server) runStatementSequential(ctx context.Context, out *termReply, stmt directive.Statement, win termArgs) []envelope.Slot {
+	if stmt.Cond == "&&" && !out.previousOK {
+		return []envelope.Slot{skippedSlot(stmt, "&&", "the previous statement failed")}
+	}
+	if stmt.Cond == "||" && out.previousOK {
+		return []envelope.Slot{skippedSlot(stmt, "||", "the previous statement succeeded")}
+	}
+	expanded, cycle := aliases.Expand(stmt)
+	if cycle != nil {
+		return []envelope.Slot{aliasCycleSlot(stmt, cycle)}
+	}
+	slots := s.runDirective(ctx, expanded, win)
+	if win.LearnMode && len(slots) > 0 {
+		if slots[0].Headers == nil {
+			slots[0].Headers = map[string]string{}
+		}
+		s.addUsage(out, expanded, slots[0].Headers)
+	}
+	out.previousOK = slotsAllOK(slots)
+	return slots
 }
 
 // slotsAllOK reports whether every slot a statement produced is 2xx.
@@ -488,6 +552,10 @@ type termReply struct {
 	win       termArgs
 	slots     []envelope.Slot
 	seenUsage map[string]bool
+	// previousOK is what `&&`/`||` gate on: whether the previous statement came back
+	// 2xx. It lives on the reply rather than in a local so the per-statement function
+	// can own the bookkeeping for one statement.
+	previousOK bool
 }
 
 // result assembles the tool result from a reply: the text projection, the
