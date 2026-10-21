@@ -76,15 +76,24 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		return []envelope.Slot{s.directiveReader(ctx, stmt, win)}
 	case "get":
 		if stmt.Kind == "file" {
-			// --op carries the fs sub-action (stat, realpath, …): the query vocabulary is
-			// the SFTP layer's, and flattening it into verbs here would invent a dozen
-			// words for operations a caller reaches for once.
+			// --op names a SUB-ACTION; the sfTP layer groups those under an action
+			// (perm, link, fs) and dispatches again inside the group. The group is
+			// derivable from the op, so the caller never has to know it — and asking for
+			// `--op stat` must not reach the fs group, where the answer is "action must
+			// be truncate, realpath, or statvfs".
 			op, _ := stmt.Flag("op")
 			if op == "" {
-				op = "stat"
+				return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
+					"action": "stat", "remote-path": stmt.Key,
+				}), win)}
+			}
+			action, ok := fileGroupForOp(op)
+			if !ok {
+				return []envelope.Slot{badRequest(stmt, "get --op does not know "+quoteOrDash(op)+
+					". It takes stat, realpath, readlink, getwd, or one of: chmod, chown, chtimes, symlink, link, truncate, statvfs.")}
 			}
 			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
-				"action": "fs", "op": op, "remote-path": stmt.Key,
+				"action": action, "op": op, "remote-path": stmt.Key,
 			}), win)}
 		}
 		return []envelope.Slot{s.directiveInfo(ctx, stmt, win)}
@@ -137,16 +146,29 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		}
 
 	// --- close: a channel, a session, a tunnel or a peer ---
+	//
+	// A NAMED KIND NEVER FALLS THROUGH. `close <session> forward <id>` is a tunnel;
+	// `close <session>` is the container. If the kind is one this verb does not
+	// handle, the answer is a 400 — not "close whatever the target happened to be".
+	// It fell through once: `close <session> mcp 1` parsed the kind away, found no
+	// branch, and took the session down, so a caller closing a peer destroyed every
+	// channel on the link. That is the same shape as #132 (`close <session> --force`
+	// closing the primary channel): a qualifier read as decoration.
 	case "close":
-		if stmt.Kind == "forward" {
+		switch stmt.Kind {
+		case "forward":
 			return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{
 				"action": "close",
 			}), win)}
+		case "":
+			if isPeerHandle(stmt.Target) {
+				return s.peerChannel(ctx, stmt, win, "close", nil)
+			}
+			return []envelope.Slot{s.directiveClose(ctx, stmt, win)}
+		default:
+			return []envelope.Slot{badRequest(stmt, "close does not take a "+stmt.Kind+
+				". A peer is closed by its own handle: `close <peer>`.")}
 		}
-		if isPeerHandle(stmt.Target) {
-			return s.peerChannel(ctx, stmt, win, "close", nil)
-		}
-		return []envelope.Slot{s.directiveClose(ctx, stmt, win)}
 
 	// --- read: a channel's new bytes, a file's content, or a peer's frames ---
 	case "read":
@@ -180,21 +202,31 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 			// --old-text makes it a replace: one write verb, and whether it edits in
 			// place is a property of what was supplied, not a second word to learn.
 			action := "write"
+			extra := map[string]string{}
 			if _, ok := stmt.Flag("old-text"); ok {
 				action = "replace"
+			} else if op, ok := stmt.Flag("op"); ok {
+				// --op NAMES THE SUB-ACTION and the group comes from the same table `get`
+				// uses, so the two verbs cannot drift into disagreeing about what a chmod
+				// is. --mode alone still means chmod: a mode with no content can only be
+				// a permission change.
+				group, known := fileGroupForOp(op)
+				if !known {
+					return []envelope.Slot{badRequest(stmt, "write --op does not know "+quoteOrDash(op))}
+				}
+				action, extra["op"] = group, op
 			} else if _, ok := stmt.Flag("mode"); ok {
-				// A mode with no content is a chmod: what was supplied says which of
-				// the three write-shaped operations this is.
 				if _, hasData := stmt.Flag("data"); !hasData {
 					if _, hasFile := stmt.Flag("local-path"); !hasFile {
-						action = "perm"
+						action, extra["op"] = "perm", "chmod"
 					}
 				}
 			}
-			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
-				"action":      action,
-				"remote-path": stmt.Key,
-			}), win)}
+			flags := map[string]string{"action": action, "remote-path": stmt.Key}
+			for k, v := range extra {
+				flags[k] = v
+			}
+			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, flags), win)}
 		}
 		return []envelope.Slot{badRequest(stmt, "write needs a kind: write <session> file <path>")}
 
@@ -1201,4 +1233,25 @@ func aliasStatement(stmt directive.Statement, off bool) directive.Statement {
 	}
 	out.Payload = body
 	return out
+}
+
+// fileGroupForOp maps a sub-action to the action group that dispatches it.
+//
+// The SFTP surface has two levels — an action that names a group (perm, link, fs)
+// and an op inside it — because the handlers are grouped by what they touch. A verb
+// should not expose that: `--op chmod` says everything, and which group carries it
+// is an implementation detail. This is the one place that detail lives.
+func fileGroupForOp(op string) (string, bool) {
+	switch op {
+	case "stat", "getwd":
+		// Their own actions, not members of a group.
+		return op, true
+	case "chmod", "chown", "chtimes":
+		return "perm", true
+	case "symlink", "readlink", "link":
+		return "link", true
+	case "truncate", "realpath", "statvfs":
+		return "fs", true
+	}
+	return "", false
 }

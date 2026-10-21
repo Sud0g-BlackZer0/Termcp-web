@@ -389,7 +389,7 @@ var ops = []Op{
 			"bind-host", "remote-host", "remote-port", "local-port", "local-host", "url"},
 		Valueless: []string{"pipe", "pty"},
 		RestValue: []string{"argv"},
-		Usage:     "open <session> [--pipe --argv <cmd>]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>",
+		Usage:     "open <session> [--argv <cmd> [--pty]]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>",
 		Detail:    openDetail},
 	{Name: "ls", Core: true, Kind: KindFlags, Target: true, TargetOptional: true,
 		Kinds:     []string{"forward", "file", "host", "ext", "alias"},
@@ -400,9 +400,14 @@ var ops = []Op{
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
 		Kinds:  []string{"file"},
 		Flags:  []string{"op"},
-		Usage:  "get <session|channel>   |   get <session> file <path> [--op stat|realpath|…]",
+		Usage:  "get <session|channel>   |   get <session> file <path> [--op stat|realpath|readlink|getwd]",
 		Detail: getDetail},
 	{Name: "close", Core: true, Kind: KindFlags, Target: true,
+		// mcp/cdp/jrpc/file are DECLARED SO THEY ARE REFUSED BY NAME. Dropping them
+		// from the list does not make `close <session> mcp 1` invalid — the word simply
+		// becomes a stray positional argument and the statement still reaches the
+		// container. A declared kind is recognised, and the dispatcher's default branch
+		// then answers with what to write instead.
 		Kinds: []string{"forward", "mcp", "cdp", "jrpc", "file"},
 		Flags: []string{"grace", "forward-id"},
 		RetiredFlags: map[string]string{
@@ -449,7 +454,7 @@ var ops = []Op{
 	{Name: "write", Kind: KindFlags, Target: true,
 		Kinds:  []string{"file"},
 		Flags:  []string{"data", "mode", "local-path", "offset", "length", "old-text", "new-text", "op", "uid", "gid", "atime", "mtime"},
-		Usage:  "write <session> file <path> [--data TEXT|--local-path FILE] [--mode …]",
+		Usage:  "write <session> file <path> [--data TEXT|--local-path FILE] [--mode …] [--op chmod|truncate|…]",
 		Detail: writeDetail},
 
 	// --- a peer: one call, or the manual send/recv pair ---
