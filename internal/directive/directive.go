@@ -474,7 +474,7 @@ var ops = []Op{
 			"notes", "enabled", "forwards", "directive", "link-path", "mode", "op"},
 		Valueless: []string{"trust-unknown-host", "default-approval", "enabled"},
 		RestValue: []string{"args"},
-		Usage:     "create host|ext|alias <name> [flags]   |   create <session> file <path> [--link <target>]",
+		Usage:     "create host|ext|alias <name> [flags]   |   create <session> file <path> [--target <path-it-points-at>]",
 		Detail:    createDetail + "\n\n" + hostFileFormat},
 	{Name: "edit", Kind: KindFlags, Target: true,
 		Kinds: []string{"host", "ext", "alias"},

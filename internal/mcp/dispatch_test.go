@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -169,5 +171,71 @@ func TestEveryKindTheDispatcherServesIsParsable(t *testing.T) {
 		if st.Key != tc.wantKey {
 			t.Errorf("%q parsed key = %q, want %q", tc.cmd, st.Key, tc.wantKey)
 		}
+	}
+}
+
+// TestCreateFileMakesADirectoryOrASymlink pins both shapes of `create <session>
+// file <path>`, including which argument is which.
+//
+// The node's key is the path being created and --target is what a symlink points at,
+// while the handler names those link_path and target — the opposite order. Getting it
+// backwards makes a symlink at the wrong end of the path, which still answers 200.
+func TestCreateFileMakesADirectoryOrASymlink(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "sleep 30")
+	sid := strings.SplitN(h, ":", 2)[0]
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
+
+	dir := filepath.Join(t.TempDir(), "made-by-create")
+	if got := termText(t, s, map[string]any{"cmd": "create " + sid + " file " + dir}); !strings.Contains(got, "success") {
+		t.Fatalf("create file did not make a directory:\n%s", got)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("the directory was not created on disk: %v", err)
+	}
+
+	file := filepath.Join(t.TempDir(), "target.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "made-by-create-link")
+	got := termText(t, s, map[string]any{"cmd": "create " + sid + " file " + link + " --target " + file})
+	if strings.HasPrefix(got, "TERM/1 4") {
+		t.Fatalf("create file --target was refused:\n%s", got)
+	}
+	// The link exists AT THE KEY and points AT --target; readlink proves the direction.
+	back, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("no symlink at the key path: %v", err)
+	}
+	if back != file {
+		t.Fatalf("the symlink points at %q, want %q", back, file)
+	}
+}
+
+// TestRemoveFileDeletesTheNodeAndNotTheSession is the pair to the create test above,
+// and it exists because `rm <session>` and `rm <session> file <path>` differ by one
+// word while destroying very different things. A kind that fails to parse turns the
+// second into the first.
+func TestRemoveFileDeletesTheNodeAndNotTheSession(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "sleep 30")
+	sid := strings.SplitN(h, ":", 2)[0]
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
+
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("bye"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := termText(t, s, map[string]any{"cmd": "rm " + sid + " file " + victim}); strings.HasPrefix(got, "TERM/1 4") {
+		t.Fatalf("rm file was refused:\n%s", got)
+	}
+	if _, err := os.Stat(victim); !os.IsNotExist(err) {
+		t.Fatalf("the file is still there: %v", err)
+	}
+
+	// The session outlived it — that is the whole point of the distinction.
+	if after := termText(t, s, map[string]any{"cmd": "ls"}); !strings.Contains(after, sid) {
+		t.Fatalf("rm file took the session with it:\n%s", after)
 	}
 }

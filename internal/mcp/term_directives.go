@@ -249,14 +249,22 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		switch stmt.Kind {
 		case "file":
 			// Only create reaches here: a file is made with mkdir, or as a symlink when
-			// --link names its target.
+			// --target names what it points at.
+			//
+			// THE LINK GROUP NEEDS AN --op AS WELL AS THE ACTION, and the caller should not
+			// have to supply one: --target already says this is a symlink, so requiring
+			// `--op symlink` too would be a second way to say the same thing. Note the
+			// argument order flips going in: the node's key is the LINK path and --target
+			// is what it points at, while the handler calls those link_path and target.
 			action := "mkdir"
-			if _, ok := stmt.Flag("link-path"); ok {
-				action = "link"
+			flags := map[string]string{"action": action, "remote-path": stmt.Key}
+			if target, ok := stmt.Flag("target"); ok {
+				flags["action"] = "link"
+				flags["op"] = "symlink"
+				flags["link-path"] = stmt.Key
+				flags["target"] = target
 			}
-			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
-				"action": action, "remote-path": stmt.Key,
-			}), win)}
+			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, flags), win)}
 		case "host":
 			return []envelope.Slot{s.directiveHost(ctx, withFlags(stmt, map[string]string{
 				"action": act, "name": stmt.Key,
