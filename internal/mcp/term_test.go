@@ -574,10 +574,17 @@ func TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt(t *testing.T) {
 // long-lived instance is the worst kind, because the workaround is a restart.
 func TestMCPRecvCursorIsDroppedOnClose(t *testing.T) {
 	s := newTestServer(t)
-	// A peer that emits a frame on its own, so `read` has something to take and a
-	// cursor to record. `call` would not do: it waits for the reply to its own frame
-	// and consumes it, leaving nothing behind.
-	h := openPipe(t, s, `echo '{"jsonrpc":"2.0","method":"ev"}'`)
+	// A frame has to APPEAR IN THE TRANSCRIPT, and it must appear the same way on every
+	// platform. Spawning `echo` was not platform-neutral: the interactive shell is bash
+	// on Unix and powershell on Windows, and the two disagree about what a single-quoted
+	// JSON argument means — CI caught it as "no cursor recorded", which is exactly what a
+	// frame that never parsed looks like.
+	//
+	// A terminal echoes what is typed at it, so `input` alone produces the bytes with no
+	// program and no quoting rules involved. `call` would not do either: it waits for the
+	// reply to its own frame and consumes it, leaving nothing for `read`.
+	h := openPty(t, s)
+	termText(t, s, map[string]any{"cmd": `input ` + h + ` {"jsonrpc":"2.0","method":"ev"}`})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if got := termText(t, s, map[string]any{"cmd": "read " + h + " --frame", "timeout": float64(0)}); strings.Contains(got, "200") {
@@ -590,7 +597,7 @@ func TestMCPRecvCursorIsDroppedOnClose(t *testing.T) {
 	}
 
 	if out := termText(t, s, map[string]any{"cmd": "close " + h}); !strings.Contains(out, "204") {
-		t.Fatalf("mcp close: %s", out)
+		t.Fatalf("close: %s", out)
 	}
 	if _, ok := s.recvCursors[h]; ok {
 		t.Errorf("handle %s still has a recv cursor after close; the map grows for the life of the process", h)

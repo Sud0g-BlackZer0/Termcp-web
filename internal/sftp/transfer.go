@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"strings"
 
 	"github.com/open-mcp-ai/termcp/internal/encoding"
@@ -352,9 +351,7 @@ func (s *Client) ReplaceInFile(remotePath, oldText, newText string) (int64, erro
 
 	// Temporary file in the same directory, so the rename stays within one
 	// filesystem and is therefore atomic.
-	dir := path.Dir(remotePath)
-	base := path.Base(remotePath)
-	tmpPath := path.Join(dir, "."+base+".termcp-replace-"+randomSuffix())
+	tmpPath := siblingOf(remotePath, ".termcp-replace-"+randomSuffix())
 
 	if err := s.writeWholeFile(tmpPath, []byte(updated)); err != nil {
 		_ = s.RemoveFile(tmpPath)
@@ -406,4 +403,30 @@ func randomSuffix() string {
 		return fmt.Sprintf("%d", os.Getpid())
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// siblingOf builds a hidden name beside a REMOTE path, keeping the path's own
+// spelling.
+//
+// `path.Dir` is the wrong tool: it only knows "/". A Windows target hands over
+// `C:\Users\x\agent.conf`, which path.Dir reports as ("." , whole-string) — so the
+// temporary file came out as `.C:\Users\x\agent.conf.termcp-replace-…`, a name the
+// server rejected. The remote path is not a local path and cannot be parsed with the
+// local platform's rules.
+//
+// Both separators are honoured and the found one is reused, so the name is built the
+// way the caller spelled it. Normalising to "/" would work for a POSIX server and
+// break a Windows one; guessing from the string alone is the only option, and echoing
+// the caller's own spelling back is the least surprising answer.
+func siblingOf(remotePath, suffix string) string {
+	i := strings.LastIndexAny(remotePath, `/\`)
+	if i < 0 {
+		return "." + remotePath + suffix
+	}
+	dir, base, sep := remotePath[:i], remotePath[i+1:], remotePath[i:i+1]
+	if dir == "" {
+		// "/x" -> the root; keep the separator so the path stays absolute.
+		return sep + "." + base + suffix
+	}
+	return dir + sep + "." + base + suffix
 }
