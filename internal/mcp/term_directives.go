@@ -563,6 +563,19 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 		body = ""
 		truncated = true
 	}
+	// A FOLD THAT DOES NOT SAY WHAT IT FOLDED IS INDISTINGUISHABLE FROM NOTHING THERE.
+	//
+	// `on_*_overflow: fold` is the right default for a caller that would rather have
+	// a handle than a wall of bytes, but it used to answer 206 with an empty body and
+	// a range — and an empty body is also what "no new output" looks like. The caller
+	// had to trust that bytes existed somewhere it could not name.
+	//
+	// The Folded header names the gap: which byte span this reply withheld, and the
+	// exact flag that fetches it. That is the difference between "folded on purpose"
+	// and "nothing to show", and it costs one header line.
+	if truncated && total >= start {
+		headers["Folded"] = fmt.Sprintf("bytes %d-%d of %d; read --cursor %d", start, total-1, total, start)
+	}
 
 	code := 200
 	hasBytes := len(body) > 0 || end > start
