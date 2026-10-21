@@ -78,15 +78,15 @@ func TestRealBrowserThroughTheCdpDoor(t *testing.T) {
 
 	s := newTestServer(t)
 	internalSession(t, s) // gateways need a session to tunnel through
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open internal http://127.0.0.1:" + port}))
-	defer termText(t, s, map[string]any{"cmd": "cdp close " + h})
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "open internal cdp http://127.0.0.1:" + port}))
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
-	targets := termText(t, s, map[string]any{"cmd": `cdp call ` + h + ` {"method":"Target.getTargets"}`})
+	targets := termText(t, s, map[string]any{"cmd": `call ` + h + ` {"method":"Target.getTargets"}`})
 	if !strings.Contains(targets, "targetInfos") {
 		t.Fatalf("Target.getTargets failed:\n%s", targets)
 	}
 
-	created := termText(t, s, map[string]any{"cmd": `cdp call ` + h + ` {"method":"Target.createTarget","params":{"url":"about:blank"}}`})
+	created := termText(t, s, map[string]any{"cmd": `call ` + h + ` {"method":"Target.createTarget","params":{"url":"about:blank"}}`})
 	if !strings.Contains(created, "targetId") {
 		t.Fatalf("Target.createTarget failed:\n%s", created)
 	}

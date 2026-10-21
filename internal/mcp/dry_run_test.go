@@ -33,7 +33,7 @@ func TestRmDryRunDescribesWithoutErasing(t *testing.T) {
 	}
 
 	// The session must STILL EXIST: a preview that erases is not a preview.
-	after := termText(t, s, map[string]any{"cmd": "info " + sessID})
+	after := termText(t, s, map[string]any{"cmd": "get " + sessID})
 	if strings.Contains(after, "not found") || strings.HasPrefix(after, "TERM/1 404") {
 		t.Fatalf("dry run erased the session:\n%s", after)
 	}
@@ -57,7 +57,7 @@ func TestRmDryRunMentionsForceForARunningSession(t *testing.T) {
 		t.Errorf("a running session's preview must say the real call needs --force:\n%s", got)
 	}
 	// Still running.
-	after := termText(t, s, map[string]any{"cmd": "info " + sessID})
+	after := termText(t, s, map[string]any{"cmd": "get " + sessID})
 	if strings.Contains(after, "not found") {
 		t.Fatalf("dry run removed the running session:\n%s", after)
 	}

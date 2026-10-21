@@ -15,7 +15,7 @@ func TestADoorTheTemplateDoesNotGrantIsRefused(t *testing.T) {
 	sid := guardTestSession(t, s, []string{"file.read"}, nil)
 
 	for _, door := range []string{"mcp", "jrpc", "cdp"} {
-		res := termCall(t, s, map[string]any{"cmd": door + " open " + sid + " http://127.0.0.1:1"})
+		res := termCall(t, s, map[string]any{"cmd": "open " + sid + " " + door + " http://127.0.0.1:1"})
 		body := toolResultText(res)
 		if !res.IsError || !strings.Contains(body, "does not grant "+door+".open") {
 			t.Errorf("%s open was not refused by a session that does not grant it:\n%s", door, body)
@@ -34,12 +34,12 @@ func TestADoorTheTemplateGrantsIsAdmitted(t *testing.T) {
 	s := newTestServer(t)
 	sid := guardTestSession(t, s, []string{"mcp.open"}, nil)
 
-	out := termText(t, s, map[string]any{"cmd": "mcp open " + sid + " http://127.0.0.1:1"})
+	out := termText(t, s, map[string]any{"cmd": "open " + sid + " mcp http://127.0.0.1:1"})
 	if strings.Contains(out, "does not grant") {
 		t.Fatalf("a session that grants mcp.open was refused:\n%s", out)
 	}
 	h := handleFrom(t, out)
-	termText(t, s, map[string]any{"cmd": "mcp close " + h})
+	termText(t, s, map[string]any{"cmd": "close " + h})
 }
 
 // TestAnUnrestrictedInstanceIsUnaffected pins that the check is a whitelist and
@@ -49,9 +49,9 @@ func TestAnUnrestrictedInstanceIsUnaffected(t *testing.T) {
 	s := newTestServer(t)
 	internalSession(t, s) // gateways need a session to tunnel through
 	srv := devtoolsPeer(t)
-	out := termText(t, s, map[string]any{"cmd": "cdp open internal " + srv.URL})
+	out := termText(t, s, map[string]any{"cmd": "open internal cdp " + srv.URL})
 	h := handleFrom(t, out)
-	termText(t, s, map[string]any{"cmd": "cdp close " + h})
+	termText(t, s, map[string]any{"cmd": "close " + h})
 }
 
 // TestTheDoorsAreNameableCapabilities pins that a template CAN say the words.

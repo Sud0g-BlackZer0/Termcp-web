@@ -12,7 +12,7 @@ func TestReadOnExitedPipeReturns200Not500(t *testing.T) {
 	s := newTestServer(t)
 
 	// A pipe channel that exits with code 3.
-	text := termText(t, s, map[string]any{"cmd": "pipe internal --argv sh -c 'echo FAIL_LINE; exit 3'"})
+	text := termText(t, s, map[string]any{"cmd": "connect internal --argv sh -c 'echo FAIL_LINE; exit 3'"})
 	h := handleFrom(t, text)
 	waitForShellToExit(t, s, shellIDFromHandle(t, s, h))
 

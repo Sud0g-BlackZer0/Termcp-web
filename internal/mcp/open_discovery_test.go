@@ -56,9 +56,9 @@ func TestMcpOpenReportsDiscoveredTools(t *testing.T) {
 	s := newTestServer(t)
 	internalSession(t, s) // gateways need a session to tunnel through
 
-	out := termText(t, s, map[string]any{"cmd": "mcp open internal ws" + strings.TrimPrefix(srv.URL, "http")})
+	out := termText(t, s, map[string]any{"cmd": "open internal mcp ws" + strings.TrimPrefix(srv.URL, "http")})
 	h := handleFrom(t, out)
-	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	if !strings.Contains(out, "read_file") {
 		t.Errorf("open must report the peer's tools:\n%s", out)
@@ -71,7 +71,7 @@ func TestMcpOpenReportsDiscoveredTools(t *testing.T) {
 	}
 	// The handle must appear in the suggested command, or the caller still has to
 	// join two pieces of the reply by hand.
-	if !strings.Contains(out, "mcp call "+h) {
+	if !strings.Contains(out, "call "+h) {
 		t.Errorf("the suggested call must use this handle:\n%s", out)
 	}
 }
@@ -84,12 +84,12 @@ func TestMcpOpenSucceedsEvenWhenDiscoveryFails(t *testing.T) {
 	s := newTestServer(t)
 	internalSession(t, s) // gateways need a session to tunnel through
 
-	out := termText(t, s, map[string]any{"cmd": "mcp open internal ws" + strings.TrimPrefix(srv.URL, "http")})
+	out := termText(t, s, map[string]any{"cmd": "open internal mcp ws" + strings.TrimPrefix(srv.URL, "http")})
 	if !strings.HasPrefix(out, "TERM/1 200") {
 		t.Fatalf("open must succeed even when discovery cannot list tools:\n%s", out)
 	}
 	h := handleFrom(t, out)
-	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
 }
 
 // TestJrpcOpenDoesNotClaimTools pins that the three adapters keep their own shapes:
@@ -99,9 +99,9 @@ func TestJrpcOpenDoesNotClaimTools(t *testing.T) {
 	s := newTestServer(t)
 	internalSession(t, s) // gateways need a session to tunnel through
 
-	out := termText(t, s, map[string]any{"cmd": "jrpc open internal ws" + strings.TrimPrefix(srv.URL, "http")})
+	out := termText(t, s, map[string]any{"cmd": "open internal jrpc ws" + strings.TrimPrefix(srv.URL, "http")})
 	h := handleFrom(t, out)
-	defer termText(t, s, map[string]any{"cmd": "jrpc close " + h})
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	if strings.Contains(out, "tools/call") {
 		t.Errorf("jrpc is a bare frame channel and must not advertise tool discovery:\n%s", out)

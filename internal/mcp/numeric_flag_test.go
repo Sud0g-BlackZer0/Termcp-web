@@ -137,7 +137,7 @@ func TestManyNumericFlagsRefuseTheFirstBadOne(t *testing.T) {
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	got := termText(t, s, map[string]any{
-		"cmd": "file " + h + " --action read --remote-path /tmp/x --offset abc --length 5",
+		"cmd": "read " + h + " file /tmp/x --offset abc --length 5",
 	})
 	if !strings.Contains(got, "400") || !strings.Contains(got, "--offset") {
 		t.Fatalf("the first unparseable numeric flag must be refused by name:\n%s", got)

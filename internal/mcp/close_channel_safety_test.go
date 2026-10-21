@@ -12,11 +12,11 @@ func TestCloseChannelDoesNotTearDownSession(t *testing.T) {
 	s := newTestServer(t)
 
 	// Session with two channels: a primary pty, and a secondary pipe.
-	text := termText(t, s, map[string]any{"cmd": "pty internal --name s1"})
+	text := termText(t, s, map[string]any{"cmd": "connect internal --name s1"})
 	h1 := handleFrom(t, text)
 	sid := strings.SplitN(h1, ":", 2)[0]
 
-	text2 := termText(t, s, map[string]any{"cmd": "pty " + sid + " --name s2"})
+	text2 := termText(t, s, map[string]any{"cmd": "open " + sid + " --name s2"})
 	h2 := handleFrom(t, text2)
 
 	// Write something to s2 so it has an output record.

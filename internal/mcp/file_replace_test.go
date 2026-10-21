@@ -22,8 +22,8 @@ func TestFileReplaceEditsExactlyOneOccurrence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := termText(t, s, map[string]any{"cmd": "file " + sessID +
-		" --action replace --remote-path " + target +
+	got := termText(t, s, map[string]any{"cmd": "write " + sessID +
+		" file " + target +
 		" --old-text 'timeout = 5' --new-text 'timeout = 30'"})
 	if !strings.HasPrefix(got, "TERM/1 200") {
 		t.Fatalf("replace must succeed:\n%s", got)
@@ -55,8 +55,8 @@ func TestFileReplaceRefusesAnAmbiguousMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := termText(t, s, map[string]any{"cmd": "file " + sessID +
-		" --action replace --remote-path " + target +
+	got := termText(t, s, map[string]any{"cmd": "write " + sessID +
+		" file " + target +
 		" --old-text 'value = 1' --new-text 'value = 2'"})
 	if strings.HasPrefix(got, "TERM/1 200") {
 		t.Fatalf("an ambiguous match must be refused:\n%s", got)
@@ -84,8 +84,8 @@ func TestFileReplaceRefusesAMissingPattern(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := termText(t, s, map[string]any{"cmd": "file " + sessID +
-		" --action replace --remote-path " + target +
+	got := termText(t, s, map[string]any{"cmd": "write " + sessID +
+		" file " + target +
 		" --old-text 'gamma' --new-text 'delta'"})
 	if strings.HasPrefix(got, "TERM/1 200") {
 		t.Fatalf("a missing pattern must be reported:\n%s", got)

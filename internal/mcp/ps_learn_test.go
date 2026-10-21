@@ -18,10 +18,10 @@ func TestPsLearnModeTeachesTheStateVerbs(t *testing.T) {
 	h := openPty(t, s)
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
-	got := termText(t, s, map[string]any{"cmd": "ps", "learn_mode": true})
-	for _, want := range []string{"info ", "close ", "rm ", "resize "} {
+	got := termText(t, s, map[string]any{"cmd": "ls", "learn_mode": true})
+	for _, want := range []string{"get ", "close ", "rm ", "resize "} {
 		if !strings.Contains(got, want) {
-			t.Errorf("ps learn_mode must name the state verb %q:\n%s", want, got)
+			t.Errorf("ls learn_mode must name the state verb %q:\n%s", want, got)
 		}
 	}
 	if !strings.Contains(got, "what an address") {
@@ -29,7 +29,7 @@ func TestPsLearnModeTeachesTheStateVerbs(t *testing.T) {
 	}
 
 	// Without learn_mode the listing stays a listing.
-	plain := termText(t, s, map[string]any{"cmd": "ps"})
+	plain := termText(t, s, map[string]any{"cmd": "ls"})
 	if strings.Contains(plain, "what an address") {
 		t.Errorf("a plain ps must not carry the teaching block:\n%s", plain)
 	}

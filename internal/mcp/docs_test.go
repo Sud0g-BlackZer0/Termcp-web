@@ -575,7 +575,7 @@ func TestStreamableTransportScopesByNamespaceHeader(t *testing.T) {
 	})
 
 	t.Run("a peer cannot drive the other's session", func(t *testing.T) {
-		res := bob.callTerm(t, "type "+aliceSid+":1 echo pwned")
+		res := bob.callTerm(t, "input "+aliceSid+":1 echo pwned")
 		if !res.IsError {
 			t.Fatal("bob wrote to alice's session")
 		}
@@ -586,7 +586,7 @@ func TestStreamableTransportScopesByNamespaceHeader(t *testing.T) {
 	})
 
 	t.Run("the owner may drive either", func(t *testing.T) {
-		res := owner.callTerm(t, "info "+aliceSid)
+		res := owner.callTerm(t, "get "+aliceSid)
 		if res.IsError {
 			t.Fatalf("the owner was refused: %+v", res)
 		}
@@ -699,7 +699,7 @@ func (c *mcpSession) callTool(tool string, args map[string]any) *mcpgo.CallToolR
 
 func (c *mcpSession) startSession(t *testing.T) string {
 	t.Helper()
-	res := c.callTerm(t, "pipe internal --argv "+quoteArgv(append([]any{testShell()}, testShellIdleArgs()...)))
+	res := c.callTerm(t, "connect internal --argv "+quoteArgv(append([]any{testShell()}, testShellIdleArgs()...)))
 	if res.IsError {
 		t.Fatalf("pipe failed: %+v", res)
 	}
@@ -724,9 +724,9 @@ func (c *mcpSession) startSession(t *testing.T) string {
 // `ps` listing (one handle per line, first column).
 func (c *mcpSession) listSessions(t *testing.T) map[string]bool {
 	t.Helper()
-	res := c.callTerm(t, "ps")
+	res := c.callTerm(t, "ls")
 	if res.IsError {
-		t.Fatalf("ps failed: %+v", res)
+		t.Fatalf("ls failed: %+v", res)
 	}
 	text := res.Content[0].(mcpgo.TextContent).Text
 	out := map[string]bool{}

@@ -50,13 +50,13 @@ func TestSemicolonBetweenRunAndShellCommandExplainsItself(t *testing.T) {
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	// Two statements, the second is a shell command that was accidentally split.
-	got := termText(t, s, map[string]any{"cmd": "run " + h + " true; ls -la"})
+	got := termText(t, s, map[string]any{"cmd": "run " + h + " true; make -j4"})
 
-	if !strings.Contains(got, "unknown directive: ls") {
-		t.Fatalf("expected unknown directive for ls:\n%s", got)
+	if !strings.Contains(got, "unknown directive: make") {
+		t.Fatalf("expected unknown directive for make:\n%s", got)
 	}
 	// The reply must name the SEMICOLON specifically. "unknown directive: ls" alone
-	// reads as "termcp has no ls", and the caller's next attempt is another guess.
+	// reads as "termcp has no make", and the caller's next attempt is another guess.
 	if !strings.Contains(got, "termcp syntax") && !strings.Contains(got, "`;`") {
 		t.Errorf("error must explain that `;` is termcp syntax, not shell syntax:\n%s", got)
 	}

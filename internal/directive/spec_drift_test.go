@@ -30,9 +30,26 @@ func TestNoSpecDriftBetweenDirectivesAndSkill(t *testing.T) {
 		declared[op.Name] = true
 	}
 
-	// 23 directives right now (watch and detect were removed).
-	if len(declared) != 23 {
-		t.Errorf("expected 23 directives, got %d: %v", len(declared), declared)
+	// THE VERB SET IS PINNED BY NAME, not by count. A count only says the surface
+	// changed; a list says what it is, so adding or dropping a verb is a deliberate
+	// edit here rather than a number someone adjusts after the fact.
+	//
+	// These are all VERBS. A noun is not here unless it has more than one verb of its
+	// own: `span` and `reader` are views of a channel, `forward`/`file`/`mcp`/`cdp`/
+	// `jrpc` are children made with `open`, and `host`/`ext`/`alias` are collections
+	// reached through `ls`/`create`/`edit`/`rm`.
+	want := []string{
+		"call", "close", "connect", "create", "edit", "get", "help", "input",
+		"key", "ls", "notify", "open", "read", "reader", "resize", "rm", "run",
+		"span", "write",
+	}
+	for _, name := range want {
+		if !declared[name] {
+			t.Errorf("directive %q is missing from Ops()", name)
+		}
+	}
+	if len(declared) != len(want) {
+		t.Errorf("Ops() has %d directives, want %d: %v", len(declared), len(want), declared)
 	}
 
 	// Read SKILL.md if present (it lives in a sibling repo in dev).

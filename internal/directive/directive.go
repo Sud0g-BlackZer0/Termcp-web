@@ -76,6 +76,20 @@ const (
 	// TargetSession requires a container: a session id, an entry name, or a locator
 	// naming a session.
 	TargetSession
+
+	// TargetChain names a channel in EITHER of its two spellings: the short handle
+	// `a1f3:1`, or a session followed by an index, `a1f3 1`.
+	//
+	// THE SECOND SPELLING IS THE POINT. A channel is not an object with its own
+	// existence — it is the index-th thing hanging off a session, exactly like
+	// `file <path>` and `forward <id>`. Writing it as a session plus a key is what
+	// makes the resource tree legible: everything under a session is addressed
+	// `<session> <kind> <key>`, and for a channel the kind is the empty string and
+	// the key is the index.
+	//
+	// The parser normalises the spaced form to the handle, so every handler below
+	// still sees one spelling and no reader has to handle two.
+	TargetChain
 )
 
 // Op is one directive's grammar.
@@ -100,12 +114,31 @@ type Op struct {
 	// nothing. The directives that DO say are the ones where the two spellings mean
 	// different things, which is exactly the set that used to guess.
 	TargetKind TargetKind
+	// Kinds lists the sub-resource names this verb accepts in the position right
+	// after the target: `read a1f3 file /etc/passwd`, `open a1f3 forward …`.
+	//
+	// THE KIND IS PART OF THE ADDRESS, NOT A FLAG. Everything under a session is
+	// named `<session> <kind> <key>` — a file by path, a forward by id, a peer by
+	// handle — and a channel by index alone, which is why the channel case needs no
+	// word here. Declaring the vocabulary in the table is what lets the parser refuse
+	// `read a1f3 flie /x` as a misspelling instead of silently reading "flie" as a
+	// path relative to nothing.
+	//
+	// The first entry is the DEFAULT: a verb whose kind can be inferred from
+	// TargetKind's shape (channels) lists none, and a verb that needs one lists it.
+	Kinds []string
 	// Flags lists the accepted option names (without the leading --).
 	Flags []string
 	// RetiredFlags documents flags that were removed, paired with their replacement.
 	// An error naming a retired flag tells the caller what to use instead of leaving
 	// them with a bare "unknown flag".
 	RetiredFlags map[string]string
+	// MaxArgs is a CEILING on positional arguments, and 0 means "not declared".
+	// It exists for the verbs whose words must arrive as a flag: `connect host sleep
+	// 5` looks exactly like `ssh host sleep 5`, but the words would be dropped, so
+	// they are refused instead of silently ignored.
+	MaxArgs int
+
 	// MinArgs is the minimum number of POSITIONAL arguments after the target,
 	// for the flag kinds (a payload kind is governed by whether a payload exists
 	// at all). It is checked so a truncated command fails here, with a usage
@@ -163,6 +196,13 @@ type Op struct {
 type Statement struct {
 	Op     string
 	Target string
+	// Kind is the sub-resource named after the target, when the verb accepts one:
+	// "file", "forward", "mcp". It is empty for a channel, whose key is the index
+	// and which is therefore addressed by the target alone.
+	Kind string
+	// Key is the sub-resource's identifier: a path for file, an id for forward, a
+	// url for a peer. It is empty when Kind is.
+	Key string
 	// Args are the positional arguments after the target.
 	Args []string
 	// Flags holds --name[=value] options.
@@ -320,97 +360,136 @@ type File struct {
 // ops is the directive set. It is the whole user-facing grammar in one table,
 // so `help`, the error usage lines and the parser cannot disagree.
 var ops = []Op{
-	{Name: "run", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChannel,
-		Usage:  "run <channel> <line>",
-		Detail: runDetail},
-	{Name: "type", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChannel,
-		Usage:  "type <channel> <text>",
-		Detail: typeDetail},
-	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat"}, TargetKind: TargetChannel,
-		Usage: "key <channel> <key> [--repeat N]"},
-	{Name: "read", Core: true, Kind: KindFlags, Target: true, TargetKind: TargetChannel,
-		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw", "grep", "grep-limit"},
-		Valueless: []string{"raw"},
-		Usage:     "read <channel> [--cursor N|--from-line N|--tail N] [--stream o|e] [--grep RE] [--grep-limit N] [--raw]",
-		Detail:    readDetail},
-	{Name: "pipe", Core: true, Kind: KindPayload, Target: true,
-		Flags: []string{"argv", "name", "on-exit", "rows", "cols"}, RestValue: []string{"argv"},
-		Usage:  "pipe <entry|session> [--name ...] [--on-exit keep|close] [--rows N] [--cols N] [--argv <command> [args…]]",
-		Detail: argvDetail},
-	{Name: "pty", Core: true, Kind: KindPayload, Target: true,
-		Flags: []string{"argv", "name", "on-exit", "size"}, RestValue: []string{"argv"},
-		Usage:  "pty <entry|session> [--name ...] [--size 24x80] [--argv <command> [args…]]",
-		Detail: argvDetail},
-	{Name: "ps", Core: true, Kind: KindFlags, Flags: []string{"shells", "all"}, Valueless: []string{"shells", "all"},
-		Usage: "ps [--shells] [--all]"},
-	{Name: "info", Core: true, Kind: KindFlags, Target: true,
-		Usage: "info <target>"},
-	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2, TargetKind: TargetChannel,
-		Usage: "resize <channel> <rows> <cols>"},
-	{Name: "close", Core: true, Kind: KindFlags, Target: true, Flags: []string{"grace"},
+	// THE TABLE IS VERBS, NOT VERB-NOUN PAIRS, AND IT IS SHORT BECAUSE THE TREE IS
+	// NOT REPEATED HERE.
+	//
+	// It was 23 entries named after what each one wrapped — `pty`, `pipe`, `ps`,
+	// `fwd`, `file`, `span` — so the implementation leaked into the command
+	// language: two ways to start a shell, three ways to list things, and
+	// `--action` for the two directives that had grown sub-verbs. A caller had to
+	// learn 23 words and which of three argument shapes each one used.
+	//
+	// There is one resource tree — host → session → {channel, file, forward, peer} —
+	// and a statement names a node in it. `forward`, `mcp`, `cdp` and `jrpc` do NOT
+	// appear below because they are CHILDREN, not actions: they are made with
+	// `open <session> <kind>` and stop being verbs at all. `delete` is absent for the
+	// same reason: a host is a top-level node, so `rm host prod` already says it.
+
+	// --- on a session and what hangs off it ---
+
+	{Name: "connect", Core: true, Kind: KindFlags, Target: true,
+		Flags:     []string{"name", "mode", "argv", "rows", "cols", "size", "on-exit"},
+		RestValue: []string{"argv"},
+		MaxArgs:   1,
+		Usage:     "connect <host> [--argv <command>] [--on-exit keep|close] [--name …]",
+		Detail:    connectDetail},
+	{Name: "open", Core: true, Kind: KindFlags, Target: true, TargetKind: TargetSession,
+		Kinds: []string{"forward", "mcp", "cdp", "jrpc"},
+		Flags: []string{"pipe", "pty", "argv", "name", "on-exit", "rows", "cols", "size",
+			"bind-host", "remote-host", "remote-port", "local-port", "local-host", "url"},
+		Valueless: []string{"pipe", "pty"},
+		RestValue: []string{"argv"},
+		Usage:     "open <session> [--pipe --argv <cmd>]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>",
+		Detail:    openDetail},
+	{Name: "ls", Core: true, Kind: KindFlags, Target: true, TargetOptional: true,
+		Kinds:     []string{"forward", "file", "host", "ext", "alias"},
+		Flags:     []string{"all"},
+		Valueless: []string{"all"},
+		Usage:     "ls [<session> [forward|file <path>]]   |   ls host   |   ls ext",
+		Detail:    lsDetail},
+	{Name: "get", Core: true, Kind: KindFlags, Target: true,
+		Kinds:  []string{"file"},
+		Flags:  []string{"op"},
+		Usage:  "get <session|channel>   |   get <session> file <path> [--op stat|realpath|…]",
+		Detail: getDetail},
+	{Name: "close", Core: true, Kind: KindFlags, Target: true,
+		Kinds: []string{"forward", "mcp", "cdp", "jrpc", "file"},
+		Flags: []string{"grace", "forward-id"},
 		RetiredFlags: map[string]string{
-			"force": "--force is gone. `close` stops and keeps the record, `rm` erases it (and takes --force while running).",
+			"force": "--force is gone. `close` stops and keeps the record, `rm` erases it.",
 		},
-		Usage:  "close <target> [--grace N]",
+		Usage:  "close <session> [<index>]   |   close <peer>",
 		Detail: closeDetail},
 	{Name: "rm", Kind: KindFlags, Target: true, TargetKind: TargetSession,
-		Flags: []string{"force", "dry-run"}, Valueless: []string{"force", "dry-run"},
-		Usage:  "rm <session> [--force] [--dry-run]",
-		Detail: rmDetail},
-	{Name: "span", Kind: KindFlags, Target: true, TargetKind: TargetChannel,
-		Usage:  "span <channel>",
+		Kinds:     []string{"file", "host", "ext", "alias"},
+		Flags:     []string{"force", "dry-run"},
+		Valueless: []string{"force", "dry-run"},
+		Usage:     "rm <session>   |   rm <session> file <path>",
+		Detail:    rmDetail},
+
+	// --- inside a channel ---
+
+	{Name: "run", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChain,
+		Usage:  "run <session> <index> <line>",
+		Detail: runDetail},
+	{Name: "input", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChain,
+		Usage:  "input <session> <index> <text>",
+		Detail: inputDetail},
+	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat"}, TargetKind: TargetChain,
+		Usage: "key <session> <index> <key> [--repeat N]"},
+	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2, TargetKind: TargetChain,
+		Usage: "resize <session> <index> <rows> <cols>"},
+	{Name: "span", Kind: KindFlags, Target: true, TargetKind: TargetChain,
+		Usage:  "span <session> <index>",
 		Detail: spanDetail},
-	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"}, TargetKind: TargetChannel,
-		Usage: "reader <channel>   |   reader <channel> --drop <id>"},
-	{Name: "notify", Kind: KindPayload, Flags: []string{"level", "sticky", "on", "title", "for"}, Valueless: []string{"sticky"},
-		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] [--title T] [--for SECONDS] <body>",
-		Detail: notifyDetail},
-	{Name: "fwd", Kind: KindFlags, Target: true, TargetOptional: true,
-		Flags:  []string{"action", "session", "bind-host", "remote-host", "remote-port", "local-port", "local-host", "forward-id"},
-		Usage:  "fwd <session> --action local|remote|dynamic|list|close …",
-		Detail: fwdDetail},
-	{Name: "file", Kind: KindFlags, Target: true,
-		Flags: []string{"action", "remote-path", "from-path", "to-path", "local-path", "data", "mode",
-			"offset", "length", "local-offset", "target", "link-path", "existing-path", "new-path",
-			"old-text", "new-text",
-			"uid", "gid", "atime", "mtime", "size", "op", "action-verb"},
-		Usage:  "file <session> --action read|write|replace|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …",
-		Detail: fileDetail},
-	// HOST, NOT PROFILE. A "profile" is a word this project invented; a host is the
-	// thing everyone already has. The rename costs one synonym and buys a caller that
-	// does not have to learn a private noun to connect to a machine.
-	{Name: "host", AlsoKnownAs: []string{"profile"}, Kind: KindFlags,
-		Flags: []string{"action", "name", "host", "user", "port", "password", "private-key", "key-passphrase",
+	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"}, TargetKind: TargetChain,
+		Usage: "reader <session> <index>   |   reader <session> <index> --drop <id>"},
+
+	// --- bytes in and out of a node ---
+
+	{Name: "read", Core: true, Kind: KindFlags, Target: true,
+		Kinds:     []string{"file"},
+		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw", "grep", "grep-limit", "frame"},
+		Valueless: []string{"raw", "frame"},
+		Usage:     "read <session> <index> [--tail N|--from-line N|--cursor N] [--grep RE]   |   read <session> file <path>   |   read <peer|channel> [--frame]",
+		Detail:    readDetail},
+	// NO TargetKind: `write <session> file <path>` names a container and
+	// `write <handle> <frame>` names a channel, so a shape check would refuse one of
+	// the two legitimate forms. The dispatcher tells them apart by Kind.
+	{Name: "write", Kind: KindFlags, Target: true,
+		Kinds:  []string{"file"},
+		Flags:  []string{"data", "mode", "local-path", "offset", "length", "old-text", "new-text", "op", "uid", "gid", "atime", "mtime"},
+		Usage:  "write <session> file <path> [--data TEXT|--local-path FILE] [--mode …]",
+		Detail: writeDetail},
+
+	// --- a peer: one call, or the manual send/recv pair ---
+
+	{Name: "call", Kind: KindPayload, PayloadSpan: spanVerbatim, Target: true,
+		Usage:  "call <peer|channel> <frame>",
+		Detail: callDetail},
+
+	// --- configuration, which outlives any session ---
+
+	{Name: "create", Kind: KindFlags, Target: true,
+		Kinds: []string{"host", "ext", "alias"},
+		Flags: []string{"name", "host", "user", "port", "password", "private-key", "key-passphrase",
 			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
-			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port", "source"},
-		Valueless: []string{"trust-unknown-host", "default-approval"},
-		Usage:     "host list|create|edit|copy|delete …",
-		Detail:    hostDetail + "\n\n" + hostFileFormat},
-	// ext IS CORE, because what it lists is not discoverable by acting: a pinned MCP
-	// server or a read-only skills directory is capability the session already has,
-	// and a caller that never suspects it exists will spend its turns building a
-	// worse version by hand.
-	{Name: "ext", Core: true, Kind: KindFlags,
-		Flags: []string{"action", "name", "kind", "target", "description", "command", "args", "url", "headers",
-			"mode", "rows", "cols", "allow", "paths", "notes", "enabled", "forwards"},
-		Valueless:   []string{"enabled"},
-		RestValue:   []string{"args"},
-		AlsoKnownAs: []string{"extensions"},
-		Usage:       "ext list|get|create|update|delete|retry …",
-		Detail:      extDetail},
-	{Name: "jrpc", Kind: KindPayload, PayloadSpan: spanVerbatim,
-		Usage:  "jrpc open <session> <url>   |   jrpc call|send|recv|close <handle> …",
-		Detail: jrpcDetail},
-	{Name: "mcp", Kind: KindPayload, PayloadSpan: spanVerbatim,
-		Usage:  "mcp open <session> <url>   |   mcp tools|send|recv|call|close <handle> …",
-		Detail: mcpDetail},
-	{Name: "cdp", Kind: KindPayload, PayloadSpan: spanVerbatim,
-		Usage:  "cdp open <session> <url>   |   cdp call|send|recv|close <handle> …",
-		Detail: cdpDetail},
-	{Name: "alias", Kind: KindPayload, PayloadSpan: spanWords,
-		Usage: "alias <name> <directive>   |   alias   |   alias <name> --off"},
+			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port",
+			"source", "kind", "target", "command", "args", "url", "headers", "allow", "paths",
+			"notes", "enabled", "forwards", "directive", "link-path", "mode", "op"},
+		Valueless: []string{"trust-unknown-host", "default-approval", "enabled"},
+		RestValue: []string{"args"},
+		Usage:     "create host|ext|alias <name> [flags]   |   create <session> file <path> [--link <target>]",
+		Detail:    createDetail + "\n\n" + hostFileFormat},
+	{Name: "edit", Kind: KindFlags, Target: true,
+		Kinds: []string{"host", "ext", "alias"},
+		Flags: []string{"name", "host", "user", "port", "password", "private-key", "key-passphrase",
+			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
+			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port",
+			"kind", "target", "command", "args", "url", "headers", "allow", "paths", "notes", "enabled",
+			"forwards", "directive"},
+		Valueless: []string{"trust-unknown-host", "default-approval", "enabled"},
+		RestValue: []string{"args"},
+		Usage:     "edit host|ext|alias <name> [flags]",
+		Detail:    editDetail},
+
+	// --- no resource ---
+
+	{Name: "notify", Kind: KindPayload, Flags: []string{"level", "sticky", "on", "title", "for"}, Valueless: []string{"sticky"},
+		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] [--title T] <body>",
+		Detail: notifyDetail},
 	{Name: "help", Core: true, Kind: KindFlags,
-		Usage: "help [directive]"},
+		Usage: "help [verb]"},
 }
 
 // spanDetail decodes the one-letter statuses, which are terse by design (they are
@@ -421,7 +500,7 @@ span, so a window can be read by position instead of by streaming.
 Two offsets, two questions. The byte range is where the COMMAND began and ended.
 The @column is where the LINE RANGE begins — earlier, by the width of the prompt
 that preceded the command on that line. Paging by position uses the @column:
-read <handle> --from-line <line> starts exactly there, while --cursor on the
+read <session> <index> --from-line <line> starts exactly there, while --cursor on the
 range start lands mid-line.
 
 status: o output (the shell's own bytes), a AI input, i human input, q approval
@@ -530,7 +609,130 @@ consuming cursor, so the bytes the sample already took are no longer there.
 For a program whose output you need in full, prefer pipe (--argv) on the same
 entry — its exit IS observable, so a read after it returns the whole output.`
 
-const typeDetail = `TYPING IS NOT SUBMITTING. type sends the bytes to the shell's input line and
+const openDetail = `Add a child to a session you already have: a channel, a forward, or a peer.
+
+THE MODE IS SSH'S OWN RULE, which is why it needs no remembering: ssh host gives you a
+terminal, ssh host cmd runs cmd without one, ssh -t host cmd forces a terminal back.
+
+  --argv present   a PIPE: no terminal, and the exit code is readable
+  no --argv        a PTY: a terminal that stays open
+  --pty / --pipe   override the rule either way
+
+It matters beyond bookkeeping. A pty has no "the command finished" signal, so an exit
+code cannot be read on one; a caller that asked for a single command and got a
+terminal would read an empty reply as "no output" instead of "still running".
+
+  open a1f3                        a pty
+  open a1f3 --argv make            a pipe; its exit code is observable
+  open a1f3 --argv make --pty      a pty running make
+
+--on-exit keep|close decides what happens to a PIPE channel when its process exits:
+keep leaves it readable (the default, so its output is never lost), close frees it
+immediately. It has no meaning on a pty, whose shell does not exit.
+
+The other children are named by a KIND before the key:
+
+  open a1f3 forward --local-port 8080 --remote-host db --remote-port 5432
+  open a1f3 mcp http://localhost:8080/mcp
+
+TO CONNECT TO A HOST, use connect. open only ever acts on a session that exists,
+which is why it cannot be confused with one: the two words name different steps.
+
+` + mcpDetail + `
+
+` + cdpDetail + `
+
+` + jrpcDetail + "\n"
+
+const connectDetail = `Start a session: one SSH link to a host.
+
+EVERY CALL IS A NEW LINK. There is no "reuse if one is running" rule, because that
+rule would make the result of a call depend on state the caller cannot see — two
+calls would sometimes give one link and sometimes two. Calling connect twice gives
+two sessions, always.
+
+  connect prod                    a session, ready for open
+  connect prod --argv htop        ...with a first channel already running it
+
+The host must already be configured: ls host lists them, create host adds one.`
+
+const lsDetail = `List a node of the resource tree.
+
+  ls                    live sessions and channels
+  ls host               connection targets that can be connected
+  ls ext                capability already configured here
+  ls a1f3               a session's channels, each with its mode
+  ls a1f3 forward       its tunnels
+  ls a1f3 file /var/log a directory on it
+
+THE NOUN IS PART OF THE ADDRESS, not a separate flag: what hangs off a session is
+addressed <session> <kind> <key>. Omitting the kind means channels, whose key is the
+index — so a1f3:1 and a1f3 1 are the same node.`
+
+const getDetail = `Describe one node: a session, or one of its channels.
+
+  get a1f3              status, endpoint, mode, age
+  get a1f3:1            that channel's state
+
+For the list of what exists, use ls.`
+
+const callDetail = `Send one JSON-RPC frame to a peer opened with
+"open <session> mcp|cdp|jrpc <url>", and wait for the reply that answers it.
+
+  call mcp1 '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+THE FRAME IS VERBATIM: it is not shell-quoted, so the JSON reaches the peer exactly
+as written. That is also why a quote in it is not a quoting problem to solve.
+
+A peer that answers with a request of its own (sampling, progress) is not answered
+here; those arrive on read <peer>. A reply that never comes times out with the
+window, and the frame stays outstanding — read <peer> may still deliver it.`
+
+const writeDetail = `Write a file on a session.
+
+  write a1f3 file /tmp/x --data hello
+  write a1f3 file /tmp/x --local-path ./x
+  write a1f3 file /tmp/x --data hex:00ff
+
+--data decodes by --mode (text by default, so \n is a newline). For binary use hex:
+or --local-path. The write is a plain overwrite, not an append: use --offset only
+when you mean to patch bytes in place.`
+
+const createDetail = `Create saved configuration. It outlives every session and needs no connection.
+
+  create host prod --host 10.0.0.5 --user deploy --private-key '…'
+  create host staging --source prod --name staging    copy an existing entry
+  create ext myserver --kind mcp --command npx --args '-y' 'some-server'
+  create alias ll 'ls a1f3'
+
+WRITES ARE GATED. An instance started without --mcp-manage-ssh-configs refuses host
+writes with 403 and names that flag. Do not retry or reword: the switch is not
+something a call can turn on.`
+
+const editDetail = `Change saved configuration.
+
+  edit host prod --port 2222
+  edit ext myserver --notes 'use for the billing repo'
+  edit alias ll 'ls a1f3'
+
+A HOST ENTRY IS REMOVED WITH rm, NOT edit: rm host prod. Configuration and live objects
+share the erase verb because they are the same intent on different halves of the tree —
+delete exists only for the composite form, rm host|ext|alias.
+
+Same gate as create: without --mcp-manage-ssh-configs a host write is refused 403.`
+
+const deleteDetail = `Remove saved configuration.
+
+  delete host prod
+  delete ext myserver
+  delete alias ll
+
+DELETE IS FOR CONFIGURATION, rm IS FOR LIVE OBJECTS. A session is a running thing and
+is removed with rm; a host entry is a saved one and is removed with delete. Keeping
+the two verbs apart is what stops "did that stop it or forget it?" from being a
+question.`
+
+const inputDetail = `TYPING IS NOT SUBMITTING. type sends the bytes to the shell's input line and
 stops there; nothing runs until something presses enter. That is what makes it
 useful for driving a TUI, where enter would confirm a menu item instead of starting
 a command — and it is the trap when you meant to run a command:
@@ -710,40 +912,48 @@ any interactive shell.`
 // Both are silent when got wrong. A frame sent to a stdio server goes through
 // the shell as bytes, so a malformed one produces no error — just an empty recv
 // later, which reads like the server ignoring the request.
-const mcpDetail = `Two kinds of handle, and the subcommands differ by kind.
+const mcpDetail = `A peer is a child of a session, opened through it — the URL is resolved on
+the TARGET's network, so localhost:9222 is a port on that machine, not on the one
+termcp runs on.
 
-  stdio server: the handle is the SHELL running it.
-    mcp tools <shell>                    list its tools
-    mcp send  <shell> '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-    mcp recv  <shell>                    read one complete frame back
-    The send is 202, not 200: the frame is typed into the program and submitted,
-    and its answer arrives on the program's own stdout. recv consumes: each call
-    returns the NEXT frame, so two recvs are two answers, never the same one twice.
-    It is non-blocking — a frame still being written comes back as "no complete
-    frame yet", so poll rather than treating that as an error or an empty reply.
+  open <session> mcp http://host/mcp          mount an HTTP endpoint
+  open <session> mcp ws://host/mcp            mount a websocket endpoint
+  open <session> cdp  ws://host:9222/devtools/browser/...
+  open <session> jrpc ws://host/socket        speak the envelope, no protocol on top
 
-  http endpoint: the handle is what mcp open returned.
-    mcp open https://host/mcp           -> Handle
-    mcp tools <handle>                   lists tools (sends tools/list itself)
-    mcp call  <handle> '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","arguments":{}}}'
-    mcp recv  <handle>                   always 204: HTTP answers each send, so there is nothing to receive
-    mcp close <handle>
+Opening is also the HANDSHAKE. An mcp peer gets initialize + tools/list, and the
+reply names the tools it offers, so there is no separate discovery call to make.
 
-send and call take a RAW JSON-RPC frame as the rest of the line. The frame starts
-immediately after the handle — do not put a placeholder word in front of it, and
-QUOTE IT. The terminal splits the line on whitespace before the handler sees it,
-so an unquoted frame reaches the parser as fragments and is refused as "the frame
-is not JSON" — with invalid character '\'' as the reason, which points at the
-quoting rather than at the frame.
+Talking to one:
+  call <peer> '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{...}}'
+  read <peer>            the next frame the peer sent on its own (a CDP event)
+  close <peer>
 
-On an HTTP channel the initialize handshake is done for you on the first frame.
-An HTTP channel does not spend a shell channel: opening a dozen costs no shells.`
+THE FRAME GOES ON call, NOT ON write. write is a file's content and takes flags
+(--data, --mode, --offset); a frame is a verbatim payload where quotes must survive.
+One verb cannot carry both, because the parser has one payload rule per directive.
+
+QUOTE THE FRAME. The line is split on whitespace before the handler sees it, so an
+unquoted frame arrives as fragments and is refused as "the frame is not JSON" — with
+a character error that points at the quoting rather than at the frame.
+
+A SHELL RUNNING A SERVER IS THE SAME KIND OF PEER, addressed by its channel. Start
+it with --argv (a pipe), then talk to it the same way. The difference is only where
+frames come from: an HTTP peer answers each call, while a stdio peer's replies appear
+on its stdout, so reading one needs --frame:
+
+  read <channel> --frame
+
+Without --frame, read returns bytes — which is what a command's output is. Parsing
+every read as protocol would break the ordinary case to serve the rare one.
+
+An HTTP peer spends no shell channel: opening a dozen costs no shells.`
 
 // fwdDetail is the flag set per direction, which the one-line usage cannot show:
 // `fwd <session> --action …` does not say which of --remote-host / --local-port
 // belong to which direction, and a missing one is reported by the handler as a
 // generic requirement rather than as "this direction does not take that flag".
-const fwdDetail = `Directions and their flags:
+const forwardDetail = `Directions and their flags:
   --action local    --local-port [--bind-host] --remote-host --remote-port
                     termcp listens on local-port; the target dials remote-host:remote-port
   --action remote   --local-port --remote-host --remote-port [--local-host]
@@ -1450,10 +1660,32 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		})
 	}
 
+	// A KIND MAY OCCUPY THE TARGET'S POSITION.
+	//
+	// Everything below a session is addressed `<session> <kind> <key>`, and for the
+	// verbs that also work on top-level collections the kind can stand alone:
+	// `ls host` has no session, `rm host prod` names the entry itself. So the word in
+	// second position is read as a kind when the table declares it, and as a target
+	// otherwise — one rule, no verb-specific special cases.
+	//
+	// The KEY is the single word after the kind, and only when it is not a flag:
+	// `open a1f3 forward --local-port 8080` declares no key, while
+	// `read a1f3 file /etc/passwd` declares one.
+	tookKind := false
+	if kind, ok := kindWord(op, rest); ok {
+		out.Kind = kind
+		rest = rest[1:]
+		tookKind = true
+		if len(rest) > 0 && !strings.HasPrefix(rest[0].text, "--") {
+			out.Key = rest[0].text
+			rest = rest[1:]
+		}
+	}
+
 	// Word 2 is the target, for the directives that take one. A flag here is
 	// refused rather than read as a target: `key --repeat 3 a1f3:1 up` would
 	// otherwise silently target "--repeat", and the error has to say why.
-	if op.Target {
+	if op.Target && !tookKind {
 		switch {
 		case len(rest) == 0:
 			if !op.TargetOptional {
@@ -1481,6 +1713,30 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 			if !isSentinel(out.Target) {
 				if err := checkTargetKind(op, out.Target); err != nil {
 					return Statement{}, false, err
+				}
+			}
+			// `<session> <index>` is the spaced spelling of a channel. Fold it into the
+			// handle form here so that one address exists downstream: the colon and the
+			// space are two ways to write the same node, not two code paths.
+			// EVERY VERB, NOT ONLY TargetChain: `read a1f3 1` and `close a1f3 1` name a
+			// channel too, and the spaced spelling has to work wherever the colon does.
+			// The fold only fires when the target is not already a handle and the next
+			// word is a bare index, so a session followed by a path or a name is
+			// untouched.
+			if !isSentinel(out.Target) && !NamesAChannel(out.Target) && len(rest) > 0 {
+				if idx, ok := channelIndexWord(rest[0].text); ok {
+					out.Target = out.Target + ":" + idx
+					rest = rest[1:]
+				}
+			}
+			// A kind may also follow the target: `open a1f3 forward`,
+			// `read a1f3 file /x`, `rm a1f3 file /x`.
+			if kind, ok := kindWord(op, rest); ok {
+				out.Kind = kind
+				rest = rest[1:]
+				if len(rest) > 0 && !strings.HasPrefix(rest[0].text, "--") {
+					out.Key = rest[0].text
+					rest = rest[1:]
 				}
 			}
 		}
@@ -1641,6 +1897,14 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		}
 	}
 
+	if op.Kind == KindFlags && op.MaxArgs > 0 && len(out.Args) > op.MaxArgs {
+		return Statement{}, false, &Error{
+			Op:    name,
+			Msg:   name + " takes its words as a flag, not as bare arguments — the rest of the line was \"" + strings.Join(out.Args, " ") + "\". Use --argv.",
+			Usage: op.Usage,
+		}
+	}
+
 	if op.Kind == KindFlags && len(out.Args) < op.MinArgs {
 		return Statement{}, false, &Error{
 			Op:    name,
@@ -1732,6 +1996,48 @@ func ChannelTargetProblem(op Op, target string) string {
 // are therefore NOT channel targets. That is the breaking change: `run <session>`
 // used to work by falling back to the primary channel, and now it is refused at
 // parse time.
+// kindWord reports whether the next word names a sub-resource this verb accepts.
+//
+// Only a DECLARED word counts. A path, a url or a session id may look like anything,
+// and quietly promoting one of them to a kind would turn `read a1f3 /etc/passwd`
+// into "the file /etc/passwd of session a1f3" when the caller meant the channel read
+// whose target they mistyped. Requiring the declaration keeps the reading obvious.
+func kindWord(op Op, rest []word) (string, bool) {
+	if len(op.Kinds) == 0 || len(rest) == 0 {
+		return "", false
+	}
+	w := rest[0].text
+	if isSentinel(w) {
+		return "", false
+	}
+	for _, k := range op.Kinds {
+		if k == w {
+			return w, true
+		}
+	}
+	return "", false
+}
+
+// channelIndexWord reports whether word is a bare channel index and returns it
+// normalised. Only digits qualify: a channel's key is its position in the session,
+// and accepting anything else would let `run a1f3 file` name a channel called "file".
+func channelIndexWord(word string) (string, bool) {
+	w := strings.TrimSpace(word)
+	if w == "" {
+		return "", false
+	}
+	for _, r := range w {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	if w == "0" {
+		// Channel indices start at 1; 0 would be a name no reply ever prints.
+		return "", false
+	}
+	return w, true
+}
+
 func NamesAChannel(target string) bool {
 	entries := strings.Split(target, ",")
 	for _, entry := range entries {

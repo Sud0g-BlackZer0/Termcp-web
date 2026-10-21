@@ -38,7 +38,7 @@ func TestFinishedPipeDoesNotClaimToBeRunning(t *testing.T) {
 	s := newTestServer(t)
 
 	got := termText(t, s, map[string]any{
-		"cmd":     "pipe internal --argv sh -c 'echo DONE_NOW'",
+		"cmd":     "connect internal --argv sh -c 'echo DONE_NOW'",
 		"timeout": float64(5),
 	})
 	if strings.Contains(got, "Still-Running") {

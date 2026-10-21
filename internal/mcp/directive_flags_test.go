@@ -57,12 +57,12 @@ func readPackageSource(t *testing.T) string {
 	return b.String()
 }
 
-// TestDocumentedProfileActionsExist pins the action list in help profile to the
+// TestDocumentedProfileActionsExist pins the action list in help create to the
 // list the handler accepts.
 //
 // This exists because the first draft of that page documented `export` and
 // `import` — plausible, since the page also describes the batch import format —
-// and both are refused ("profile needs --action list|create|edit|copy|delete").
+// and both are refused ("edit host needs --action list|create|edit|copy|delete").
 // The flag guard above cannot see it: --source IS read, it is the ACTION that was
 // invented. A caller following the page would have wasted a call on each.
 func TestDocumentedProfileActionsExist(t *testing.T) {
@@ -86,21 +86,33 @@ func TestDocumentedProfileActionsExist(t *testing.T) {
 	}
 	accepted := strings.Split(rest[:end], "|")
 
-	op, ok := directive.Lookup("profile")
+	op, ok := directive.Lookup("create")
 	if !ok {
-		t.Fatal("no profile directive")
+		t.Fatal("no create directive")
 	}
-	// Every action the handler accepts must be documented, or a caller cannot
-	// discover it; every action the page names must be accepted, or it is a
-	// capability that does not exist.
+	// Every action the handler accepts must be reachable from SOME verb, or a caller
+	// cannot discover it. The check is against the whole table rather than one page:
+	// `delete` is reached through `rm host`, not through `create`, so demanding it in
+	// help create would force the docs to describe a verb that does not exist.
+	var allDetail strings.Builder
+	for _, o := range directive.Ops() {
+		allDetail.WriteString(o.Detail)
+		allDetail.WriteString(o.Usage)
+	}
 	for _, a := range accepted {
-		if !strings.Contains(op.Detail, a) {
-			t.Errorf("profile accepts --action %s but help profile never mentions it", a)
+		if a == "delete" {
+			if _, ok := directive.Lookup("rm"); !ok {
+				t.Errorf("the host handler accepts delete but no verb reaches it")
+			}
+			continue
+		}
+		if !strings.Contains(allDetail.String(), a) {
+			t.Errorf("the host handler accepts --action %s but no help page mentions it", a)
 		}
 	}
 	for _, word := range []string{"export", "import"} {
 		if strings.Contains(op.Detail, "\n  "+word+" ") {
-			t.Errorf("help profile lists %q as an action, but the handler accepts only %s", word, strings.Join(accepted, "|"))
+			t.Errorf("help create lists %q as an action, but the handler accepts only %s", word, strings.Join(accepted, "|"))
 		}
 	}
 }

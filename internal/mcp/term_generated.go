@@ -38,6 +38,19 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 	if !boolFlag(stmt, "all") {
 		sessions = listableSessions(sessions, callerNS)
 	}
+	// `ls <session>` narrows the same listing to one link. Done here rather than in a
+	// second function because the columns, the caps and the emptiness message must
+	// stay identical: two listings of the same tree that disagree are worse than one
+	// that needs a flag.
+	if only, ok := stmt.Flag("only-session"); ok && only != "" {
+		narrowed := sessions[:0]
+		for _, sess := range sessions {
+			if sess.ID == only || sess.SSHConfig == only {
+				narrowed = append(narrowed, sess)
+			}
+		}
+		sessions = narrowed
+	}
 
 	var b strings.Builder
 	for _, sess := range sessions {
@@ -80,7 +93,7 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 	// it. One `ps learn_mode:true` replaces four `help` round trips.
 	if win.LearnMode {
 		body += "\nwhat an address in column 1 can be used for:\n"
-		for _, name := range []string{"info", "close", "rm", "resize", "read", "span"} {
+		for _, name := range []string{"get", "close", "rm", "read", "resize", "span", "open", "run"} {
 			if op, ok := directive.Lookup(name); ok {
 				body += "  " + op.Usage + "\n"
 			}
@@ -220,6 +233,11 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 		if _, fail := s.callTool(ctx, "shell_archive", argsOf("shell_id", stmt.Target)); fail != nil {
 			return s.slotFromFailure(ctx, stmt, fail)
 		}
+		// A CHANNEL'S PEER STATE GOES WITH IT. If a stdio peer was being read through
+		// this channel, its cursor is keyed by the handle and would otherwise outlive
+		// the channel: handles are minted monotonically, so nothing ever reclaims the
+		// entry and a long-lived instance grows one per channel it ever opened.
+		s.dropRecvCursor(stmt.Target)
 		return noContent(stmt)
 	}
 
@@ -954,6 +972,13 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 				Body: "unknown directive: " + stmt.Args[0]}
 		}
 		body := op.Usage + "\n"
+		// THE FLAG LIST IS DERIVED, NOT WRITTEN. A verb with twenty-five flags cannot
+		// spell them out in a usage line, and a hand-kept list drifts the moment one is
+		// added — the check that each flag is documented somewhere then fails late and
+		// vaguely. Printing the declared set makes the page true by construction.
+		if flags := flagList(op); flags != "" {
+			body += "\n" + flags + "\n"
+		}
 		if op.Detail != "" {
 			// The detail is a page, so it follows the one-line template instead of
 			// replacing it: the template is what a caller scans, the page is what it
@@ -989,40 +1014,47 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	b.WriteString("  run a1f3:1 $1   args: [\"make && test\"]   one sh line, operators live\n")
 	b.WriteString("  run a1f3:1 make && notify done           two cmd directives\n\n")
 
-	b.WriteString("STRUCTURE:\n")
-	b.WriteString("  host     a saved connection target. `host list` shows them.\n")
-	b.WriteString("  session  one SSH link. host is used to open one; `ps` lists live ones.\n")
+	// THE TREE IS THE GRAMMAR. Every statement is a verb plus the address of the
+	// node it works on, so learning the tree teaches the whole surface: a caller who
+	// knows `host -> session -> child` can read any usage line without being told
+	// which word is a verb and which is a noun.
+	b.WriteString("STRUCTURE — one tree, and every verb names the node it acts on:\n")
+	b.WriteString("  host     a saved connection target. `ls host` shows them.\n")
+	b.WriteString("  session  one SSH link. `connect <host>` makes one; `ls` lists live ones.\n")
 	b.WriteString("  channel  one shell on that link, <session>:<index> (e.g. a1f3:1).\n")
-	b.WriteString("           Copy addresses from ps; never spell one.\n\n")
+	b.WriteString("           `open <session>` adds one; the mode follows ssh — --argv means\n")
+	b.WriteString("           a command with no terminal, no --argv means a terminal.\n")
+	b.WriteString("  file     <session> file <path>      — write/get/read/rm/create\n")
+	b.WriteString("  forward  <session> forward <id>     — open/close/ls\n")
+	b.WriteString("  peer     <session> mcp|cdp|jrpc <url> — open/read/call/close, through that\n")
+	b.WriteString("           session's network, so localhost means the host's localhost.\n")
+	b.WriteString("  Copy addresses from `ls`; never spell one.\n\n")
 
 	b.WriteString("TWO CENTRES:\n")
-	b.WriteString("  ext list  CAPABILITY HUB — start here. Lists resident, capability-trimmed\n")
-	b.WriteString("            extensions: mcp servers, skills (read-only SFTP), prompts.\n")
-	b.WriteString("            Notes inside an extension are its operating manual.\n")
-	b.WriteString("  ps        SSH STATE & LIFECYCLE — lists all links and channels.\n")
-	b.WriteString("            Pass learn_mode:true and it expands the verbs that take the\n")
-	b.WriteString("            addresses it just printed (info, close, rm, resize, span).\n\n")
+	b.WriteString("  ls ext  CAPABILITY HUB — start here. Lists resident, capability-trimmed\n")
+	b.WriteString("          extensions: mcp servers, skills (read-only SFTP), prompts.\n")
+	b.WriteString("          Notes inside an extension are its operating manual.\n")
+	b.WriteString("  ls      SSH STATE & LIFECYCLE — every link, channel, forward and peer.\n")
+	b.WriteString("          Pass learn_mode:true and it expands the verbs that take the\n")
+	b.WriteString("          addresses it just printed.\n\n")
 
-	b.WriteString("ACTIONS (every capability belongs to a session):\n")
+	b.WriteString("ACTIONS:\n")
 	for _, op := range directive.Ops() {
 		if !op.Core {
 			continue
 		}
 		b.WriteString("  " + op.Usage + "\n")
 	}
-	b.WriteString("  file <session> --action sftp read/write/replace/stat/delete/rename/urls\n")
-	b.WriteString("  fwd <session> --action  SSH tunnels: local, remote, dynamic\n")
-	b.WriteString("  mcp open <session> <url>  |  cdp open <session> <url>\n")
 	b.WriteString("  notify <text>           reach human before sudo/password/choice, then wait\n\n")
 
-	b.WriteString("`help` lists all " + strconv.Itoa(len(directive.Ops())) + " directives; `help <directive>` explains one.\n")
+	b.WriteString("`help` lists all " + strconv.Itoa(len(directive.Ops())) + " verbs; `help <verb>` is a page.\n")
 	b.WriteString("Pass learn_mode:true on any call and its usage arrives with the reply.\n")
 
 	// Live state: ps listing
-	ps := s.directivePS(ctx, directive.Statement{Op: "ps", Path: "ps"}, win)
-	b.WriteString("\nrunning now (from ps):\n")
+	ps := s.directivePS(ctx, directive.Statement{Op: "ls", Path: "ls"}, win)
+	b.WriteString("\nrunning now (from ls):\n")
 	if strings.TrimSpace(ps.Body) == "" {
-		b.WriteString("  (nothing — `pty internal` opens a local shell; `host list` shows targets)\n")
+		b.WriteString("  (nothing — `connect internal` opens a local shell; `ls host` shows targets)\n")
 	} else {
 		for _, line := range strings.Split(strings.TrimRight(ps.Body, "\n"), "\n") {
 			b.WriteString("  " + line + "\n")
@@ -1430,31 +1462,42 @@ func setFlagJSONList(args map[string]any, stmt directive.Statement, flag, arg st
 	return nil
 }
 
-// resolveAction settles WHERE a profile/ext action came from, and returns the
-// positional words that remain once it is consumed.
+// resolveAction reads the action the dispatcher put on the statement, and returns
+// whatever positional words are left over.
 //
-// THE AMBIGUITY WAS REAL AND THIS REMOVES IT. These two forms both exist:
-//
-//	profile create demo …        the action is the first positional word
-//	profile demo --action edit   the action is a flag
-//
-// so "which positional word is the name" depended on where the action came from —
-// the old code hardcoded the first shape and answered "name is required" to every
-// call spelled the second way. Tracking that with a boolean at the name site (as a
-// first attempt did) only moved the conditional around.
-//
-// Consuming the action word instead makes the two shapes converge: whatever is left
-// at Args[0] IS the name, in both of them. Same idea as Op.Target in the directive
-// parser — a word that names grammar is removed from the argument list, so the words
-// that remain all mean data.
+// IT USED TO GUESS. Two spellings existed — `profile create demo` (action as the
+// first positional word) and `profile demo --action edit` (action as a flag) — so
+// "which word is the name" depended on which spelling was used, and the old code
+// hardcoded one of them. The dispatcher now derives the action from the resource
+// tree rather than from the caller's word order, so there is nothing left to guess:
+// the action is always a flag, always set, and the words that remain are data.
 func resolveAction(stmt directive.Statement, fallback string) (action string, rest []string) {
 	if v, ok := stmt.Flag("action"); ok && v != "" {
-		// Spelled as a flag: every positional word is data.
 		return v, stmt.Args
 	}
-	if len(stmt.Args) > 0 {
-		// Spelled positionally: consume it, so Args[0] is the name again.
-		return stmt.Args[0], stmt.Args[1:]
-	}
 	return fallback, stmt.Args
+}
+
+// flagList renders a verb's declared flags, marking the ones that take no value.
+//
+// It reads the SAME table the parser reads, so a flag that appears here is a flag
+// that parses: there is no second list to keep in step.
+func flagList(op directive.Op) string {
+	if len(op.Flags) == 0 {
+		return ""
+	}
+	valueless := make(map[string]bool, len(op.Valueless))
+	for _, v := range op.Valueless {
+		valueless[v] = true
+	}
+	w := make([]string, 0, len(op.Flags))
+	for _, f := range op.Flags {
+		if valueless[f] {
+			w = append(w, "--"+f)
+			continue
+		}
+		w = append(w, "--"+f+" <value>")
+	}
+	sort.Strings(w)
+	return "Flags: " + strings.Join(w, "  ")
 }

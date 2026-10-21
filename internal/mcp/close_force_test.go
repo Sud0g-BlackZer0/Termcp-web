@@ -17,7 +17,7 @@ func TestCloseSessionTerminatesEntireSession(t *testing.T) {
 		sessID = h[:idx]
 	}
 
-	psBefore := termText(t, s, map[string]any{"cmd": "ps"})
+	psBefore := termText(t, s, map[string]any{"cmd": "ls"})
 	if !strings.Contains(psBefore, sessID) {
 		t.Fatalf("session %q must be running in ps before close:\n%s", sessID, psBefore)
 	}
@@ -27,16 +27,16 @@ func TestCloseSessionTerminatesEntireSession(t *testing.T) {
 		t.Fatalf("close must return 204:\n%s", closeRes)
 	}
 
-	psAfter := termText(t, s, map[string]any{"cmd": "ps"})
+	psAfter := termText(t, s, map[string]any{"cmd": "ls"})
 	for _, line := range strings.Split(psAfter, "\n") {
 		if strings.Contains(line, sessID) && strings.Contains(line, "running") {
 			t.Errorf("session %q is still running after close:\n%s", sessID, psAfter)
 		}
 	}
 
-	info := termText(t, s, map[string]any{"cmd": "info " + sessID})
+	info := termText(t, s, map[string]any{"cmd": "get " + sessID})
 	if strings.Contains(info, "status: running") {
-		t.Errorf("info %s reports status: running after close:\n%s", sessID, info)
+		t.Errorf("get %s reports status: running after close:\n%s", sessID, info)
 	}
 }
 

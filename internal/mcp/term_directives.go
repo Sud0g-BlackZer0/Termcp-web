@@ -58,54 +58,229 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		}
 	}
 	switch stmt.Op {
+	// --- verbs whose target is already the node they act on ---
+	//
+	// TargetChain normalised `a1f3 1` to `a1f3:1` at parse time, so these four see
+	// one spelling and need no kind handling at all.
 	case "run":
 		return s.directiveRun(ctx, stmt, win)
-	case "type":
+	case "input":
 		return s.directiveType(ctx, stmt, win)
 	case "key":
 		return s.directiveKey(ctx, stmt, win)
-	case "read":
-		return s.directiveRead(ctx, stmt, win)
-	case "pipe":
-		return s.directiveOpen(ctx, stmt, win, false)
-	case "pty":
-		return s.directiveOpen(ctx, stmt, win, true)
-	case "ps":
-		return []envelope.Slot{s.directivePS(ctx, stmt, win)}
-	case "info":
-		return []envelope.Slot{s.directiveInfo(ctx, stmt, win)}
 	case "resize":
 		return []envelope.Slot{s.directiveResize(ctx, stmt, win)}
-	case "close":
-		return []envelope.Slot{s.directiveClose(ctx, stmt, win)}
-	case "rm":
-		return []envelope.Slot{s.directiveRemove(ctx, stmt, win)}
 	case "span":
 		return []envelope.Slot{s.directiveSpan(ctx, stmt, win)}
 	case "reader":
 		return []envelope.Slot{s.directiveReader(ctx, stmt, win)}
+	case "get":
+		if stmt.Kind == "file" {
+			// --op carries the fs sub-action (stat, realpath, …): the query vocabulary is
+			// the SFTP layer's, and flattening it into verbs here would invent a dozen
+			// words for operations a caller reaches for once.
+			op, _ := stmt.Flag("op")
+			if op == "" {
+				op = "stat"
+			}
+			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
+				"action": "fs", "op": op, "remote-path": stmt.Key,
+			}), win)}
+		}
+		return []envelope.Slot{s.directiveInfo(ctx, stmt, win)}
 	case "notify":
 		return []envelope.Slot{s.directiveNotify(ctx, stmt, win)}
-	case "fwd":
-		return []envelope.Slot{s.directiveForward(ctx, stmt, win)}
-	case "file":
-		return []envelope.Slot{s.directiveFile(ctx, stmt, win)}
-	case "host", "profile":
-		return []envelope.Slot{s.directiveHost(ctx, stmt, win)}
-	case "ext":
-		return []envelope.Slot{s.directiveExtension(ctx, stmt, win)}
-	case "jrpc", "mcp", "cdp":
-		return []envelope.Slot{s.directiveJRPC(ctx, stmt, win)}
-	case "alias":
-		return []envelope.Slot{s.directiveAlias(ctx, stmt, win)}
 	case "help":
 		return []envelope.Slot{s.directiveHelp(stmt, win)}
+
+	// --- connect: a new SSH link ---
+	case "connect":
+		return s.directiveOpen(ctx, stmt, win, wantPTY(stmt))
+
+	// --- open: a child of an existing session, or a peer through it ---
+	case "open":
+		switch stmt.Kind {
+		case "forward":
+			return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{
+				"action": "local",
+			}), win)}
+		case "mcp", "cdp", "jrpc":
+			return s.openPeer(ctx, stmt, win, stmt.Kind)
+		default:
+			return s.directiveOpen(ctx, stmt, win, wantPTY(stmt))
+		}
+
+	// --- ls: every collection is one verb ---
+	case "ls":
+		return s.directiveLS(ctx, stmt, win)
+
+	// --- rm: a live node, or saved configuration ---
+	case "rm":
+		switch {
+		case stmt.Kind == "file":
+			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
+				"action":      "delete",
+				"remote-path": stmt.Key,
+			}), win)}
+		case stmt.Kind == "host":
+			return []envelope.Slot{s.directiveHost(ctx, withFlags(stmt, map[string]string{
+				"action": "delete", "name": stmt.Key,
+			}), win)}
+		case stmt.Kind == "ext":
+			return []envelope.Slot{s.directiveExtension(ctx, withFlags(stmt, map[string]string{
+				"action": "delete", "name": stmt.Key,
+			}), win)}
+		case stmt.Kind == "alias":
+			return []envelope.Slot{s.directiveAlias(ctx, aliasStatement(stmt, true), win)}
+		default:
+			return []envelope.Slot{s.directiveRemove(ctx, stmt, win)}
+		}
+
+	// --- close: a channel, a session, a tunnel or a peer ---
+	case "close":
+		if stmt.Kind == "forward" {
+			return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{
+				"action": "close",
+			}), win)}
+		}
+		if isPeerHandle(stmt.Target) {
+			return s.peerChannel(ctx, stmt, win, "close", nil)
+		}
+		return []envelope.Slot{s.directiveClose(ctx, stmt, win)}
+
+	// --- read: a channel's new bytes, a file's content, or a peer's frames ---
+	case "read":
+		if stmt.Kind == "file" {
+			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
+				"action":      "read",
+				"remote-path": stmt.Key,
+			}), win)}
+		}
+		// A REGISTRY HANDLE IS ALWAYS A FRAME SOURCE; A SHELL IS BYTES UNLESS ASKED.
+		//
+		// A network peer has no byte stream to speak of, so `read` on one can only mean
+		// "the next frame". A pipe channel is the opposite: it is usually a command's
+		// output, and only sometimes a JSON-RPC server — so frames need the flag, or
+		// every ordinary `read` of a command's output would be parsed as protocol.
+		if isPeerHandle(stmt.Target) || boolFlag(stmt, "frame") {
+			return s.peerChannel(ctx, stmt, win, "read", nil)
+		}
+		return s.directiveRead(ctx, stmt, win)
+
+	// --- write: a file's content ---
+	//
+	// THE FRAME FORM LIVES ON call. Both are "put bytes somewhere", but a frame is a
+	// payload (verbatim, quotes and all) and a file write is a set of flags
+	// (--data/--mode/--offset), and one verb cannot take both: the parser has one
+	// payload rule per directive, so whichever form it picked would be wrong for the
+	// other. `call` already carries a verbatim payload, which is exactly what a frame
+	// needs.
+	case "write":
+		if stmt.Kind == "file" {
+			// --old-text makes it a replace: one write verb, and whether it edits in
+			// place is a property of what was supplied, not a second word to learn.
+			action := "write"
+			if _, ok := stmt.Flag("old-text"); ok {
+				action = "replace"
+			} else if _, ok := stmt.Flag("mode"); ok {
+				// A mode with no content is a chmod: what was supplied says which of
+				// the three write-shaped operations this is.
+				if _, hasData := stmt.Flag("data"); !hasData {
+					if _, hasFile := stmt.Flag("local-path"); !hasFile {
+						action = "perm"
+					}
+				}
+			}
+			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
+				"action":      action,
+				"remote-path": stmt.Key,
+			}), win)}
+		}
+		return []envelope.Slot{badRequest(stmt, "write needs a kind: write <session> file <path>")}
+
+	// --- call: one request, one reply ---
+	//
+	// THE HANDLE MAY BE A PEER OR A SHELL. A network peer is opened with
+	// `open <session> mcp <url>` and gets a registry handle; a stdio peer is a pipe
+	// channel already running the server, addressed by its channel handle. Both are
+	// "something that speaks JSON-RPC", and the caller should not have to know which
+	// kind of pipe it is talking through — so one verb covers both.
+	case "call":
+		return s.peerChannel(ctx, stmt, win, "call", nil)
+
+	// --- configuration, which outlives every session ---
+	case "create", "edit":
+		act := "create"
+		if stmt.Op == "edit" {
+			act = "edit"
+		}
+		switch stmt.Kind {
+		case "file":
+			// Only create reaches here: a file is made with mkdir, or as a symlink when
+			// --link names its target.
+			action := "mkdir"
+			if _, ok := stmt.Flag("link-path"); ok {
+				action = "link"
+			}
+			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
+				"action": action, "remote-path": stmt.Key,
+			}), win)}
+		case "host":
+			return []envelope.Slot{s.directiveHost(ctx, withFlags(stmt, map[string]string{
+				"action": act, "name": stmt.Key,
+			}), win)}
+		case "ext":
+			// `update` was the old name for the same write; ext kept it because the
+			// config file calls the field `update`. One verb here, one word there.
+			if act == "edit" {
+				act = "update"
+			}
+			return []envelope.Slot{s.directiveExtension(ctx, withFlags(stmt, map[string]string{
+				"action": act, "name": stmt.Key,
+			}), win)}
+		case "alias":
+			return []envelope.Slot{s.directiveAlias(ctx, aliasStatement(stmt, false), win)}
+		}
+		usage := ""
+		if op, ok := directive.Lookup(stmt.Op); ok {
+			usage = "\n" + op.Usage
+		}
+		return []envelope.Slot{badRequest(stmt, stmt.Op+" needs a kind: "+stmt.Op+" host|ext|alias <name>"+usage)}
 	}
 	return []envelope.Slot{{
 		Code:    400,
 		Headers: map[string]string{"Error-Code": "unknown_directive"},
 		Body:    "unknown directive: " + stmt.Op,
 	}}
+}
+
+// withFlags returns a copy of stmt whose flag map carries the given values.
+//
+// THE ADAPTER IS THE POINT OF THIS LAYER. The handlers below were written against
+// the old spelling (`file <session> --action read --remote-path x`) and their
+// internals are not what changed: an SFTP read is an SFTP read. Rewriting them to
+// read a different field would have been six hundred lines of shuffling with a
+// fresh bug in each. So the surface is translated here, once, and the machinery
+// keeps working.
+//
+// The copy is shallow except for the flag map: a statement is shared between the
+// statements of one cmd, and mutating the caller's map would make `a; b` where a is
+// translated leak its flags into b.
+func withFlags(stmt directive.Statement, set map[string]string) directive.Statement {
+	flags := make(map[string]*string, len(stmt.Flags)+len(set))
+	for k, v := range stmt.Flags {
+		flags[k] = v
+	}
+	for k, v := range set {
+		if v == "" {
+			continue
+		}
+		val := v
+		flags[k] = &val
+	}
+	out := stmt
+	out.Flags = flags
+	return out
 }
 
 // noContent returns a 204 slot carrying the statement's Path header.
@@ -225,7 +400,11 @@ func (s *Server) runOne(ctx context.Context, stmt directive.Statement, win termA
 	// delivered as if it belonged to this one.
 	start, ok := s.outputSizeFor(stmt.Target)
 	if !ok {
-		return s.slotFromFailure(ctx, stmt, s.probeShell(stmt.Target))
+		// THE SAME ADVICE ON BOTH ROADS. A finished pipe can be refused here, before
+		// anything is typed, or by the write below; only the second used to carry the
+		// explanation, so a caller that arrived on the first got "process has exited"
+		// with no way forward.
+		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, s.probeShell(stmt.Target), s))
 	}
 
 	if _, fail := s.callTool(ctx, "shell_input", argsOf("shell_id", stmt.Target, "text", stmt.Payload)); fail != nil {
@@ -287,8 +466,8 @@ func pipeClosedHint(handle string, f *toolFailure, s *Server) *toolFailure {
 	return &toolFailure{
 		code: CodeOperationFailed,
 		msg: msg + "\nThis is a PIPE channel: its process has finished, so there is no stdin left to write to " +
-			"and `run`/`type` cannot drive it. Its output is still readable — `read " + handle + "` returns it, " +
-			"including the exit code. For an interactive session use `pty` instead.",
+			"and `run`/`input` cannot drive it. Its output is still readable — `read " + handle + "` returns it, " +
+			"including the exit code. For an interactive session use `open <session>` instead (a pty).",
 	}
 }
 
@@ -891,4 +1070,135 @@ func flagNumber(raw string) (float64, error) {
 		return 0, fmt.Errorf("expected a finite number, got %q", trimmed)
 	}
 	return f, nil
+}
+
+// isPeerHandle reports whether target names an opened peer rather than a session.
+//
+// A peer handle is the registry's own name for it (mcp1, cdp2, jrpc3), so asking the
+// registry is exact: a session id can never match, and a handle that was closed
+// stops matching the moment it is removed. Matching the shape instead
+// (^mcp\d+$) would keep answering yes for a handle that no longer exists.
+func isPeerHandle(target string) bool {
+	jrpcChannelsMu.Lock()
+	_, ok := jrpcChannels[target]
+	jrpcChannelsMu.Unlock()
+	return ok
+}
+
+// peerChannel routes read/write/call/close at a frame peer onto the jrpc layer.
+//
+// THE HANDLE MAY BE A NETWORK PEER OR A SHELL. `open <session> mcp <url>` returns a
+// registry handle; a pipe channel already running a stdio server is addressed by its
+// channel handle. Both speak JSON-RPC, and the caller should not have to know which
+// kind of pipe it is talking through, so both arrive here and jrpcChannel sorts them
+// out — including the one-time MCP handshake, which is per handle and must not be
+// re-implemented at this layer.
+func (s *Server) peerChannel(ctx context.Context, stmt directive.Statement, win termArgs, sub string, rest []string) []envelope.Slot {
+	handle := stmt.Target
+	// `read`/`write` are this tool's general words for taking and putting bytes; on a
+	// peer they are its recv and send. The mapping is here rather than in jrpcChannel
+	// because that layer is shared with `jrpc`, which has no such words.
+	switch sub {
+	case "read":
+		sub = "recv"
+	case "write":
+		sub = "send"
+	}
+	args := []string{handle}
+	if sub == "call" || sub == "send" {
+		// The frame is the payload: verbatim, so the JSON arrives as written.
+		args = append(args, strings.TrimSpace(stmt.Payload))
+	}
+	// A HANDLE THE REGISTRY DOES NOT KNOW IS A SHELL, and it goes straight to the stdio
+	// path. That path types at the process the caller started: no initialize
+	// handshake, because a handshake would consume the very frames the caller is about
+	// to read and answer a question nobody asked.
+	jrpcChannelsMu.Lock()
+	h, ok := jrpcChannels[handle]
+	jrpcChannelsMu.Unlock()
+	if !ok {
+		return []envelope.Slot{s.mcpStdio(ctx, stmt, sub, handle, args[1:])}
+	}
+	kind := h.kind
+	out := stmt
+	out.Op = kind
+	return []envelope.Slot{s.jrpcChannel(ctx, out, win, kind, sub, args)}
+}
+
+// openPeer opens a peer through a session and returns the handle.
+func (s *Server) openPeer(ctx context.Context, stmt directive.Statement, win termArgs, kind string) []envelope.Slot {
+	out := stmt
+	out.Op = kind
+	return []envelope.Slot{s.jrpcOpen(ctx, out, kind, stmt.Target, stmt.Key)}
+}
+
+// directiveLS is the one listing verb, for every collection in the tree.
+//
+// IT SHEDS THE KIND BEFORE LISTING. `ls host` and `ls ext` name a collection, not a
+// node: the parser put the word in Kind because that is where the resource tree says
+// it goes, and this translates it into the action the collection's handler expects.
+func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
+	switch stmt.Kind {
+	case "host":
+		return []envelope.Slot{s.directiveHost(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}
+	case "ext":
+		return []envelope.Slot{s.directiveExtension(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}
+	case "alias":
+		return []envelope.Slot{s.directiveAlias(ctx, stmt, win)}
+	case "forward":
+		return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}
+	case "file":
+		// A directory listing is the fs action; the path is the node's key.
+		return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
+			"action": "fs", "remote-path": stmt.Key,
+		}), win)}
+	}
+	if stmt.Target == "" {
+		// Bare `ls`: every live link and every channel on it.
+		return []envelope.Slot{s.directivePS(ctx, withFlags(stmt, map[string]string{"shells": "true"}), win)}
+	}
+	// `ls <session>`: that link's channels. directivePS lists everything, so the
+	// statement is narrowed by pointing the handler at one session through --all and
+	// filtering in psOne; see directivePS for the filter.
+	return []envelope.Slot{s.directivePS(ctx, withFlags(stmt, map[string]string{
+		"shells": "true", "only-session": stmt.Target, "all": "true",
+	}), win)}
+}
+
+// wantPTY decides whether a new channel gets a terminal.
+//
+// THE RULE IS SSH'S OWN, which is why it needs no explaining: `ssh host` gives you a
+// terminal, `ssh host cmd` runs cmd with plain pipes, and `ssh -t host cmd` forces a
+// terminal back on. So an --argv means pipe unless --pty asks otherwise, and no
+// --argv means pty unless --pipe asks otherwise.
+//
+// It matters beyond bookkeeping. A pty has no "the command finished" signal, so an
+// exit code is unreadable on one; a caller that asked for a single command and got a
+// terminal would read an empty reply as "no output" instead of "it is still running".
+func wantPTY(stmt directive.Statement) bool {
+	if boolFlag(stmt, "pipe") {
+		return false
+	}
+	if boolFlag(stmt, "pty") {
+		return true
+	}
+	argv, _ := stmt.Flag("argv")
+	return argv == ""
+}
+
+// aliasStatement rebuilds the payload the alias handler reads.
+//
+// The handler takes "<name> <expansion>" verbatim, so the expansion is never
+// re-quoted: what the caller wrote is what the alias runs. The parser splits that
+// into a key and positional words — `create alias ll ls a1f3` — and this puts them
+// back together, with --off for a removal, so the handler keeps its one contract.
+func aliasStatement(stmt directive.Statement, off bool) directive.Statement {
+	out := stmt
+	parts := append([]string{stmt.Key}, stmt.Args...)
+	body := strings.Join(parts, " ")
+	if off {
+		body = stmt.Key + " --off"
+	}
+	out.Payload = body
+	return out
 }

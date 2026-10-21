@@ -64,11 +64,11 @@ func TestMcpHandshakeRunsOncePerHandle(t *testing.T) {
 	srv, inits := countingPeer(t, nil)
 	s := newTestServer(t)
 	internalSession(t, s) // gateways need a session to tunnel through
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open internal ws" + strings.TrimPrefix(srv.URL, "http")}))
-	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "open internal mcp ws" + strings.TrimPrefix(srv.URL, "http")}))
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	for i := 0; i < 4; i++ {
-		out := termText(t, s, map[string]any{"cmd": `mcp call ` + h + ` {"method":"tools/list"}`})
+		out := termText(t, s, map[string]any{"cmd": `call ` + h + ` {"jsonrpc":"2.0","id":1,"method":"tools/list"}`})
 		if !strings.Contains(out, `"ok":true`) {
 			t.Fatalf("call %d did not reach the peer:\n%s", i, out)
 		}

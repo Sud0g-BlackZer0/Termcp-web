@@ -190,7 +190,7 @@ func (s *Server) jrpcDiscoverMCP(ctx context.Context, h *jrpcHandle, handle stri
 		return "\ntools: none (the peer advertises no tools)\n", true
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("\ntools (%d) — call one with `mcp call %s '{\"method\":\"tools/call\",\"params\":{\"name\":\"...\",\"arguments\":{}}}'`:\n", len(items), handle))
+	b.WriteString(fmt.Sprintf("\ntools (%d) — call one with `call %s '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"...\",\"arguments\":{}}}'`:\n", len(items), handle))
 	for _, raw := range items {
 		item, ok := raw.(map[string]any)
 		if !ok {

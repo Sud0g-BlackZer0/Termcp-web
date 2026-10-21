@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **指令表面重写成「动词 + 资源树上的地址」（破坏性，无旧名保留）**。原来是三种互不相干的形状：`verb target`（`run`、`read`、`close`）、`noun verb`（`host`、`ext`、`mcp`、`cdp`、`jrpc`）、以及 `noun --action verb`（`file`、`fwd`）。最后一种是最刺眼的证据：`file` 是唯一不接受位置动作的指令，`file nosuch read` 回 `400 file needs --action …`，而同表的 `read nosuch` 是 404——同一个错误在两张表里有两种报法，因为「哪个词是动词」这件事从来没有定论。现在只有一种形状：**一个动词，加上它作用的那个节点**。资源树是 `host → session → { <index> = channel, file <path>, forward <id>, mcp|cdp|jrpc <url> }`，`ext` 在旁边独立成列。`connect <host>` 建一个 session，`open <session>` 给它加子节点（通道 / 文件 / 转发 / peer），其余动词作用在一个节点上。23 条指令收敛成 **19 个动词**：`connect open ls get close rm run input key resize span reader read write call create edit notify help`。
+
+  几个由此消失的概念，而不是被重命名：
+
+  - **`pty` / `pipe` 不再是指令**。它们是 `open <session>` 的创建模式，规则直接借 ssh 的：有 `--argv` 就是无终端的管道，没有就是终端，`--pty` 可以强制回来。这不只是省一个词——pty 没有「命令结束」的信号，所以退出码读不到；一个要跑单条命令的调用方如果拿到的是终端，会把空回复读成「没有输出」而不是「还在跑」。
+  - **`profile` 不再需要别名**。`host` 本来就是这个东西的名字，现在它是树上的顶层节点（`ls host` / `create host` / `rm host`），而不是一个带 `--action` 的指令。
+  - **`mcp` / `cdp` / `jrpc` 不再是动词**。它们是 `open <session> <kind> <url>` 造出来的子节点。`mcp call` / `cdp recv` / `jrpc send` 这三种拼法一并归到 `call` / `read` / `write`：帧永远走 `call`（payload 逐字节，引号不重写），读帧走 `read --frame`。通道上跑 stdio server 与网络 peer 用同一套动词，调用方不需要知道自己面对的是哪一种。
+  - **`file` 的十一个 `--action` 按语义分给了动词**：读内容 `read <session> file <path>`，写内容 `write`，查路径 `get`，建目录/软链 `create`，删 `rm`。`--old-text` 让 `write` 变成原地替换——是「写」还是「改」取决于提供了什么，而不是第二个词。
+  - **`ps` 与 `host list` / `ext list` / `fwd --action list` 合并成一个 `ls`**。列举是同一个动作，只是集合不同：`ls`、`ls host`、`ls ext`、`ls <session>`、`ls <session> forward`。`ls <session>` 是对同一份列表的收窄，不是另一张表。
+  - **`info` 改名 `get`**，`type` 改名 `input`，`fwd` 拆进 `open`/`close`/`ls`。`a1f3:1` 与 `a1f3 1` 现在等价：冒号是 `ls` 打印出来的样子，空格是语法本身。
+
+  语法层面加了两样东西支撑它：`Op.Kinds` 声明一个动词接受哪些子资源（`open` 是 `forward/mcp/cdp/jrpc`，`ls` 是 `forward/file/host/ext/alias`），`Statement.Kind` 与 `Statement.Key` 承载解析结果，于是 kind 可以写在目标**前面或后面**；以及 `Op.MaxArgs`，让「这些词必须走 `--argv`」成为一个可拒绝的条件而不是静默丢弃（`connect host sleep 5` 看着像 `ssh host sleep 5`，直接回 400 并点名 `--argv`）。
+
+  顺带修掉三处测试暴露出来的真问题：`connect <host> --argv cmd` 之前建成的是 pty（`ssh host cmd` 的语义是无 tty），所以一次单命令调用的退出码读不到；关闭通道时不释放它的帧游标，而句柄单调递增，等于每条开过的通道泄漏一个 map 项；`read <pipe 通道>` 会把普通命令输出当 JSON-RPC 解析，现在帧要显式 `--frame`。
+
+  `help <verb>` 现在还会打印一张**从同一张表派生**的 flag 清单（`flagList`），所以 25 个 flag 的 `create host` 也不必在手写 usage 行里塞满；`TestEveryFlagIsDiscoverableFromHelp` 盯着这条线真的到达调用方。
+
 - **`mcp` / `cdp` / `jrpc` 的连接改从 session 里穿过去（破坏性）**。`... open <url>` 变成 `... open <session> <url>`。此前这三个网关用的是 termcp 自己的网络栈：`http.DefaultClient` 与 `websocket.DefaultDialer`，于是同一个 URL 的含义取决于 termcp 恰好跑在哪台机器上——`cdp open http://localhost:9222` 连的是**进程所在机器**的调试端口，不是被控主机的。这不只是别扭：它等于给 termcp 加了一项目标主机的网络从未授予的能力（从本机打出任意出站连接），而走 session 则什么也没加——复用的就是 `-L` 那条已有隧道。现在 `internal/jrpc` 的 `Open` 必须拿到一个 `DialFunc`，`dialerForSession` 用 `sess.SSHClient().Dial` 实现它，HTTP transport 与 websocket dialer 都换成这一条。`<session>` 既接受 `ps` 打印的 id，也接受 host 名（`internal`、`prod`），后者解析到该 host 下**唯一**在跑的 session；有两三个同名目标时报错并列出 id 让你选，而不是替你在可能不同的跳板/代理之间猜一个。顺带修掉一处必然的失败：x/crypto 的 SSH channel 不实现 deadline（`ssh: tcpChan: deadline not supported`），而 gorilla 拨号时会设 deadline 并检查返回值，所以 websocket 过隧道一开始就必然失败；`deadlineFreeConn` 让三个 SetDeadline 静默成功，超时仍由 context 负责（channel 随 context 结束而拆掉）。
 
 - **`profile` 改名 `host`**。`profile` 是这个项目自己造的词，而它描述的东西——一台机器在哪、用什么用户和密钥连——调用方本来就有名字：host。`host` 现在是正式名，`profile` 作为别名保留（`Lookup` 的 `AlsoKnownAs`），所以老脚本照常工作。用法行、拒绝信息（`host needs --action …`）、审批摘要（`create host x`）一并改了。同时把全表 `Usage` 里的 `<handle>` 换成 `<channel>`：`handle` 这个词已经废除，通道就叫 channel，写成 `<session>:<index>`。

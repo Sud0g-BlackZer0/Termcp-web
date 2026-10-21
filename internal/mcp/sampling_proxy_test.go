@@ -27,7 +27,7 @@ printf '{"jsonrpc":"2.0","id":7,"method":"sampling/createMessage","params":{"mes
 read answer
 printf 'GOT_ANSWER:%s\n' "$answer"
 `)
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "pipe internal --argv sh '" + script + "'"}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "connect internal --argv sh '" + script + "'"}))
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	// The Agent session is taken from the context, so the call must carry one that
@@ -35,7 +35,7 @@ printf 'GOT_ANSWER:%s\n' "$answer"
 	fake := &fakeSamplingSession{answer: "the model said yes"}
 	ctx := s.mcpServer.WithContext(context.Background(), fake)
 
-	got := termTextWithCtx(t, s, ctx, map[string]any{"cmd": "mcp recv " + h})
+	got := termTextWithCtx(t, s, ctx, map[string]any{"cmd": "read " + h + " --frame"})
 
 	// The forwarded request reached the Agent...
 	if fake.calls == 0 {
@@ -99,7 +99,7 @@ printf '{"jsonrpc":"2.0","id":7,"method":"sampling/createMessage","params":{"mes
 read answer
 printf 'ECHO:%s\n' "$answer"
 `)
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "pipe internal --argv sh '" + script + "'"}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "connect internal --argv sh '" + script + "'"}))
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	fake := &fakeSamplingSession{answer: "MODEL_OUTPUT"}
@@ -107,7 +107,7 @@ printf 'ECHO:%s\n' "$answer"
 
 	// The recv answers the sampling request, writes the answer back, and then keeps
 	// reading for a real frame — which never comes, so it reports 204.
-	termTextWithCtx(t, s, ctx, map[string]any{"cmd": "mcp recv " + h, "timeout": 3})
+	termTextWithCtx(t, s, ctx, map[string]any{"cmd": "read " + h + " --frame", "timeout": 3})
 
 	// The sub-MCP reads the answer, echoes it, and exits. Reading the channel by
 	// position shows the whole transcript regardless of when the echo landed.

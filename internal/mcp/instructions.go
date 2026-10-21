@@ -34,29 +34,30 @@ through args ($1, $2) or vars ($NAME), never as syntax. cmd supports && || ; &
   run a1f3:1 $1   args: ["make && test"]   one sh line
   run a1f3:1 make && notify done           two cmd directives
 
-session = one SSH link (host opens one); channel = one shell on it, <session>:<index>,
-an address you copy from ps, never spell.
+The tree: host -> session -> {<index> = channel, file, forward, peer}. connect <host>
+makes a session, open <session> adds a child, every other verb works on one node.
+ls prints every node with its address; copy one, never spell it.
 
 TWO CENTRES
-  ext list  CAPABILITY: resident, capability-trimmed extensions (mcp servers, skills,
-            prompts). Their notes are the manual. LOOK FIRST.
-  ps        STATE. learn_mode:true expands every verb taking an address it printed.
+  ls ext  CAPABILITY: resident, capability-trimmed extensions (mcp servers, skills,
+          prompts). Their notes are the manual. LOOK FIRST.
+  ls      STATE. learn_mode:true expands every verb it printed an address for.
 
-ACTIONS — every capability belongs to a session
-  pty <host> stays open   pipe <host> --argv one command + exit code   run <ch> <line>
-  type (no Enter)  key (ctrl+c/esc)  read (new bytes)  file/fwd (sftp, tunnels)
-  mcp/cdp open <session> <url> reaches the peer THROUGH that session's network
-  notify <text> reaches the human before sudo/password/choice, then waits
+ACTIONS
+  connect <host>  open <session> [--argv cmd]  run <ch> <line>
+  input (no Enter)  key (ctrl+c/esc)  read (new bytes)  write/get <ch> file <path>
+  open <session> mcp|cdp|jrpc <url> reaches the peer through that session's network
 
-help lists all 23; learn_mode:true attaches any reply's usage line.
+help lists all 19 verbs; learn_mode:true attaches any reply's usage line.
 
 HARD BOUNDARY
   notify FIRST (--level warn|error --sticky --on <session>)
   before any password/sudo/passphrase/MFA, confirmation, approval, choice or input.
   Never guess, paste, echo or store a secret; never bypass sudo/auth/approval (sudo -n,
   NOPASSWD, setuid, sudoers, reword, encode, retry loops).
-  Human at a prompt: notify, then WAIT. A long command's reply carries what arrived, so
+  Human at a prompt: notify, then WAIT. A long command's reply carries what arrived;
   read a slow task in pieces rather than polling.
 
 REVIEW — review_pending=true means HELD: nothing ran, no id to poll. Do NOT resubmit or
-retry; notify, then wait.`
+retry; notify, then wait.
+`
