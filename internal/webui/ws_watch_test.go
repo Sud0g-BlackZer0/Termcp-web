@@ -95,8 +95,19 @@ func TestWatchAddActuallySubscribes(t *testing.T) {
 		t.Fatalf("watch_add: %v", err)
 	}
 	marker := "watch-marker-" + time.Now().Format("150405.000000")
-	time.Sleep(200 * time.Millisecond)
-	if err := conn.WriteJSON(map[string]any{"type": "input", "id": shell.ID, "d": "echo " + marker + "\n"}); err != nil {
+	// ENTER IS A CARRIAGE RETURN ON A PTY, and that is what every other caller in this
+	// codebase sends: `shell_key enter` writes '\r' (internal/session/keys.go), and the
+	// MCP `run` directive is "type the text, then press Enter". This test wrote '\n'
+	// instead, which usually happens to work because the line discipline translates
+	// input, and occasionally does not — the failure was an echoed command line that the
+	// shell never executed, so the marker never appeared and the deadline expired
+	// looking at a terminal frame that contained exactly the text it had typed.
+	//
+	// No settle delay either: watch_add and input arrive on the SAME connection and are
+	// handled by one goroutine in order, and addWatch registers the reader synchronously
+	// before returning — so the subscription provably exists before any input is
+	// processed. The sleep only made the test slower and hid whether that was true.
+	if err := conn.WriteJSON(map[string]any{"type": "input", "id": shell.ID, "d": "echo " + marker + "\r"}); err != nil {
 		t.Fatalf("input: %v", err)
 	}
 
