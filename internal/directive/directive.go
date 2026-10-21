@@ -207,6 +207,16 @@ type Statement struct {
 	// opaque token before parsing, so a `&&` inside args[0] can never be mistaken
 	// for an operator here.
 	Cond string
+
+	// Background is true when this statement was terminated with `&`, which makes it
+	// PARALLEL: it runs concurrently with the statements around it instead of waiting
+	// for them, and the reply still lists every slot in the order the caller wrote.
+	//
+	// The distinction matters because the shell parser reports `a & b` as two
+	// statements and this flag is the only record that the first one was meant to
+	// run in the background. Without it the line executed SEQUENTIALLY while reading
+	// as parallel — a silent semantic reversal, which is worse than refusing it.
+	Background bool
 }
 
 // Flag returns a flag's value and whether it was given one.
@@ -319,9 +329,9 @@ var ops = []Op{
 	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat"}, TargetKind: TargetChannel,
 		Usage: "key <handle> <key> [--repeat N]"},
 	{Name: "read", Core: true, Kind: KindFlags, Target: true, TargetKind: TargetChannel,
-		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw"},
+		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw", "grep", "grep-limit"},
 		Valueless: []string{"raw"},
-		Usage:     "read <handle> [--cursor N|--from-line N|--tail N] [--stream o|e] [--raw]",
+		Usage:     "read <handle> [--cursor N|--from-line N|--tail N] [--stream o|e] [--grep RE] [--grep-limit N] [--raw]",
 		Detail:    readDetail},
 	{Name: "pipe", Core: true, Kind: KindPayload, Target: true,
 		Flags: []string{"argv", "name", "on-exit", "rows", "cols"}, RestValue: []string{"argv"},
@@ -355,8 +365,6 @@ var ops = []Op{
 	{Name: "notify", Kind: KindPayload, Flags: []string{"level", "sticky", "on", "title", "for"}, Valueless: []string{"sticky"},
 		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] [--title T] [--for SECONDS] <body>",
 		Detail: notifyDetail},
-	{Name: "detect", Kind: KindFlags,
-		Usage: "detect"},
 	{Name: "fwd", Kind: KindFlags, Target: true, TargetOptional: true,
 		Flags:  []string{"action", "session", "bind-host", "remote-host", "remote-port", "local-port", "local-host", "forward-id"},
 		Usage:  "fwd <session> --action local|remote|dynamic|list|close …",
@@ -452,7 +460,23 @@ READ IS A CURSOR. A plain read CONSUMES what it returns: the next plain read of
 an unchanged channel is legitimately empty, which is not data loss and not an
 error. To see the whole log again, ask for it by position (--from-line 1); to
 peek without consuming, use bytes_limit 0 on the call (it returns the handle and
-the range it would have read).`
+the range it would have read).
+
+--grep RE FILTERS BEFORE THE WINDOW, AND THE DIFFERENCE MATTERS. The pattern runs
+over this daemon's own transcript — the command already finished, its bytes are
+here, and shipping 2000 lines so you can find three of them is the most expensive
+thing a read can do. Each returned line keeps its REAL line number ("42: ..."),
+so context is one more call away (from-line 37 tail 10). grep-limit caps the
+matches (default 200) and the reply reports the true total when it truncates.
+--tail and lines_limit then apply to the MATCHES, so tail 5 means the last
+five matching lines.
+
+This is a directive and not a tool parameter on purpose: lines_limit answers "how
+much reply will I get" while a pattern answers "which lines do I want". Folded
+together, lines_limit would mean either "the first N raw lines, then filter" —
+which finds nothing when the matches come later and reads like "no errors" — or
+"scan everything, then take N matches", which hides a full scan behind something
+that looks like a size cap.`
 
 // runDetail states what `run` can and cannot know, because the difference is
 // invisible in the reply and the wrong guess sends the caller chasing a silent
@@ -1079,6 +1103,7 @@ func ParseWithSubst(src string, sub Subst) (*File, error) {
 			} else {
 				filled.Cond = part.cond
 			}
+			filled.Background = part.stmt.Background
 			out.Statements = append(out.Statements, filled)
 		}
 	}

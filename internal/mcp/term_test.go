@@ -960,9 +960,9 @@ func TestTermGeneratedRepliesHonorSpaceWindows(t *testing.T) {
 	if body := strings.SplitN(one, "\n\n", 2); len(body) != 2 || strings.Count(body[1], "\n") > 1 {
 		t.Fatalf("lines_limit=1 body = %q", one)
 	}
-	detect := termText(t, s, map[string]any{"cmd": "detect", "bytes_limit": float64(0)})
-	if !strings.HasPrefix(detect, "TERM/1 204 No Content") {
-		t.Fatalf("bytes_limit=0 on detect = %q", strings.SplitN(detect, "\n", 2)[0])
+	noBytes := termText(t, s, map[string]any{"cmd": "ps", "bytes_limit": float64(0)})
+	if !strings.HasPrefix(noBytes, "TERM/1 204 No Content") {
+		t.Fatalf("bytes_limit=0 on ps = %q", strings.SplitN(noBytes, "\n", 2)[0])
 	}
 	res := termCall(t, s, map[string]any{"cmd": "help", "on_bytes_overflow": "bogus"})
 	if !res.IsError || !strings.Contains(toolResultText(res), "on_bytes_overflow") {

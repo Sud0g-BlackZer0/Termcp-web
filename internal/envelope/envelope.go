@@ -67,6 +67,8 @@ var headerOrder = []string{
 	"Content-Range",
 	"Folded",
 	"Still-Running",
+	"Waited",
+	"Sampled",
 	"Executed",
 	"Dry-Run",
 	"Pending-ID",

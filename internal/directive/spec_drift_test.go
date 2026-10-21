@@ -30,9 +30,9 @@ func TestNoSpecDriftBetweenDirectivesAndSkill(t *testing.T) {
 		declared[op.Name] = true
 	}
 
-	// 24 directives right now (watch was removed).
-	if len(declared) != 24 {
-		t.Errorf("expected 24 directives, got %d: %v", len(declared), declared)
+	// 23 directives right now (watch and detect were removed).
+	if len(declared) != 23 {
+		t.Errorf("expected 23 directives, got %d: %v", len(declared), declared)
 	}
 
 	// Read SKILL.md if present (it lives in a sibling repo in dev).

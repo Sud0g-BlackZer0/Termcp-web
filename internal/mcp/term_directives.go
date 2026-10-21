@@ -86,8 +86,6 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		return []envelope.Slot{s.directiveReader(ctx, stmt, win)}
 	case "notify":
 		return []envelope.Slot{s.directiveNotify(ctx, stmt, win)}
-	case "detect":
-		return []envelope.Slot{s.directiveDetect(ctx, stmt, win)}
 	case "fwd":
 		return []envelope.Slot{s.directiveForward(ctx, stmt, win)}
 	case "file":
@@ -382,6 +380,12 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 			Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.UnsatisfiedRange(start)},
 		}
 	}
+	// --grep takes its own path, because it changes what the window counts.
+	// `lines_limit` normally bounds raw lines; with a pattern it bounds MATCHES,
+	// and the filter therefore has to run before the window rather than after it.
+	if _, ok := stmt.Flag("grep"); ok {
+		return s.readGrep(ctx, stmt, win)
+	}
 	args := argsOf("shell_id", stmt.Target)
 	if slot, bad := numericFlags(args, stmt,
 		[2]string{"cursor", "offset"},
@@ -511,6 +515,7 @@ func (s *Server) awaitExit(ctx context.Context, handle string, win termArgs) {
 // readSlot performs one read and renders it. This is where the three axes are
 // applied for every directive that returns bytes.
 func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win termArgs, args map[string]any) envelope.Slot {
+	started := time.Now()
 	args["max_bytes"] = float64(win.BytesLimit)
 	args["max_lines"] = float64(win.LinesLimit)
 	// A pipe channel that has not exited yet must not block for the whole timeout
@@ -526,7 +531,7 @@ func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win ter
 	if !ok {
 		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
 	}
-	return s.windowSlot(stmt, win, doc)
+	return s.windowSlot(stmt, win, doc, time.Since(started))
 }
 
 // windowSlot renders a shell_output document as an envelope slot.
@@ -534,7 +539,7 @@ func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win ter
 // Every byte fact comes from the handler's own reply: the offsets, the total, the
 // session status and the channel's exit code. The envelope adds the HTTP shape and
 // nothing else — no second read, no second source of truth.
-func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[string]any) envelope.Slot {
+func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[string]any, waited time.Duration) envelope.Slot {
 	start := int64(getFloatAny(doc, "start_offset", 0))
 	end := int64(getFloatAny(doc, "end_offset", 0))
 	total := int64(getFloatAny(doc, "total_bytes", 0))
@@ -584,6 +589,26 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 		code = 206
 	case !hasBytes:
 		code = 204
+	}
+
+	// WAITED ANSWERS "DID YOU ACTUALLY WAIT OR DID YOU SNAP-FAIL?" (桩 5).
+	//
+	// A 204 that arrives in 0.03ms is a failure (the socket died, the reader broke,
+	// the window never ran); a 204 that arrives in 2000ms is legitimate silence.
+	// Both used to look identical. The header states the actual time elapsed so a
+	// caller can distinguish "waited and nothing arrived" from "dropped out
+	// instantly", which is the one difference that decides whether to retry.
+	//
+	// SAMPLED NAMES THE PTY CONTRACT (误读 3).
+	//
+	// An empty read of a pty is a sample of a live shell that outlives every command;
+	// it does not mean the command exited and produced nothing. Only on 204: on a 200
+	// the output speaks for itself, and on pipe the exit state is observable.
+	if waited > 0 {
+		headers["Waited"] = fmt.Sprintf("%dms", waited.Milliseconds())
+	}
+	if code == 204 && s.ptyRunning(stmt.Target) {
+		headers["Sampled"] = "true"
 	}
 	if total >= 0 && (code == 206 || code == 204) {
 		if code == 204 {

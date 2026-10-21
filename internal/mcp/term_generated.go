@@ -418,16 +418,6 @@ func (s *Server) directiveNotify(ctx context.Context, stmt directive.Statement, 
 	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
-// directiveDetect probes the termcp host for a shell.
-func (s *Server) directiveDetect(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	res, fail := s.callTool(ctx, "shell_detect", map[string]any{})
-	if fail != nil {
-		return s.slotFromFailure(ctx, stmt, fail)
-	}
-	doc, _ := toolResultMap(res)
-	return generatedSlot(stmt, win, compactDocument(doc))
-}
-
 // directiveForward maps `fwd` onto the forward tool.
 func (s *Server) directiveForward(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	args := map[string]any{}

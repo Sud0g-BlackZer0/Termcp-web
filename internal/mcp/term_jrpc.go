@@ -94,24 +94,96 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, raw
 		resolved, err := devtoolsSocket(ctx, rawURL)
 		if err != nil {
 			return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConnectionFailed},
-				Body: err.Error()}
+				Body: "discovery: cannot find DevTools websocket endpoint at " + rawURL + ": " + err.Error()}
 		}
 		rawURL = resolved
 	}
 	ch, err := jrpc.Open(ctx, rawURL)
 	if err != nil {
 		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConnectionFailed},
-			Body: err.Error()}
+			Body: "transport: " + err.Error()}
 	}
 	handle := fmt.Sprintf("%s%d", op, jrpcHandleSeq.Add(1))
+	h := &jrpcHandle{ch: ch, kind: op}
 	jrpcChannelsMu.Lock()
-	jrpcChannels[handle] = &jrpcHandle{ch: ch, kind: op}
+	jrpcChannels[handle] = h
 	jrpcChannelsMu.Unlock()
+
+	// "OPEN" REPORTS WHAT IT FOUND, NOT JUST THAT IT OPENED.
+	//
+	// A caller that does not know the MCP specification had no way forward from the
+	// old reply: the next step is an `initialize` handshake, then `tools/list`, then
+	// a call addressed by tool name, and none of that is guessable. The layer exists
+	// precisely to carry that state machine, so it should hand back the state machine's
+	// result rather than a receipt.
+	//
+	// This is also the answer to "is the self-describing layer working?" — a caller
+	// that has never read the spec should be able to make the next call correctly from
+	// this reply alone.
+	body := fmt.Sprintf("%s %s (%s, no shell channel consumed)\n", handle, rawURL, ch.Transport())
+	if op == "mcp" {
+		if discover, ok := s.jrpcDiscoverMCP(ctx, h, handle); ok {
+			body += discover
+		} else {
+			// The handshake failed. Say so HERE rather than letting the first real
+			// call discover it: a connection that opens and cannot negotiate is a
+			// fact about the open, and reporting it later moves the blame onto
+			// whatever call happened to be second.
+			body += "\nprotocol: the connection opened but the MCP handshake failed, so tool calls cannot work.\n" +
+				"The transport is fine and the URL is right — the problem is at the protocol layer (version, or a\n" +
+				"peer that does not speak MCP). Run `mcp tools " + handle + "` for the peer's own words.\n"
+		}
+	}
 	return envelope.Slot{
 		Code:    200,
 		Headers: map[string]string{"Path": stmt.Path, "Handle": handle},
-		Body:    fmt.Sprintf("%s %s (%s, no shell channel consumed)\n", handle, rawURL, ch.Transport()),
+		Body:    body,
 	}
+}
+
+// jrpcDiscoverMCP runs the handshake and lists the peer's tools, so `mcp open`
+// can report what the connection is actually for.
+//
+// Best effort by design: a peer that refuses `tools/list` still opened a usable
+// channel, and failing the whole open over a discovery query would turn a partial
+// success into a total failure. The boolean says whether the handshake itself
+// worked, which IS a fact about the open.
+func (s *Server) jrpcDiscoverMCP(ctx context.Context, h *jrpcHandle, handle string) (string, bool) {
+	if err := s.jrpcReady(ctx, h); err != nil {
+		return "", false
+	}
+	raw, err := h.ch.Call(ctx, map[string]any{"jsonrpc": "2.0", "method": "tools/list"})
+	if err != nil {
+		return "\ntools: the peer negotiated but refused tools/list (" + err.Error() + ")\n", true
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return "\ntools: the peer's tools/list reply was not JSON (" + err.Error() + ")\n", true
+	}
+	result, _ := doc["result"].(map[string]any)
+	items, _ := result["tools"].([]any)
+	if len(items) == 0 {
+		return "\ntools: none (the peer advertises no tools)\n", true
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\ntools (%d) — call one with `mcp call %s '{\"method\":\"tools/call\",\"params\":{\"name\":\"...\",\"arguments\":{}}}'`:\n", len(items), handle))
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := getString(item, "name", "?")
+		desc := strings.ReplaceAll(getString(item, "description", ""), "\n", " ")
+		if len(desc) > 80 {
+			desc = desc[:80] + "…"
+		}
+		b.WriteString("  " + name)
+		if desc != "" {
+			b.WriteString(" — " + desc)
+		}
+		b.WriteString("\n")
+	}
+	return b.String(), true
 }
 
 // refuseDoor applies a session's capability whitelist to one of the frame-channel
