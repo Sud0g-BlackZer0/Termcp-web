@@ -40,7 +40,7 @@ func withLogging(name string, h toolHandler, s *Server) toolHandler {
 		baseAttrs := []any{"tool", name}
 		baseAttrs = appendSafeArgs(baseAttrs, request)
 
-		slog.DebugContext(ctx, "tool call start", baseAttrs...)
+		slog.InfoContext(ctx, "tool call start", baseAttrs...)
 		result, err := h(ctx, request)
 		durMs := time.Since(start).Milliseconds()
 
@@ -71,7 +71,13 @@ func withLogging(name string, h toolHandler, s *Server) toolHandler {
 					exitAttrs = append(exitAttrs, "output_preview", truncate(preview, 200))
 				}
 			}
-			slog.DebugContext(ctx, "tool call end", exitAttrs...)
+			// INFO, not Debug. A successful call is the unit a support report is
+			// written in ("this call returned X"), and at Debug level the ones that
+			// matter are absent by default — a report of a broken reply arrived with a
+			// log whose last line was an unrelated 400, because everything that had
+			// worked was invisible. One line per call is the cost; being able to match
+			// a complaint to a command is what it buys.
+			slog.InfoContext(ctx, "tool call end", exitAttrs...)
 		}
 		return result, err
 	}
@@ -95,6 +101,16 @@ func appendSafeArgs(attrs []any, request mcpgo.CallToolRequest) []any {
 	args := request.GetArguments()
 	if args == nil {
 		return attrs
+	}
+	// CMD FIRST, because it is the only attribute that says what was ASKED.
+	//
+	// The log carried the resolved ids and the window parameters but never the
+	// command line, so a support report of "this call returned [object Object]" could
+	// not be matched to anything: the log showed a session and a handle and no way to
+	// tell which directive produced them. Truncated like every other value — a
+	// payload can be a whole heredoc, and the log is not a transcript.
+	if v, ok := args["cmd"].(string); ok && v != "" {
+		attrs = append(attrs, "cmd", truncate(v, 200))
 	}
 	if v, ok := args["session_id"].(string); ok && v != "" {
 		attrs = append(attrs, "session_id", v)

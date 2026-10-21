@@ -421,9 +421,23 @@ MFA, passphrase, confirmation, approval, a choice, interactive input — and whe
 a long task ends or fails. Blocking asks: --level warn|error --sticky. Once you
 have asked, WAIT: never poll, guess or fake an answer. A reply with no open page
 was delivered to nobody, so say the ask in your own reply too. Defaults: --level
-info; the toast lasts 10 seconds unless --sticky. --title sets the heading (the
-body is still the positional argument); --for N is the toast's lifetime in
-seconds, which --sticky overrides to "until dismissed".`
+info; the toast lasts 10 seconds unless --sticky.
+
+PUT THE ACTION IN --title. The OS notification layer collapses long text: only the
+first line or so is shown, and several notifications from the same app fold into
+"one more". A body that opens with a paragraph of context therefore arrives as a
+truncated sentence. The title is what survives, so make it the instruction —
+"Need sudo password for zfs destroy" — and let the body carry the detail.
+
+DELIVERED IS NOT ACKNOWLEDGED. The reply's delivered count is how many open pages
+the toast reached. It does not mean a human looked: Do Not Disturb, a collapsed
+notification group and a locked screen all leave delivered at 1 while nobody has
+read anything. There is no acknowledgement to wait on. If the answer matters,
+also say it in your own reply, which reaches the human wherever they actually are.
+
+--for N is the toast's lifetime in seconds; --sticky overrides it to "until
+dismissed". A sticky toast is the right choice for a blocking ask: it stays on the
+page until it is dealt with, rather than timing out while the human is away.`
 
 // readDetail states the defaults because "read" without a selector is the
 // common call: whether that means "new bytes" or "everything" decides what the

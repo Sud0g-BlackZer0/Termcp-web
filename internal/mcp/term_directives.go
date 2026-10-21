@@ -459,6 +459,18 @@ func (s *Server) awaitWindow(ctx context.Context, win termArgs) {
 	}
 }
 
+// pipeRunning reports whether the handle is a live PIPE channel — the only kind
+// whose command has an observable end, and therefore the only kind that can be
+// "still running" in a way worth reporting.
+func (s *Server) pipeRunning(handle string) bool {
+	cs, bad := s.requireShell(handle)
+	if bad != nil {
+		return false
+	}
+	info := cs.Info()
+	return info.Mode == api.SessionMode("pipe") && info.Status == api.SessionRunning
+}
+
 // completionWait reports whether this channel's completion is observable, which
 // is true exactly for a pipe channel that has not exited yet.
 func (s *Server) completionWait(handle string) bool {
@@ -576,6 +588,16 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 	// say, which is exactly what makes it noise — and a live channel has no exit
 	// code to report, because a shell never tells the pipe outside it that a
 	// command inside it finished.
+	// "DID IT FINISH?" IS THE QUESTION A LONG CALL HAS, AND ABSENCE WAS THE ANSWER.
+	//
+	// A window that expires while the program is still running used to produce a
+	// reply identical to one where the program finished immediately and printed
+	// nothing: 204, no status, no hint. A caller polling for a 180-second nvme
+	// self-test had no way to tell "still working" from "done, silent" and kept
+	// re-reading a channel that was already finished.
+	//
+	// still_running is that fact, stated once. It is not an error — the command was
+	// accepted and is running — so the code stays whatever the window said.
 	if status, exit, closed := s.channelExitState(stmt.Target); closed {
 		headers["Status"] = status
 		if exit != nil {
@@ -600,6 +622,17 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 				}
 			}
 		}
+	} else if (stmt.Op == "run" || stmt.Op == "type") && s.pipeRunning(stmt.Target) {
+		// PIPE ONLY, because only a pipe has a completion signal to miss.
+		//
+		// A pipe channel's run waits for its process to exit, so returning while it
+		// is still running means the window expired mid-command: the caller's 180
+		// second job is still going and the bytes so far are all there is. A pty
+		// channel's run always waits its window and the shell outlives every command,
+		// so the same flag would be permanently true and say nothing.
+		//
+		// NOT an Error-Code: nothing failed. The command was accepted and is running.
+		headers["Still-Running"] = "true"
 	}
 	return envelope.Slot{Code: code, Headers: headers, Body: body}
 }
