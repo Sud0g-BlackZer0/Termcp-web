@@ -531,19 +531,27 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 	body := getString(doc, "output", "")
 	headers := map[string]string{"Path": stmt.Path}
 
-	// The three axes, applied to what came back. The handler already truncated to
-	// bytes_limit/lines_limit, so a short body means the window ended; a body that
-	// reaches a limit while more exists is a partial read.
+	// THE HANDLER ALREADY APPLIED THE LIMITS, so this pass must decide from
+	// has_more, not from the body's size.
+	//
+	// It used to test `len(body) > win.BytesLimit` and `lines > win.LinesLimit`,
+	// which the handler had just made false: it returns at most bytes_limit bytes and
+	// lines_limit lines, so the comparison never held and the fold policy never ran.
+	// The observable result was that `on_lines_overflow: fold` and
+	// `on_bytes_overflow: fold` returned the truncated window anyway — the parameter
+	// was accepted, validated, and then ignored.
+	//
+	// has_more is the fact the handler DOES report: "the window ended before the
+	// stream did". That is exactly the condition the fold policy is about.
+	more := boolAny(doc, "has_more")
 	truncated := false
-	if win.BytesLimit > 0 && len(body) > win.BytesLimit {
-		body = foldOrTruncate(body, win.BytesLimit, win.OnBytesOverflow)
+	if more && win.BytesLimit > 0 && win.OnBytesOverflow == "fold" {
+		body = ""
 		truncated = true
 	}
-	if win.LinesLimit > 0 {
-		if lines := strings.Count(body, "\n"); lines > win.LinesLimit {
-			body = foldOrTruncateLines(body, win.LinesLimit, win.OnLinesOverflow)
-			truncated = true
-		}
+	if more && win.LinesLimit > 0 && win.OnLinesOverflow == "fold" {
+		body = ""
+		truncated = true
 	}
 
 	code := 200

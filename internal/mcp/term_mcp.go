@@ -43,6 +43,16 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 			if payload == "" {
 				return badRequest(stmt, "mcp "+sub+" needs a JSON-RPC frame")
 			}
+			// VALIDATE BEFORE WRITING, the same way the URL forms already do.
+			//
+			// A stdio peer reads one frame per line, so anything unparseable is either
+			// ignored or answered with a parse error — and the caller saw 202 "sent"
+			// either way, which says the frame landed when in fact it was never a frame.
+			// `cdp send 'not json'` already answered 400; the two used to disagree about
+			// what "sent" means.
+			if !json.Valid([]byte(payload)) {
+				return badRequest(stmt, "the frame is not JSON")
+			}
 			frame = payload
 		}
 		// One frame, one line: the peer reads line-delimited JSON-RPC.
