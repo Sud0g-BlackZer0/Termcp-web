@@ -104,6 +104,7 @@ func TestWatchAddActuallySubscribes(t *testing.T) {
 	// accumulate the payloads rather than requiring one frame to hold it all.
 	deadline := time.Now().Add(20 * time.Second)
 	var got strings.Builder
+	early := 0 // consecutive timeouts that arrived before their deadline
 	for time.Now().Before(deadline) {
 		started := time.Now()
 		_ = conn.SetReadDeadline(started.Add(readDeadline))
@@ -124,10 +125,21 @@ func TestWatchAddActuallySubscribes(t *testing.T) {
 			// was left open.
 			//
 			// A healthy idle connection waits the WHOLE deadline before reporting a
-			// timeout, so a timeout that arrives early is not "quiet" — it is broken.
+			// timeout, so a timeout that arrives early is not "quiet" — it is usually
+			// broken. But ONE early timeout is not proof: the deadline is armed per
+			// read, and the first read after the drain can surface a deadline left
+			// over from before it was reset (6.9µs on a loaded macOS runner, with the
+			// connection perfectly alive). Two in a row, each against a freshly armed
+			// deadline, cannot be a leftover — that is the cached failure.
 			if elapsed := time.Since(started); elapsed < readDeadline/2 {
-				t.Fatalf("the watch channel stopped answering (timeout after %v); got %q", elapsed, got.String())
+				early++
+				if early >= 2 {
+					t.Fatalf("the watch channel stopped answering (%d early timeouts, last after %v); got %q",
+						early, elapsed, got.String())
+				}
+				continue
 			}
+			early = 0
 			continue
 		}
 		if m["type"] != "terminal" {

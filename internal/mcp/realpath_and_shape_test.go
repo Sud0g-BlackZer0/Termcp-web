@@ -59,13 +59,43 @@ func TestInternalRealpathResolvesSymlink(t *testing.T) {
 	got := termText(t, s, map[string]any{
 		"cmd": "file " + sid + " --action fs --op realpath --remote-path " + link,
 	})
-	// Normalise path separators before checking: the SFTP server emits wire-shaped
-	// POSIX paths ("/C:/dir/target.txt" on Windows), while filepath.Join emits the
-	// platform shape ("C:\dir\target.txt"). Compare the normalized target basename
-	// and path rather than raw platform bytes.
-	want := filepath.ToSlash(target)
-	gotSlash := filepath.ToSlash(got)
-	if !strings.Contains(gotSlash, want) && !strings.Contains(gotSlash, "/"+want) {
-		t.Errorf("realpath of symlink must resolve to target %q, got:\n%s", target, got)
+	// COMPARE WHAT THE DIRECTIVE MEANS, NOT THE BYTES IT PRINTS.
+	//
+	// Two decodings stand between `filepath.Join` and the reply. The SFTP wire form
+	// is POSIX-shaped, so Windows paths come back as "/C:/dir/file"; and the OS may
+	// answer with a long path where t.TempDir() handed out an 8.3 short one
+	// ("RUNNER~1" -> "runneradmin"). Both are the same file, and neither says anything
+	// about whether the symlink was resolved -- which is the only claim here.
+	//
+	// So resolve the link locally the same way and compare FINAL PATHS. If the
+	// directive returned the link's own path (the bug), the two disagree. If it
+	// returned the target under a different spelling, they agree.
+	wantPath, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", link, err)
+	}
+	var gotPath string
+	for _, line := range strings.Split(got, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "canonical_path:") {
+			gotPath = strings.TrimSpace(strings.TrimPrefix(line, "canonical_path:"))
+			break
+		}
+	}
+	if gotPath == "" {
+		t.Fatalf("no canonical_path in reply:\n%s", got)
+	}
+	norm := func(p string) string {
+		p = filepath.FromSlash(strings.TrimPrefix(p, "/"))
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		return filepath.ToSlash(p)
+	}
+	if norm(gotPath) != norm(wantPath) {
+		t.Errorf("realpath must resolve the symlink to %q, got %q:\n%s", wantPath, gotPath, got)
 	}
 }

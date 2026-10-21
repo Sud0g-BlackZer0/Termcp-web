@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -36,19 +37,28 @@ func TestRecvWaitsForTheFrameInsteadOfSamplingOnce(t *testing.T) {
 // cap on what one read considers, not a statement about how long a frame may be.
 func TestRecvDeliversAFrameLargerThanTheReadWindow(t *testing.T) {
 	s := newTestServer(t)
-	payload := strings.Repeat("x", 10000)
-	h := openPipe(t, s, `sh -c 'printf "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"big\":\"`+payload+`\"}}\n"'`)
 
-	// Wait for the writer to finish before reading, so the frame is complete in the
-	// buffer. Generating and piping 10 KB of JSON through sh takes longer than the
-	// recv retry budget on a loaded CI runner (and longer again on Windows inside a
-	// VM), and the read then samples mid-frame: the failure is `bytes 0-72/73`, a
-	// partial first chunk, not a window that is too small.
+	// THE FRAME IS BUILT INSIDE sh, AND IT IS SMALL ENOUGH TO FIT IN AN ARGV.
+	//
+	// Two Windows limits decide the shape of this test. A command line there is short,
+	// so handing `sh -c` a 10 KB literal truncates it: the reply came back as 73 bytes
+	// (the JSON prologue plus 31 x's) and read as "the recv window is too small" when
+	// the frame had never been written. And `yes`/`head`/`tr` are not guaranteed in
+	// every sh, so the payload is built by a loop the shell itself understands.
+	//
+	// 4000 characters is what the test needs: it exceeds any single sampling read while
+	// staying well inside an argv on all three platforms.
+	const n = 4000
+	h := openPipe(t, s, `sh -c 'i=0; printf "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"big\":\""; `+
+		`while [ $i -lt `+strconv.Itoa(n)+` ]; do printf x; i=$((i+1)); done; printf "\"}}\n"'`)
+
+	// Wait for the writer to finish so the frame is complete in the buffer.
 	waitForShellToExit(t, s, shellIDFromHandle(t, s, h))
 
 	got := termText(t, s, map[string]any{"cmd": "mcp recv " + h})
+	payload := strings.Repeat("x", n)
 	if !strings.Contains(got, payload) {
-		t.Errorf("a 10 KB frame was not delivered (window should be 1 MiB):\n%.300s", got)
+		t.Errorf("a %d byte frame was not delivered (window should be 1 MiB):\n%.300s", n, got)
 	}
 	termText(t, s, map[string]any{"cmd": "close " + h})
 }
