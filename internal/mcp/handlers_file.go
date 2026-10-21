@@ -427,7 +427,22 @@ func (s *Server) handleFileFsOp(ctx context.Context, request mcpgo.CallToolReque
 		// record, and sftpClient already proved the session exists and is running.
 		if sess, serr := s.requireRunningSession(sessionID); serr == nil && canonical != "" &&
 			sess.Info().SSHEndpoint == "internal" {
-			if resolved, rerr := filepath.EvalSymlinks(canonical); rerr == nil {
+			// pkg/sftp's server normalises a Windows path to "/C:/dir/file", because
+			// the SFTP wire form is POSIX-shaped. EvalSymlinks cannot read that: the
+			// leading slash makes it a rooted path on the current volume, so the call
+			// fails and the link is reported unresolved -- the bug this block exists
+			// to fix, surviving on one platform. Strip the slash before asking the OS,
+			// and put the wire shape back afterwards so the reply keeps one format.
+			lookup := canonical
+			prefixed := false
+			if isWindowsDrivePrefixedPath(lookup) {
+				lookup = lookup[1:]
+				prefixed = true
+			}
+			if resolved, rerr := filepath.EvalSymlinks(lookup); rerr == nil {
+				if prefixed {
+					resolved = "/" + filepath.ToSlash(resolved)
+				}
 				canonical = resolved
 			}
 		}
@@ -492,4 +507,20 @@ func fileErr(err error) *mcpgo.CallToolResult {
 		return toolError(CodeInvalidArgument, "%s", err.Error())
 	}
 	return toolError(CodeOperationFailed, "%s", err.Error())
+}
+
+// isWindowsDrivePrefixedPath reports whether p looks like "/C:/..." or "/C:\...",
+// the POSIX-shaped wire form pkg/sftp emits for a Windows absolute path.
+func isWindowsDrivePrefixedPath(p string) bool {
+	if len(p) < 4 || p[0] != '/' {
+		return false
+	}
+	c := p[1]
+	if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+		return false
+	}
+	if p[2] != ':' {
+		return false
+	}
+	return p[3] == '/' || p[3] == '\\'
 }

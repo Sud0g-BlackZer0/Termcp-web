@@ -51,6 +51,8 @@
 
 - **`file` 的三个破坏性行为与两个误报**。`truncate` 缺 `--size` 时按 0 执行，静默清空文件并返回 200 —— 现在必须显式给出，`--size 0` 仍是清空的写法。读目录返回 500 并带出 `sftp: "...is a directory"` 的协议原文，现在在 `Stat` 之后立即拒绝并建议改用 `stat`。`mode=file` 曾输出 `data: ""`，看起来像被截断的正文而不是「没有内联正文」，现在该字段缺席；`mode=text` 曾把每个非 ASCII 字符转义成 `\xe4\xb8\xad`，现在按 rune 解码，只转义非法字节。
 
+- **内部 profile 上的 `realpath` 在 Windows 上解不开符号链接**。SFTP 的线上形式是 POSIX 形状，`pkg/sftp` 于是把 `C:\dir\file` 规范化成 `/C:/dir/file`；`filepath.EvalSymlinks` 读不了这个形状——前导斜杠让它成为当前卷上的一个根路径，调用失败，链接被原样报回。也就是说这个指令在 Windows 上一直是它本该修掉的那个 bug 本身。现在解析前去掉盘符前缀的斜杠，解析后把线上形状放回去，回复格式在三个平台上一致。
+
 - **`profile` 和 `ext` 的位置参数形式从来没成功过**。两者的第一个词可以是 action，所以名字随写法在 `Args[0]` / `Args[1]` 之间移动，而代码只认后一种：`profile <name> --action edit`、`ext <name> --action update`、`ext <name> --action retry` 一律回 `name is required`。现在 action 词被消费掉，两种写法的名字都落在同一处。同一处还修好了 `profile --action copy`（指令层发 `--source`、处理器读 `source_name`，两个名字从未对齐，这个子命令一次都没成功过）和删除不存在的 profile 返回 200 的问题。
 
 - **`on_bytes_overflow` / `on_lines_overflow` 的 `fold` 从未生效**。判据是 `len(body) > limit`，而处理器此前已按同一限额截断过，这个比较为假是构造出来的 —— `fold` 与 `truncate` 行为完全相同。现在按处理器报告的「窗口在流结束前就用完」判定。
