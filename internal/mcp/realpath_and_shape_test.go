@@ -59,7 +59,13 @@ func TestInternalRealpathResolvesSymlink(t *testing.T) {
 	got := termText(t, s, map[string]any{
 		"cmd": "file " + sid + " --action fs --op realpath --remote-path " + link,
 	})
-	if !strings.Contains(got, target) {
+	// Normalise path separators before checking: the SFTP server emits wire-shaped
+	// POSIX paths ("/C:/dir/target.txt" on Windows), while filepath.Join emits the
+	// platform shape ("C:\dir\target.txt"). Compare the normalized target basename
+	// and path rather than raw platform bytes.
+	want := filepath.ToSlash(target)
+	gotSlash := filepath.ToSlash(got)
+	if !strings.Contains(gotSlash, want) && !strings.Contains(gotSlash, "/"+want) {
 		t.Errorf("realpath of symlink must resolve to target %q, got:\n%s", target, got)
 	}
 }

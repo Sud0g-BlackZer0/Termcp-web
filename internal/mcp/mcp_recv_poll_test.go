@@ -38,6 +38,14 @@ func TestRecvDeliversAFrameLargerThanTheReadWindow(t *testing.T) {
 	s := newTestServer(t)
 	payload := strings.Repeat("x", 10000)
 	h := openPipe(t, s, `sh -c 'printf "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"big\":\"`+payload+`\"}}\n"'`)
+
+	// Wait for the writer to finish before reading, so the frame is complete in the
+	// buffer. Generating and piping 10 KB of JSON through sh takes longer than the
+	// recv retry budget on a loaded CI runner (and longer again on Windows inside a
+	// VM), and the read then samples mid-frame: the failure is `bytes 0-72/73`, a
+	// partial first chunk, not a window that is too small.
+	waitForShellToExit(t, s, shellIDFromHandle(t, s, h))
+
 	got := termText(t, s, map[string]any{"cmd": "mcp recv " + h})
 	if !strings.Contains(got, payload) {
 		t.Errorf("a 10 KB frame was not delivered (window should be 1 MiB):\n%.300s", got)
