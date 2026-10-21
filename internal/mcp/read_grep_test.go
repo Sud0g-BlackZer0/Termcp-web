@@ -108,6 +108,11 @@ func TestReadGrepDoesNotConsumeTheTranscript(t *testing.T) {
 
 	script := writeScript(t, "printf 'AAA\\nBBB\\nCCC\\n'")
 	termText(t, s, map[string]any{"cmd": "run " + h + " sh '" + script + "'", "timeout": 2})
+	// WAIT FOR THE OUTPUT TO LAND, the same way the other grep tests do. Reading
+	// immediately raced the shell: under -race on a loaded runner the first grep could
+	// arrive before printf had run, and every assertion after it was describing a
+	// transcript that did not exist yet.
+	waitForGrepContent(t, s, h, "CCC")
 
 	// Two searches, different patterns, both must succeed on the same transcript.
 	first := termText(t, s, map[string]any{"cmd": "read " + h + " --grep 'AAA'"})
