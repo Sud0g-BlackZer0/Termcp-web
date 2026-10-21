@@ -21,9 +21,11 @@ func TestPayloadIsSlicedNotReparsed(t *testing.T) {
 		want string
 	}{
 		{
-			name: "a pipeline with quotes and && survives byte for byte",
-			cmd:  `run a1f3:1 ls -la | grep -c '\.go$' && echo "rc=$?"`,
-			want: `ls -la | grep -c '\.go$' && echo "rc=$?"`,
+			// A pipeline is still ONE shell line: `|` runs its parts concurrently,
+			// so there is no left-hand success to gate on and nothing to split.
+			name: "a pipeline with quotes survives byte for byte",
+			cmd:  `run a1f3:1 ls -la | grep -c '\.go$'`,
+			want: `ls -la | grep -c '\.go$'`,
 		},
 		{
 			name: "adjacent quoted parts are not merged",
@@ -376,36 +378,28 @@ func TestSplitArgvRefusesACommandLine(t *testing.T) {
 	}
 }
 
-// TestTargetOptionalFlagForms pins `watch --off <rule>` and `watch --list`:
-// the documented flag-only forms have no target, so the positional rule must
-// not read `--off` as one.
+// TestTargetOptionalFlagForms pins that a directive declared TargetOptional does
+// not read a leading flag as its positional target. `fwd` is the carrier: with a
+// target it opens a forward, without one it lists them.
 func TestTargetOptionalFlagForms(t *testing.T) {
-	f, err := Parse(`watch --off notif_1`)
+	f, err := Parse(`fwd --action list`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st := f.Statements[0]
 	if st.Target != "" {
-		t.Errorf("target = %q, want empty for --off", st.Target)
+		t.Errorf("target = %q, want empty for a flag-only form", st.Target)
 	}
-	if got := flagOf(t, st, "off"); got != "notif_1" {
-		t.Errorf("off = %q", got)
+	if got := flagOf(t, st, "action"); got != "list" {
+		t.Errorf("action = %q", got)
 	}
 
-	f, err = Parse(`watch --list`)
+	f, err = Parse(`fwd a1f3 --action local --local-port 8080`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !boolFlagSet(f.Statements[0], "list") {
-		t.Error("--list must be present")
-	}
-
-	f, err = Parse(`watch a1f3:1 --event output`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := flagOf(t, f.Statements[0], "event"); f.Statements[0].Target != "a1f3:1" || got != "output" {
-		t.Errorf("target/event = %q/%q", f.Statements[0].Target, got)
+	if got := flagOf(t, f.Statements[0], "action"); f.Statements[0].Target != "a1f3" || got != "local" {
+		t.Errorf("target/action = %q/%q", f.Statements[0].Target, got)
 	}
 }
 
@@ -484,15 +478,29 @@ func TestStatementsSplitOnSemicolonNotOnAnd(t *testing.T) {
 		t.Errorf("targets = %q, %q", f.Statements[0].Target, f.Statements[1].Target)
 	}
 
-	f, err = Parse(`run a1f3:1 make && echo ok`)
+	// `&&` IS A DIRECTIVE OPERATOR NOW, not part of a shell line.
+	//
+	// It used to stay inside the payload, so the shell short-circuited it and
+	// termcp had no opinion. That made `run h:1 make && notify done` mean "hand the
+	// shell the text 'make && notify done'" — never what a caller writing a chain
+	// of DIRECTIVES meant. Shell text now travels through $1/$FOO, the channels
+	// built for it, and everything written directly in cmd is directive syntax.
+	f, err = Parse(`run a1f3:1 make && notify done`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Statements) != 1 {
-		t.Fatalf("`&&` split into %d statements; it is one command line", len(f.Statements))
+	if len(f.Statements) != 2 {
+		t.Fatalf("`&&` did not split into two statements: got %d", len(f.Statements))
 	}
-	if got := f.Statements[0].Payload; got != "make && echo ok" {
-		t.Errorf("payload = %q", got)
+	if got := f.Statements[0].Payload; got != "make" {
+		t.Errorf("first payload = %q, want the left side only", got)
+	}
+	if f.Statements[0].Cond != "" || f.Statements[1].Cond != "&&" {
+		t.Errorf("conds = %q, %q; the operator belongs to the statement it guards",
+			f.Statements[0].Cond, f.Statements[1].Cond)
+	}
+	if f.Statements[1].Op != "notify" {
+		t.Errorf("second op = %q, want notify", f.Statements[1].Op)
 	}
 }
 

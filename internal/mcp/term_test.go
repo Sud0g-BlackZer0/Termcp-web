@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -275,7 +276,8 @@ func TestTermPtyRunWaitsTheWindow(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
 	text := termText(t, s, map[string]any{
-		"cmd":     "run " + h + " sleep 1 && echo LATE",
+		"cmd":     "run " + h + " $1",
+		"args":    []any{"sleep 1 && echo LATE"},
 		"timeout": float64(3),
 	})
 	if !strings.Contains(text, "LATE") {
@@ -355,9 +357,15 @@ func TestTermExitCodeIsAFunctionOfTheChannel(t *testing.T) {
 	}
 }
 
-// A read of a closed channel whose process failed is a 500 that still carries the
-// bytes and the range: dropping the output would leave the caller knowing neither
-// what happened nor where to continue.
+// A read of a closed channel whose process failed is a 200 that still carries the
+// bytes, the range and the exit code.
+//
+// IT USED TO BE A 500, and that was wrong in a way the caller could not see past:
+// the read itself succeeded — it delivered every byte — while the status said the
+// call failed, so any OTHER statement in the same cmd was reported as failed too
+// (isError is a property of the whole call). The exit code is a fact about the
+// program in the transcript, not about the read, so it travels in Exit-Code and
+// Error-Code: child_exit while the code stays 200.
 func TestTermFailureKeepsTheBytes(t *testing.T) {
 	s := newTestServer(t)
 	// A multi-statement program is a script file, not shell syntax in --argv.
@@ -373,11 +381,11 @@ func TestTermFailureKeepsTheBytes(t *testing.T) {
 	}
 	res := termCall(t, s, map[string]any{"cmd": "read " + h, "timeout": float64(0)})
 	out := toolResultText(res)
-	if !strings.HasPrefix(out, "TERM/1 500 Internal Server Error\n") {
+	if !strings.HasPrefix(out, "TERM/1 200 OK\n") {
 		t.Fatalf("status line = %q:\n%s", strings.SplitN(out, "\n", 2)[0], out)
 	}
-	if !res.IsError {
-		t.Error("isError must be true when the code is >= 400")
+	if res.IsError {
+		t.Error("a read that delivered its bytes is not a failed call")
 	}
 	if !strings.Contains(out, "boom") {
 		t.Errorf("the failing command's stderr was dropped:\n%s", out)
@@ -1587,4 +1595,14 @@ func TestRunDetailStatesWhatAPtyCannotKnow(t *testing.T) {
 	if !strings.Contains(body, "consuming cursor") {
 		t.Errorf("`help run` does not warn that read is a consuming cursor:\n%s", body)
 	}
+}
+
+// quoteArgv formats an argv list as single-quoted shell words.
+func quoteArgv(argv []any) string {
+	parts := make([]string, 0, len(argv))
+	for _, a := range argv {
+		str := fmt.Sprint(a)
+		parts = append(parts, "'"+strings.ReplaceAll(str, "'", `'''`)+"'")
+	}
+	return strings.Join(parts, " ")
 }

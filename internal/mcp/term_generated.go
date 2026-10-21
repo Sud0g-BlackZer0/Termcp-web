@@ -162,46 +162,71 @@ func (s *Server) directiveResize(ctx context.Context, stmt directive.Statement, 
 // first is exactly the question that answers yes for a session id and buries the
 // caller's --force.
 func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	// --force and --grace are session-only vocabulary: shell_close accepts neither,
-	// so a caller who wrote one is terminating a container, not closing a channel.
+	// THE TARGET DECIDES WHAT IS CLOSED. NOTHING ELSE.
 	//
-	// --grace counts even without --force: it is the deadline for a termination
-	// (SIGTERM, then kill), which has no meaning for closing a channel.
-	wantsSession := boolFlag(stmt, "force") || stmt.FlagState("grace") != directive.FlagAbsent
+	// This used to route on INTENT recovered from the flags — `--force` or `--grace`
+	// meant "a session" — to escape issue #132, where `close <session> --force` was a
+	// silent no-op because requireShell resolved a session id to its primary channel.
+	// Reading intent out of a flag is the wrong lever: a flag modifies HOW an action
+	// happens, never WHICH object it happens to. `close a1f3:1 --force` therefore
+	// terminated the whole session and answered 204, taking every other channel down
+	// with it — a caller naming one channel had no way to see the blast radius.
+	//
+	// So: a `sid:N` handle names a channel, a bare session id names the container, and
+	// the two vocabularies belong to their own object. `--grace` is a session's
+	// deadline; `--force` is gone entirely (see below).
+	h := locator.SplitHandle(stmt.Target)
+	isChannel := h.Index > 0
 
-	// A target that names a session and NOT one of its channels is the container
-	// too. GetChildShell answers the channel question directly, and the `sid:N`
-	// form is excluded because it names a channel by construction — a caller who
-	// copied a handle out of `ps` asked about that channel.
-	if !wantsSession {
-		h := locator.SplitHandle(stmt.Target)
-		wantsSession = h.Index == 0 && s.sessMgr.Get(h.SessionID) != nil
-	}
-
-	if wantsSession {
-		args := argsOf("session_id", stmt.Target)
+	if isChannel {
+		// `--grace` has no meaning for a channel: closing one closes one SSH channel,
+		// which has no SIGTERM-then-wait protocol. Refusing is better than ignoring it,
+		// because a caller who wrote it expects a deadline that will never exist.
+		if stmt.FlagState("grace") != directive.FlagAbsent {
+			return badRequest(stmt, "`--grace` is a session deadline; `"+stmt.Target+
+				"` is a channel, and closing a channel has no SIGTERM-then-wait phase.\n"+
+				"To close the whole connection use `close "+h.SessionID+" --grace N`.")
+		}
 		if boolFlag(stmt, "force") {
-			args["force"] = true
+			return badRequest(stmt, "`--force` is gone: `close` stops a session and keeps it readable, `rm` erases it.\n"+
+				"`"+stmt.Target+"` is a channel — `close "+stmt.Target+"` stops just that channel and keeps its output.")
 		}
-		if slot, bad := numericFlags(args, stmt, [2]string{"grace", "grace_period"}); bad {
-			return slot
+		if _, bad := s.requireShell(stmt.Target); bad != nil {
+			return s.slotFromFailure(ctx, stmt, failureFromResult(bad))
 		}
-		// The handler resolves the id itself (including a locator or a `sid:N`
-		// handle) and reports a session it cannot find as session_not_found rather
-		// than succeeding silently — Terminate is a no-op for an id it cannot see,
-		// which is the same class of lie this function exists to stop telling.
-		if _, fail := s.callTool(ctx, "session_terminate", args); fail != nil {
+		// ARCHIVE, NOT ERASE. shell_close deletes the shell's metadata, which leaves
+		// the transcript on disk with nothing that addresses it: the caller reads 404
+		// afterwards and cannot tell a closed channel from one that never existed.
+		// Closing a channel is not asking for its record to be destroyed — `rm` is.
+		if _, fail := s.callTool(ctx, "shell_archive", argsOf("shell_id", stmt.Target)); fail != nil {
 			return s.slotFromFailure(ctx, stmt, fail)
 		}
 		return noContent(stmt)
 	}
 
-	if _, bad := s.requireShell(stmt.Target); bad != nil {
-		// Neither a session nor a channel: report the handler's own diagnostic
-		// instead of pretending something was closed.
+	// A bare session id, or a locator naming one: terminate the container.
+	//
+	// EXISTENCE IS CHECKED BEFORE THE HANDLER, because Terminate is a no-op for an id
+	// it cannot see — and the handler reports that as an operation failure, which
+	// reads like "the terminate broke" rather than "there is nothing by that name".
+	// Every other close path answers 404 for an unknown target (rm, fwd close,
+	// profile delete); this one has to agree.
+	if _, bad := s.requireSession(stmt.Target); bad != nil {
 		return s.slotFromFailure(ctx, stmt, failureFromResult(bad))
 	}
-	if _, fail := s.callTool(ctx, "shell_close", argsOf("shell_id", stmt.Target)); fail != nil {
+	if boolFlag(stmt, "force") {
+		return badRequest(stmt, "`--force` is gone. `close` stops a session and leaves it readable;\n"+
+			"`rm "+stmt.Target+"` erases it (and needs --force while it is running).")
+	}
+	args := argsOf("session_id", stmt.Target)
+	if slot, bad := numericFlags(args, stmt, [2]string{"grace", "grace_period"}); bad {
+		return slot
+	}
+	// The handler resolves the id itself (including a locator) and reports a session
+	// it cannot find as session_not_found rather than succeeding silently —
+	// Terminate is a no-op for an id it cannot see, which is the same class of lie
+	// this function exists to stop telling.
+	if _, fail := s.callTool(ctx, "session_terminate", args); fail != nil {
 		return s.slotFromFailure(ctx, stmt, fail)
 	}
 	return noContent(stmt)
@@ -334,50 +359,6 @@ func (s *Server) directiveReader(ctx context.Context, stmt directive.Statement, 
 		Headers: map[string]string{"Path": stmt.Path, "Handle": stmt.Target},
 		Body:    fmt.Sprintf("reader %d\n", int64(getFloatAny(doc, "reader_id", 0))),
 	}
-}
-
-// directiveWatch manages wake-up rules.
-func (s *Server) directiveWatch(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	args := map[string]any{}
-	switch off, hasOff := stmt.Flag("off"); {
-	case boolFlag(stmt, "list"):
-		args["action"] = "list"
-	case hasOff && off != "":
-		args["action"] = "unregister"
-		args["rule_id"] = off
-	default:
-		// TargetOptional is true on watch so `--list` and `--off <rule>` need no
-		// target. The register form DOES need one, and reporting it here gives the
-		// caller the same syntax-level message as the other channel directives rather
-		// than a handler-internal "shell_id is required".
-		if stmt.Target == "" {
-			return badRequest(stmt, "watch needs a target: `watch <handle> [--event <name>]`")
-		}
-		args["action"] = "register"
-		args["shell_id"] = stmt.Target
-		if v, ok := stmt.Flag("event"); ok {
-			args["event"] = v
-		}
-		if v, ok := stmt.Flag("for"); ok {
-			secs, err := flagNumber(v)
-			if err != nil {
-				return numericFlagProblem(stmt, "for", err)
-			}
-			args["silence_seconds"] = secs
-		}
-		if v, ok := stmt.Flag("channel"); ok {
-			args["channel"] = v
-		}
-	}
-	res, fail := s.callTool(ctx, "shell_notify", args)
-	if fail != nil {
-		return s.slotFromFailure(ctx, stmt, fail)
-	}
-	doc, ok := toolResultMap(res)
-	if !ok {
-		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
-	}
-	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
 // directiveNotify posts a notification to the human.
@@ -948,6 +929,12 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	b.WriteString("  pty internal                                  open an interactive shell -> Handle\n")
 	b.WriteString("  ps; read a1f3:1; info a1f3:1                 several statements, one call: one slot each\n")
 	b.WriteString("Handles are <session>:<index> (always with :N); copy one from ps or ext list into the next command.\n")
+	// PINNED CAPABILITY IS NOT DISCOVERABLE BY ACTING, which is why this line exists
+	// at all: an extension is an MCP server, a read-only skills tree, a prompt
+	// template or a hand-written terminal that somebody already set up. A caller
+	// that does not know to ask will hand-build a worse version of it, or conclude
+	// the capability is missing.
+	b.WriteString("`ext list` = capability already pinned here (mcp servers, skills trees, prompt terminals).\n")
 	b.WriteString("Every reply is TERM/1 <code>: 2xx ok, 4xx bad request, 5xx the command failed.\n")
 
 	// The CORE directive table, plus the pointer to the rest.

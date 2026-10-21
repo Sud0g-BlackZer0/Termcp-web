@@ -7,7 +7,6 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/open-mcp-ai/termcp/internal/forward"
 	"github.com/open-mcp-ai/termcp/internal/message"
-	"github.com/open-mcp-ai/termcp/internal/notify"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
 )
@@ -102,10 +101,6 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 		withPanicRecovery(),
 	)
 
-	s.notifyMgr = notify.NewManager(s)
-	if sessMgr != nil {
-		sessMgr.SetNotifyHooks(s.notifyMgr.OnOutput, s.notifyMgr.OnExit, s.notifyMgr.ClearShell)
-	}
 	registerTermTools(mcpServer, s)
 
 	s.mcpServer = mcpServer

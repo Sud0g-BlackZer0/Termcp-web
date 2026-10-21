@@ -283,7 +283,25 @@ func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) term
 // the MCP server is now safe for concurrent Term calls.
 func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement, win termArgs) termReply {
 	out := termReply{win: win, seenUsage: map[string]bool{}}
+	// previousOK is the answer a `&&`/`||` statement is gated on: whether the
+	// statement before it came back 2xx.
+	//
+	// THE SKIP IS VISIBLE, NOT SILENT. A statement that did not run gets its own
+	// slot saying so, at the code the reason implies (the previous statement's
+	// failure for `&&`, its success for `||`). Dropping it would make a cmd answer
+	// with fewer slots than statements, and a caller counting slots — or reading
+	// them positionally, which is how they are addressed — would be reading the
+	// wrong one without being told.
+	previousOK := true
 	for _, stmt := range stmts {
+		if stmt.Cond == "&&" && !previousOK {
+			out.slots = append(out.slots, skippedSlot(stmt, "&&", "the previous statement failed"))
+			continue
+		}
+		if stmt.Cond == "||" && previousOK {
+			out.slots = append(out.slots, skippedSlot(stmt, "||", "the previous statement succeeded"))
+			continue
+		}
 		expanded, cycle := aliases.Expand(stmt)
 		if cycle != nil {
 			// The chain came back to where it started, so there is no directive to
@@ -301,12 +319,44 @@ func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement,
 			}
 			s.addUsage(&out, expanded, slots[0].Headers)
 		}
+		previousOK = slotsAllOK(slots)
 		out.slots = append(out.slots, slots...)
 	}
 	if win.PipeTo != "" {
 		out.slots = s.forwardSlotsToStdin(ctx, win.PipeTo, out.slots)
 	}
 	return out
+}
+
+// slotsAllOK reports whether every slot a statement produced is 2xx.
+//
+// "Every" rather than "the first": a directive may answer with several slots, and a
+// chain that gated on only one of them would call a partial failure a success.
+func slotsAllOK(slots []envelope.Slot) bool {
+	for _, sl := range slots {
+		if sl.Code >= 300 {
+			return false
+		}
+	}
+	return true
+}
+
+// skippedSlot is the reply for a statement the condition short-circuited.
+//
+// The code is 208 rather than 204 on purpose: 204 says "done, nothing to say", which
+// is also what a successful close answers, and a caller could not tell a statement it
+// skipped from one that ran. 208 is outside the 2xx-a-directive-normally-returns
+// range without being an error — the caller's chain worked as written, one branch
+// simply was not taken.
+func skippedSlot(stmt directive.Statement, op, why string) envelope.Slot {
+	return envelope.Slot{
+		Code: 208,
+		Headers: map[string]string{
+			"Path":       stmt.Path,
+			"Error-Code": "short_circuited",
+		},
+		Body: "not run: `" + op + "` and " + why,
+	}
 }
 
 // forwardSlotsToStdin implements pipe_to: the reply's bytes go into another
@@ -394,12 +444,14 @@ func (s *Server) parseErrorSlot(err error) envelope.Slot {
 		// sequencing. Naming the fix beats naming the directive table: the caller
 		// did not misspell a directive, they wrote a shell command line in a slot
 		// that holds one directive.
-		body += fmt.Sprintf("\nHINT: %q follows a `%s`, whose payload is ONE line. A `;` in cmd separates\n"+
-			"termcp statements, not shell commands — so if you meant several SHELL commands, pass\n"+
-			"them as args instead:\n"+
-			"  cmd: \"%s <handle> $1\"   args: [\"pwd; whoami\"]\n"+
-			"Or keep it in the payload with &&: %s <handle> pwd && whoami",
-			derr.Op, derr.AfterPayload, derr.AfterPayload, derr.AfterPayload)
+		// NO `&&` SUGGESTION. That advice is now wrong twice over: `&&` separates
+		// DIRECTIVES, so `run h:1 pwd && whoami` reads `whoami` as a directive name
+		// and fails the same way. A shell line goes through args, full stop.
+		body += fmt.Sprintf("\nHINT: %q follows a `%s`, whose payload is ONE shell line. `;` and `&&` in\n"+
+			"cmd are termcp syntax — `;` separates statements and `&&` gates the next one — so a\n"+
+			"shell command line with its own operators belongs in args:\n"+
+			"  cmd: \"%s <handle> $1\"   args: [\"pwd; whoami\"]   or   args: [\"make && echo ok\"]",
+			derr.Op, derr.AfterPayload, derr.AfterPayload)
 	}
 	if derr.Parsed > 0 {
 		body += fmt.Sprintf("\nnothing was executed, including the %d statement(s) before this one: a cmd is parsed in full before any of it runs", derr.Parsed)
@@ -684,4 +736,4 @@ func fmtBytes(n int) string { return fmt.Sprintf("%d B", n) }
 // `help`/`learn_mode`, not in the tool's name or blurb. That is the difference
 // between a tool surface that can grow and one that cannot — every directive this
 // text listed would be a line to edit the day the command space gains one.
-const termDescription = "Run one terminal line on this instance and read its result: a session's bytes, a file, a listing, a directive's own output. Pass no cmd to get your bearings (what is running, what is installed, the syntax). The window parameters bound how much comes back, never what the command does."
+const termDescription = "Run one terminal line on this instance and read its result: a session's bytes, a file, a listing, a directive's own output. No cmd = bearings (what runs, what is installed, the syntax); ext list = pinned capability (MCP servers, skills trees). Window parameters bound how much comes back, never what the command does."

@@ -113,7 +113,10 @@ func TestPositionalOutsideWholePayloadIsQuoted(t *testing.T) {
 	}{
 		{"as an argument", `run h:1 echo $1`, "a; b", "echo 'a; b'"},
 		{"inside double quotes", `run h:1 echo "$1"`, "a; b", `echo "a; b"`},
-		{"beside an operator", `run h:1 $1 && echo done`, "make test", "'make test' && echo done"},
+		// `&&` no longer sits inside the payload: it connects two directives, so the
+		// reference before it is still "a word in a line the caller wrote" and is
+		// quoted. The operator itself moves to the NEXT statement's Cond.
+		{"beside an operator", `run h:1 $1 && notify done`, "make test", "'make test'"},
 		{"as a flag value", `file s --action write --data $1`, "l1\nl2", ""},
 	}
 	for _, tc := range cases {
@@ -318,13 +321,23 @@ func TestRestValueFlagTakesPerWordRaw(t *testing.T) {
 
 // TestPerWordRawDoesNotLoosenRun pins that the argv rule did not leak into the
 // payload rule: a positional beside an operator is still one quoted word.
+//
+// The operator is a directive boundary now, so what this asserts is narrower and
+// more important than it used to be: the value stays a WORD, and the `&&` that
+// follows it starts a new statement rather than being glued onto the payload.
 func TestPerWordRawDoesNotLoosenRun(t *testing.T) {
-	f, err := ParseWithSubst(`run h:1 $1 && echo done`, Subst{Pos: []string{"make test"}})
+	f, err := ParseWithSubst(`run h:1 $1 && notify done`, Subst{Pos: []string{"make test"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := f.Statements[0].Payload, "'make test' && echo done"; got != want {
+	if got, want := f.Statements[0].Payload, "'make test'"; got != want {
 		t.Errorf("payload = %q, want %q", got, want)
+	}
+	if len(f.Statements) != 2 || f.Statements[1].Cond != "&&" {
+		t.Fatalf("`&&` did not become a directive operator: %+v", f.Statements)
+	}
+	if got := f.Statements[1].Op; got != "notify" {
+		t.Errorf("second statement = %q, want notify", got)
 	}
 }
 

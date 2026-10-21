@@ -21,6 +21,7 @@ import (
 func TestNumericFlagsRefuseNonNumbers(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
+	sid := strings.Split(h, ":")[0]
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	cases := []struct {
@@ -34,9 +35,8 @@ func TestNumericFlagsRefuseNonNumbers(t *testing.T) {
 		{"read cursor", "read " + h + " --cursor abc", "--cursor"},
 		{"read from-line", "read " + h + " --from-line abc", "--from-line"},
 		{"key repeat", "key " + h + " enter --repeat abc", "--repeat"},
-		{"close grace", "close " + h + " --grace abc", "--grace"},
+		{"close grace", "close " + sid + " --grace abc", "--grace"},
 		{"notify for", "notify --for abc hi", "--for"},
-		{"watch for", "watch " + h + " --event output --for abc", "--for"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

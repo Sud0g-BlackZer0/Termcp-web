@@ -787,46 +787,8 @@ func TestLearnAPIPromptFollowsRequestOrigin(t *testing.T) {
 	}
 }
 
-// shellNotifyDescription returns the shell_notify tool description as the model
-// receives it, failing if the tool is missing from the listing.
-func shellNotifyDescription(t *testing.T, s *Server, ctx context.Context) string {
-	t.Helper()
-	return directiveHelpText(t, s, "watch")
-}
-
-// Issue #82: the agent held a terminal at a sudo prompt and had no rule telling
-// it that waiting on a human is a supported move, so it polled read in a loop
-// instead. The rule lives in `help watch`, reached at the moment of use: there is
-// one tool, so there is no per-operation description left to carry it.
-func TestShellNotifyDescriptionTeachesWaitingOnAHuman(t *testing.T) {
-	desc := shellNotifyDescription(t, docsTestServer(t), originContext("http://127.0.0.1:18765"))
-	for _, want := range []string{
-		// The situation: a prompt the human, not the agent, has to answer.
-		"sudo", "password",
-		// The order notify and watch stand in: tell the human it is their turn
-		// first, then arm the wake-up. Selecting the wrong event is the same trap
-		// the silence event sets (it fires on nobody speaking, which is exactly the
-		// state the agent is in while it waits).
-		"notify the human FIRST",
-		"--event output",
-		// Without this the agent still has a reason to keep polling.
-		"stop polling",
-		// The rule must not become permanent: the wake-up is one task's, not the
-		// handle's.
-		"watch --off",
-	} {
-		if !strings.Contains(desc, want) {
-			t.Errorf("help watch misses %q:\n%s", want, desc)
-		}
-	}
-}
-
-// The initialize instructions carry the same rule in one line, because a model
-// that never opens `help watch` still has to know that waiting on a human is a
-// supported move rather than a hang. Rule 7 states the asking half (notify
-// first); this asserts the answering half is next to it.
 func TestInstructionsPairWaitingOnAHumanWithNotify(t *testing.T) {
-	for _, want := range []string{"Human at a prompt", "notify", "--event output"} {
+	for _, want := range []string{"Human at a prompt", "notify"} {
 		if !strings.Contains(mcpServerInstructions, want) {
 			t.Errorf("initialize instructions no longer tell the agent how to wait on a human: missing %q", want)
 		}

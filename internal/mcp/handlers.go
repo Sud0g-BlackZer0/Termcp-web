@@ -180,7 +180,7 @@ func (s *Server) requireRunningSession(sessionID string) (*session.Session, *mcp
 		return nil, bad
 	}
 	if info := sess.Info(); info.Status != api.SessionRunning {
-		return nil, toolError(CodeSessionNotRunning, "%s", fmt.Sprintf("Session '%s' is closed (status %s); this operation needs a running session — read its output via shell_output", sessionID, info.Status))
+		return nil, toolError(CodeSessionNotRunning, "%s", fmt.Sprintf("Session '%s' is closed (status %s); this operation needs a running session — read its output with `read`", sessionID, info.Status))
 	}
 	return sess, nil
 }
@@ -232,14 +232,14 @@ func (s *Server) requireShell(shellID string) (*session.ChildShell, *mcpgo.CallT
 	if cs := s.sessMgr.GetChildShell(shellID); cs != nil {
 		if sess := s.sessMgr.Get(cs.ParentSessionID()); sess != nil {
 			if status := sess.Info().Status; status != api.SessionRunning {
-				return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is read-only via shell_output", sess.ID, status))
+				return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is still readable with `read`", sess.ID, status))
 			}
 		}
 		return cs, nil
 	}
 	if sess := s.sessMgr.Get(shellID); sess != nil {
 		if sess.Info().Status != api.SessionRunning {
-			return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is read-only via shell_output", shellID, sess.Info().Status))
+			return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is still readable with `read`", shellID, sess.Info().Status))
 		}
 		// A SESSION IS NOT A CHANNEL, and resolving it to the primary one is what
 		// made `close <session> --force` a silent no-op (#132) and `run <session>`
@@ -284,7 +284,7 @@ func (s *Server) requireShell(shellID string) (*session.ChildShell, *mcpgo.CallT
 	if h := locator.SplitHandle(shellID); h.Index > 0 {
 		if sess := s.sessMgr.Get(h.SessionID); sess != nil {
 			if sess.Info().Status != api.SessionRunning {
-				return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is read-only via shell_output", sess.ID, sess.Info().Status))
+				return nil, toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' is closed (status %s); its output is still readable with `read`", sess.ID, sess.Info().Status))
 			}
 			cs, err := s.shellFromIndex(sess, h.Index)
 			if err != nil {

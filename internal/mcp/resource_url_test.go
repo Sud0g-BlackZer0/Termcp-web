@@ -346,8 +346,8 @@ func TestRequireShellArchivedLocator(t *testing.T) {
 		if code != CodeSessionNotFound {
 			t.Errorf("%s: error_code = %q, want %q", id, code, CodeSessionNotFound)
 		}
-		if !strings.Contains(got, "closed") || !strings.Contains(got, "shell_output") {
-			t.Errorf("%s: error should mention closed + shell_output, got %q", id, got)
+		if !strings.Contains(got, "closed") || !strings.Contains(got, "read") {
+			t.Errorf("%s: error should mention closed + the read directive, got %q", id, got)
 		}
 	}
 }

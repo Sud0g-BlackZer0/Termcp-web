@@ -84,8 +84,6 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		return []envelope.Slot{s.directiveSpan(ctx, stmt, win)}
 	case "reader":
 		return []envelope.Slot{s.directiveReader(ctx, stmt, win)}
-	case "watch":
-		return []envelope.Slot{s.directiveWatch(ctx, stmt, win)}
 	case "notify":
 		return []envelope.Slot{s.directiveNotify(ctx, stmt, win)}
 	case "detect":
@@ -582,13 +580,24 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 		headers["Status"] = status
 		if exit != nil {
 			headers["Exit-Code"] = fmt.Sprint(*exit)
-			// A channel terminal state that is a failure makes every reply about it a
-			// failure: the status code is a function of the channel, not of who
-			// looked. That is what makes isError a global signal rather than a
-			// per-call accident.
+			// WHO ASKED DECIDES WHETHER A NON-ZERO EXIT IS THIS REPLY'S FAILURE.
+			//
+			// `run` reports the command it just sent, so a non-zero exit is news
+			// about THIS call and 500 is right. `read` reports a transcript, and the
+			// transcript is readable whether or not the program in it succeeded —
+			// turning that into 500 made a successful read look broken, and dragged
+			// every other statement in the same cmd down with it (isError is a
+			// property of the whole call).
+			//
+			// The exit code stays in its header either way, and Error-Code still names
+			// it, so a caller that wants to treat it as a failure has the fact. What
+			// it no longer gets is a status that says the READ failed.
 			if code < 400 && *exit != 0 {
-				code = 500
-				headers["Error-Code"] = "command_failed"
+				headers["Error-Code"] = "child_exit"
+				if stmt.Op != "read" {
+					code = 500
+					headers["Error-Code"] = "command_failed"
+				}
 			}
 		}
 	}

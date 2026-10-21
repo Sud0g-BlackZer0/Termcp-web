@@ -102,6 +102,10 @@ type Op struct {
 	TargetKind TargetKind
 	// Flags lists the accepted option names (without the leading --).
 	Flags []string
+	// RetiredFlags documents flags that were removed, paired with their replacement.
+	// An error naming a retired flag tells the caller what to use instead of leaving
+	// them with a bare "unknown flag".
+	RetiredFlags map[string]string
 	// MinArgs is the minimum number of POSITIONAL arguments after the target,
 	// for the flag kinds (a payload kind is governed by whether a payload exists
 	// at all). It is checked so a truncated command fails here, with a usage
@@ -187,6 +191,22 @@ type Statement struct {
 	// the source slice for this statement, trimmed. It is the command echo, so it
 	// is the caller's own bytes, not a canonical re-rendering.
 	Path string
+	// Cond is how this statement relates to the one before it: "" (unconditional,
+	// the first statement or one separated by `;`), "&&" or "||".
+	//
+	// IT CONNECTS TWO DIRECTIVES, NOT TWO SHELL COMMANDS. `&&` and `||` used to
+	// fall inside a payload, so `run h:1 make && echo ok` handed the whole
+	// "make && echo ok" line to the shell and the shell short-circuited it. That is
+	// still what happens when the caller writes a shell line — but a shell line now
+	// has to arrive through `$1` or `$FOO`, because those are the channels for
+	// shell text. Everything the caller writes directly in cmd is directive
+	// syntax, and `&&` between two directives means "run the next one only if this
+	// one answered 2xx".
+	//
+	// The split is not a reparse: the substitution table turns each value into one
+	// opaque token before parsing, so a `&&` inside args[0] can never be mistaken
+	// for an operator here.
+	Cond string
 }
 
 // Flag returns a flag's value and whether it was given one.
@@ -317,8 +337,11 @@ var ops = []Op{
 		Usage: "info <session|handle>"},
 	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2, TargetKind: TargetChannel,
 		Usage: "resize <handle> <rows> <cols>"},
-	{Name: "close", Core: true, Kind: KindFlags, Target: true, Flags: []string{"force", "grace"}, Valueless: []string{"force"},
-		Usage:  "close <handle|session> [--force] [--grace N]",
+	{Name: "close", Core: true, Kind: KindFlags, Target: true, Flags: []string{"grace"},
+		RetiredFlags: map[string]string{
+			"force": "--force is gone. `close` stops and keeps the record, `rm` erases it (and takes --force while running).",
+		},
+		Usage:  "close <handle|session> [--grace N]",
 		Detail: closeDetail},
 	{Name: "rm", Kind: KindFlags, Target: true, TargetKind: TargetSession,
 		Flags: []string{"force"}, Valueless: []string{"force"},
@@ -329,11 +352,6 @@ var ops = []Op{
 		Detail: spanDetail},
 	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"}, TargetKind: TargetChannel,
 		Usage: "reader <handle>   |   reader <handle> --drop <id>"},
-	{Name: "watch", Kind: KindFlags, Target: true, TargetOptional: true, TargetKind: TargetChannel,
-		Flags:     []string{"event", "for", "off", "list", "channel"},
-		Valueless: []string{"list"},
-		Usage:     "watch <handle> [--event output|exit|silence] [--for N] [--channel resource|sampling]   |   watch --off <rule>   |   watch --list",
-		Detail:    watchDetail},
 	{Name: "notify", Kind: KindPayload, Flags: []string{"level", "sticky", "on", "title", "for"}, Valueless: []string{"sticky"},
 		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] [--title T] [--for SECONDS] <body>",
 		Detail: notifyDetail},
@@ -356,7 +374,11 @@ var ops = []Op{
 		Valueless: []string{"trust-unknown-host", "default-approval"},
 		Usage:     "profile list|create|edit|copy|delete …",
 		Detail:    profileDetail + "\n\n" + profileFileFormat},
-	{Name: "ext", Kind: KindFlags,
+	// ext IS CORE, because what it lists is not discoverable by acting: a pinned MCP
+	// server or a read-only skills directory is capability the session already has,
+	// and a caller that never suspects it exists will spend its turns building a
+	// worse version by hand.
+	{Name: "ext", Core: true, Kind: KindFlags,
 		Flags: []string{"action", "name", "kind", "target", "description", "command", "args", "url", "headers",
 			"mode", "rows", "cols", "allow", "paths", "notes", "enabled", "forwards"},
 		Valueless:   []string{"enabled"},
@@ -379,23 +401,6 @@ var ops = []Op{
 		Usage: "help [directive]"},
 }
 
-// watchDetail is the waiting rule, kept where a caller looks it up: the agent
-// that held a terminal at a sudo prompt polled read in a loop because nothing
-// told it waiting on a human is a supported move rather than a hang.
-const watchDetail = `Register an async wake-up rule on a handle and stop polling; you are woken when
-it fires. Events: output (any new bytes), exit (the process ended), silence (N
-seconds with no output). Human at a prompt (sudo, password, a confirmation):
-notify the human FIRST, then watch --event output on that handle — silence
-fires on nobody speaking, which is the state you are already in while you wait.
-One task's rule, not the handle's: watch --off <rule> when it is answered.
-watch wakes the Agent; notify reaches the human.
-
---channel picks how the wake-up travels: resource (a resources/updated
-notification, which any client can receive) or sampling (a createMessage the
-client must have declared support for). Omit it and the server decides.
-Defaults: --event output, --for 3 seconds (silence), --channel omitted = sampling
-when the client declared it, resource otherwise.`
-
 // spanDetail decodes the one-letter statuses, which are terse by design (they are
 // written to log.jsonl for every status change) and unreadable without this.
 const spanDetail = `Session output index: time, byte range, line range and line start per
@@ -410,10 +415,6 @@ range start lands mid-line.
 status: o output (the shell's own bytes), a AI input, i human input, q approval
 asked, A approved input. i/q mean a person operated; a means the agent did.`
 
-// notifyDetail is the rule for reaching the human, stated where a caller looks it
-// up. It used to be the notify_user tool's description; with one tool there is no
-// per-operation description to hang it on, and the rule is exactly the kind of
-// thing `help` exists for: needed at the moment of use, noise before it.
 const notifyDetail = `Toasts + a system notification on every open Web UI page; --on highlights that
 session's card. Call it BEFORE asking the human for anything — password, sudo,
 MFA, passphrase, confirmation, approval, a choice, interactive input — and when
@@ -740,18 +741,25 @@ A forward dies with its session: the session's ResourceScope closes it, so there
 is no orphaned listener to remember. A listing is a read and is not reviewed;
 opening and closing are reviewed, so expect a 202 and wait rather than retrying.`
 
-// closeDetail states the kill deadline, which otherwise looks instantaneous.
-const closeDetail = `A CHANNEL is closed by its handle: close <session>:<index> (what ps prints).
-A SESSION is terminated by its id: close <session> --force. The two are different
-actions with different lifecycles: closing a channel leaves the connection and
-other channels intact; terminating the session stops every channel and drops the
-transport, keeping the entry in the archive as exited with its output still
-readable via shell_output.
+// closeDetail states what close does to each kind of target, which is the only thing
+// that decides it.
+const closeDetail = `THE TARGET DECIDES WHAT IS CLOSED.
 
---grace N gives a process N seconds to exit before SIGKILL. Default: 5.
---force SKIPS THAT WAIT ENTIRELY: it closes the transport without sending SIGTERM
-first, so --grace has no effect next to it. Use one or the other — --grace when the
-process deserves a chance to clean up, --force when it is already wedged.`
+close <session>:<index>   stops that CHANNEL. Other channels and the connection
+                          keep running, and the channel's output stays readable
+                          with read — it is archived, not erased.
+close <session>           stops the whole SESSION: every channel ends, the
+                          transport drops, and the entry stays in the archive as
+                          exited with its output still readable.
+
+--grace N (sessions only) is how long the process gets to exit after SIGTERM
+before the transport is closed anyway. YOU DO NOT HAVE TO PASS IT: omitted means
+5 seconds, so a plain "close <session>" is already the polite form and a process
+that needs longer has to ask for it. A channel has no such phase, so --grace on a
+handle is refused rather than ignored.
+
+There is no --force. Stopping and erasing are different verbs: close stops and
+keeps the record, rm erases it. A caller who wanted the record gone wants rm.`
 
 // argvDetail is the --argv contract: a word list, not a command line. It is
 // stated on `help pipe` because both failure modes are silent or come from the
@@ -1004,25 +1012,47 @@ func ParseWithSubst(src string, sub Subst) (*File, error) {
 		if stmt == nil || stmt.Cmd == nil {
 			continue
 		}
-		parsed, ok, err := parseStatement(src, stmt)
-		if err != nil {
-			// The first failure wins: a cmd is one instruction, and reporting the
-			// rest of a broken instruction teaches nothing. A directive the caller
-			// defined itself (an alias) surfaces as an unknown-directive error
-			// carrying Op+Rest, which is what lets the caller resolve it.
-			if derr, ok := err.(*Error); ok {
-				derr.Parsed = len(out.Statements)
-				derr.AfterPayload = trailingPayloadOp(out.Statements)
+		// A `&&`/`||` CHAIN IS SEVERAL DIRECTIVES, NOT ONE PAYLOAD.
+		//
+		// The shell parser reports `a && b` as a single Stmt holding a BinaryCmd,
+		// which is right for shell text and wrong for a directive line: the shell
+		// operators were being swallowed into run's payload, so a caller writing
+		// `run h:1 make && notify done` got one shell command line instead of two
+		// directives with a condition between them.
+		//
+		// Shell text still arrives intact — through `$1`/`$FOO`, which are replaced
+		// with opaque tokens BEFORE this parse, so a `&&` inside a value is part of
+		// that token and cannot appear here as an operator.
+		for _, part := range flattenCond(stmt) {
+			parsed, ok, err := parseStatement(src, part.stmt)
+			if err != nil {
+				// The first failure wins: a cmd is one instruction, and reporting the
+				// rest of a broken instruction teaches nothing. A directive the caller
+				// defined itself (an alias) surfaces as an unknown-directive error
+				// carrying Op+Rest, which is what lets the caller resolve it.
+				if derr, ok := err.(*Error); ok {
+					derr.Parsed = len(out.Statements)
+					derr.AfterPayload = trailingPayloadOp(out.Statements)
+				}
+				return nil, err
 			}
-			return nil, err
-		}
-		if ok {
+			if !ok {
+				continue
+			}
 			filled := sentinels.expandStatement(parsed)
 			if err := checkTargetKindAfterSubst(filled); err != nil {
 				if derr, ok := err.(*Error); ok {
 					derr.Parsed = len(out.Statements)
 				}
 				return nil, err
+			}
+			// The first statement of the whole cmd has nothing to be conditional on,
+			// and a `;`-separated statement starts a fresh chain: flattenCond reports
+			// "" for those, so the executor never waits on a result that is not there.
+			if len(out.Statements) == 0 {
+				filled.Cond = ""
+			} else {
+				filled.Cond = part.cond
 			}
 			out.Statements = append(out.Statements, filled)
 		}
@@ -1031,6 +1061,45 @@ func ParseWithSubst(src string, sub Subst) (*File, error) {
 		return &File{Empty: true}, nil
 	}
 	return out, nil
+}
+
+// condPart is one directive in a `&&`/`||` chain: the statement to parse and the
+// operator that connects it to the one before it.
+type condPart struct {
+	stmt *syntax.Stmt
+	cond string // "" (unconditional), "&&", "||"
+}
+
+// flattenCond splits a shell BinaryCmd into the directives it connects.
+//
+// `a && b || c` parses as BinaryCmd(||, BinaryCmd(&&, a, b), c), so the left spine
+// is the chain in source order: walk X while it is a BinaryCmd with an operator this
+// language gives meaning to, then emit the leaves.
+//
+// ONLY `&&` AND `||` ARE SPLIT. `|` is a pipeline, and a pipeline is one command
+// line whose parts run concurrently — there is no "did the left succeed" to gate on,
+// so it stays inside the payload. `&` and `;` never reach here: the shell parser
+// already made them separate Stmts, which is what makes `;` start a fresh chain.
+func flattenCond(stmt *syntax.Stmt) []condPart {
+	var parts []condPart
+	var walk func(s *syntax.Stmt, cond string)
+	walk = func(s *syntax.Stmt, cond string) {
+		if b, ok := s.Cmd.(*syntax.BinaryCmd); ok {
+			switch b.Op {
+			case syntax.AndStmt, syntax.OrStmt:
+				walk(b.X, cond)
+				op := "&&"
+				if b.Op == syntax.OrStmt {
+					op = "||"
+				}
+				walk(b.Y, op)
+				return
+			}
+		}
+		parts = append(parts, condPart{stmt: s, cond: cond})
+	}
+	walk(stmt, "")
+	return parts
 }
 
 // trailingPayloadOp names the last statement's directive when it was one that
@@ -1374,9 +1443,13 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 		for i < len(rest) && strings.HasPrefix(rest[i].text, "--") {
 			key, val := splitFlag(rest[i].text)
 			if !allowedFlag(op, key) {
+				msg := "unknown flag for " + name + ": --" + key
+				if hint, ok := op.RetiredFlags[key]; ok {
+					msg += "\n" + hint
+				}
 				return Statement{}, false, &Error{
 					Op:    name,
-					Msg:   "unknown flag for " + name + ": --" + key,
+					Msg:   msg,
 					Usage: op.Usage,
 				}
 			}
@@ -1459,9 +1532,13 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 			}
 			key, val := splitFlag(w.text)
 			if !allowedFlag(op, key) {
+				msg := "unknown flag for " + name + ": --" + key
+				if hint, ok := op.RetiredFlags[key]; ok {
+					msg += "\n" + hint
+				}
 				return Statement{}, false, &Error{
 					Op:    name,
-					Msg:   "unknown flag for " + name + ": --" + key,
+					Msg:   msg,
 					Usage: op.Usage,
 				}
 			}

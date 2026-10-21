@@ -56,7 +56,7 @@ func TestRmStoppedSessionDoesNotNeedForce(t *testing.T) {
 	sid := strings.Split(h, ":")[0]
 
 	// Stop it first.
-	termText(t, s, map[string]any{"cmd": "close " + sid + " --force"})
+	termText(t, s, map[string]any{"cmd": "close " + sid})
 
 	// rm without --force: succeeds because it is already stopped.
 	got := termText(t, s, map[string]any{"cmd": "rm " + sid})
