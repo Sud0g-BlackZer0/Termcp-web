@@ -120,60 +120,6 @@ func (s *Server) handleFileReplace(ctx context.Context, request mcpgo.CallToolRe
 	return jsonResult(map[string]any{"ok": true, "bytes_written": n, "remote_path": remotePath}), nil
 }
 
-// handleFileFind walks a remote tree and returns structured hits.
-//
-// The result shape is the whole point (feedback §2.2): a caller must get
-// [{path,size,is_dir}] plus total and truncated, not a block of text to parse. A
-// search that hands back text has moved the work, not done it.
-func (s *Server) handleFileFind(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	args := request.GetArguments()
-	sessionID := strings.TrimSpace(getString(args, "session_id", ""))
-	root := getString(args, "remote_path", "")
-	pattern := getString(args, "pattern", "")
-	exclude := splitCSV(getString(args, "exclude", ""))
-	limit := int(getFloat64(args, "limit", 0))
-
-	if sessionID == "" {
-		return toolError(CodeInvalidArgument, "%s", "session_id required"), nil
-	}
-	if root == "" {
-		return toolError(CodeInvalidArgument, "%s", "remote_path required"), nil
-	}
-	// The defaults that make a search in a real repository usable. Without them the
-	// budget is spent inside node_modules and .git and the reply says "truncated"
-	// without ever reaching the source.
-	if len(exclude) == 0 {
-		exclude = []string{"node_modules", ".git"}
-	}
-
-	sftpCli, bad := s.sftpClient(sessionID)
-	if bad != nil {
-		return bad, nil
-	}
-	defer sftpCli.Close()
-
-	res, err := sftpCli.FindFiles(root, pattern, exclude, limit)
-	if err != nil {
-		return fileErr(err), nil
-	}
-	return jsonResultAny(res), nil
-}
-
-// splitCSV splits a comma-separated flag value, dropping blanks.
-func splitCSV(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 func (s *Server) handleFileStat(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	args := request.GetArguments()
 	sessionID := strings.TrimSpace(getString(args, "session_id", ""))

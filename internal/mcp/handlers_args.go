@@ -39,10 +39,6 @@ func getFloat64(args map[string]any, key string, def float64) float64 {
 }
 
 func jsonResult(data map[string]any) *mcpgo.CallToolResult {
-	return jsonResultAny(data)
-}
-
-func jsonResultAny(data any) *mcpgo.CallToolResult {
 	b, _ := json.Marshal(data)
 	return mcpgo.NewToolResultText(string(b))
 }

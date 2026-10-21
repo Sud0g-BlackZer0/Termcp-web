@@ -82,8 +82,6 @@ func (s *Server) handlerFor(tool string) toolHandler {
 		return s.handleFileWrite
 	case "file_replace":
 		return s.handleFileReplace
-	case "file_find":
-		return s.handleFileFind
 	case "file_stat":
 		return s.handleFileStat
 	case "file_delete":
