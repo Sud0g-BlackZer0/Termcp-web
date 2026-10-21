@@ -395,7 +395,7 @@ var ops = []Op{
 		Kinds:     []string{"forward", "file", "host", "ext", "alias"},
 		Flags:     []string{"all"},
 		Valueless: []string{"all"},
-		Usage:     "ls   |   ls host   |   ls ext   |   ls <session> [forward|file]",
+		Usage:     "ls   |   ls host   |   ls ext   |   ls alias   |   ls <session> [forward|file]",
 		Detail:    lsDetail},
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
 		Kinds:  []string{"file"},
@@ -419,7 +419,7 @@ var ops = []Op{
 		Kinds:     []string{"file", "host", "ext", "alias"},
 		Flags:     []string{"force", "dry-run"},
 		Valueless: []string{"force", "dry-run"},
-		Usage:     "rm <session>   |   rm <session> file <path>",
+		Usage:     "rm <session>   |   rm <session> file <path>   |   rm host|ext|alias <name>",
 		Detail:    rmDetail},
 
 	// --- inside a channel ---
@@ -466,7 +466,7 @@ var ops = []Op{
 	// --- configuration, which outlives any session ---
 
 	{Name: "create", Kind: KindFlags, Target: true,
-		Kinds: []string{"host", "ext", "alias"},
+		Kinds: []string{"host", "ext", "alias", "file"},
 		Flags: []string{"name", "host", "user", "port", "password", "private-key", "key-passphrase",
 			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
 			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port",

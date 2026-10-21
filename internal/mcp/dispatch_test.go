@@ -109,3 +109,65 @@ func TestEveryFileOpReachesItsGroup(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryKindTheDispatcherServesIsParsable is the REVERSE of
+// TestADeclaredKindIsEitherHandledOrRefused, and it is the one that would have
+// caught `create <session> file <path>`.
+//
+// That test starts from the declared kinds and asks whether each is handled. It
+// cannot see a branch that exists in the dispatcher but whose kind was never
+// declared — and `create`'s file branch was exactly that: unreachable, because the
+// parser had no reason to read `file` as a kind and left it in Args. The verb
+// answered "create needs a kind" for a shape its own usage line advertised.
+//
+// So this walks the OTHER direction: for every verb-and-kind pair the dispatcher
+// serves, the statement must parse into that kind and key. A new branch with no
+// declaration fails here.
+func TestEveryKindTheDispatcherServesIsParsable(t *testing.T) {
+	cases := []struct{ cmd, wantKind, wantKey string }{
+		// open
+		{"open s1 forward --local-port 0", "forward", ""},
+		{"open s1 mcp http://h/mcp", "mcp", "http://h/mcp"},
+		{"open s1 cdp ws://h/d", "cdp", "ws://h/d"},
+		{"open s1 jrpc ws://h/s", "jrpc", "ws://h/s"},
+		// ls
+		{"ls host", "host", ""},
+		{"ls ext", "ext", ""},
+		{"ls alias", "alias", ""},
+		{"ls s1 forward", "forward", ""},
+		{"ls s1 file /tmp", "file", "/tmp"},
+		// rm
+		{"rm s1 file /tmp/x", "file", "/tmp/x"},
+		{"rm host prod", "host", "prod"},
+		{"rm ext wire", "ext", "wire"},
+		{"rm alias ll", "alias", "ll"},
+		// close
+		{"close s1 forward fw-1", "forward", "fw-1"},
+		// read / write / get
+		{"read s1 file /tmp/x", "file", "/tmp/x"},
+		{"write s1 file /tmp/x --data y", "file", "/tmp/x"},
+		{"get s1 file /tmp/x", "file", "/tmp/x"},
+		// create / edit
+		{"create host prod", "host", "prod"},
+		{"create ext wire", "ext", "wire"},
+		{"create alias ll ls", "alias", "ll"},
+		{"create s1 file /tmp/new", "file", "/tmp/new"},
+		{"edit host prod", "host", "prod"},
+		{"edit ext wire", "ext", "wire"},
+		{"edit alias ll", "alias", "ll"},
+	}
+	for _, tc := range cases {
+		f, err := directive.Parse(tc.cmd)
+		if err != nil {
+			t.Errorf("%q does not parse: %v", tc.cmd, err)
+			continue
+		}
+		st := f.Statements[0]
+		if st.Kind != tc.wantKind {
+			t.Errorf("%q parsed kind = %q, want %q (args=%v)", tc.cmd, st.Kind, tc.wantKind, st.Args)
+		}
+		if st.Key != tc.wantKey {
+			t.Errorf("%q parsed key = %q, want %q", tc.cmd, st.Key, tc.wantKey)
+		}
+	}
+}
