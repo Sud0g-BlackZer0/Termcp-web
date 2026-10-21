@@ -601,7 +601,10 @@ func fillUsageStubs(s string) string {
 			break
 		}
 		stub := "x"
-		if strings.Contains(s[start:start+end+1], "handle") {
+		// A CHANNEL is addressed <session>:<index>, so its stub needs the colon: a
+		// bare word is refused by the very directives that take one, which would make
+		// this test report the refusal as a broken usage line.
+		if placeholder := s[start : start+end+1]; strings.Contains(placeholder, "handle") || strings.Contains(placeholder, "channel") {
 			stub = "x:1"
 		}
 		s = s[:start] + stub + s[start+end+1:]

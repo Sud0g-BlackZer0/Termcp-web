@@ -59,9 +59,10 @@ func devtoolsPeer(t *testing.T) *httptest.Server {
 // accident.
 func TestCDPDoorSendsNoHandshake(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 	srv := devtoolsPeer(t)
 
-	out := termText(t, s, map[string]any{"cmd": "cdp open " + srv.URL})
+	out := termText(t, s, map[string]any{"cmd": "cdp open internal " + srv.URL})
 	h := handleFrom(t, out)
 	defer termText(t, s, map[string]any{"cmd": "cdp close " + h})
 
@@ -79,8 +80,9 @@ func TestCDPDoorSendsNoHandshake(t *testing.T) {
 // readable afterwards.
 func TestCDPEventSurvivesTheCallThatDisplacedIt(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 	srv := devtoolsPeer(t)
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open " + srv.URL}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open internal " + srv.URL}))
 	defer termText(t, s, map[string]any{"cmd": "cdp close " + h})
 
 	termText(t, s, map[string]any{"cmd": `cdp call ` + h + ` {"method":"Page.enable"}`})
@@ -106,8 +108,9 @@ func TestCDPEventSurvivesTheCallThatDisplacedIt(t *testing.T) {
 // itself and waits out the call's window.
 func TestRecvWaitsForAnEventThatFiresAfterTheCall(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 	srv := delayedEventPeer(t, 250*time.Millisecond)
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open " + srv.URL}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open internal " + srv.URL}))
 	defer termText(t, s, map[string]any{"cmd": "cdp close " + h})
 
 	// The call answers at once and pushes nothing: the event is still 250ms
@@ -123,8 +126,9 @@ func TestRecvWaitsForAnEventThatFiresAfterTheCall(t *testing.T) {
 // timeout parameter, and that an expired window is a 204 rather than a failure.
 func TestRecvHonoursItsWindow(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s)                 // gateways need a session to tunnel through
 	srv := delayedEventPeer(t, time.Hour) // never inside the window
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open " + srv.URL}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open internal " + srv.URL}))
 	defer termText(t, s, map[string]any{"cmd": "cdp close " + h})
 
 	start := time.Now()
@@ -181,8 +185,9 @@ func delayedEventPeer(t *testing.T, delay time.Duration) *httptest.Server {
 // JSON document and paste a URL out of it.
 func TestCDPResolvesTheDevtoolsEndpoint(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 	srv := devtoolsPeer(t)
-	out := termText(t, s, map[string]any{"cmd": "cdp open " + srv.URL})
+	out := termText(t, s, map[string]any{"cmd": "cdp open internal " + srv.URL})
 	if !strings.Contains(out, "ws://") {
 		t.Fatalf("the http endpoint was not resolved to its socket:\n%s", out)
 	}
@@ -198,11 +203,12 @@ func TestCDPResolvesTheDevtoolsEndpoint(t *testing.T) {
 // or an LSP peer needs.
 func TestJrpcDoorSpeaksAnyEnvelope(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 	srv := devtoolsPeer(t)
 	// A socket, because the fake peer upgrades: the jrpc door takes either scheme
 	// and this is the one a private RPC or an LSP server listens on.
 	ws := "ws" + strings.TrimPrefix(srv.URL, "http")
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "jrpc open " + ws}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "jrpc open internal " + ws}))
 	defer termText(t, s, map[string]any{"cmd": "jrpc close " + h})
 
 	// No "jsonrpc" key, and no initialize before it.
@@ -216,10 +222,11 @@ func TestJrpcDoorSpeaksAnyEnvelope(t *testing.T) {
 // one thing the MCP door adds.
 func TestMcpDoorStillHandshakes(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 	ts := httptest.NewServer(s.StreamableHTTPHandler())
 	defer ts.Close()
 
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open internal " + ts.URL}))
 	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
 	tools := termText(t, s, map[string]any{"cmd": "mcp tools " + h})
 	if !strings.Contains(tools, `"name":"term"`) && !strings.Contains(tools, `"name": "term"`) {
@@ -231,8 +238,9 @@ func TestMcpDoorStillHandshakes(t *testing.T) {
 // another protocol is a sentence, not a frame sent into the void.
 func TestToolsIsRefusedOnTheDoorsWithoutOne(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 	srv := devtoolsPeer(t)
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open " + srv.URL}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open internal " + srv.URL}))
 	defer termText(t, s, map[string]any{"cmd": "cdp close " + h})
 
 	res := termCall(t, s, map[string]any{"cmd": "cdp tools " + h})
@@ -278,10 +286,63 @@ func TestThreeDoorsAreInHelp(t *testing.T) {
 
 // TestCdpOpenRefusesAURLItCannotResolve pins the failure a caller gets from a
 // dead endpoint: a sentence naming the problem, not an empty handle.
+//
+// The session comes first in the call because it is the larger decision — it says
+// which network the URL is resolved on — so this test opens one and then hands cdp a
+// scheme no transport can carry.
 func TestCdpOpenRefusesAURLItCannotResolve(t *testing.T) {
 	s := newTestServer(t)
-	res := termCall(t, s, map[string]any{"cmd": "cdp open ftp://example.com"})
+	internalSession(t, s)
+	res := termCall(t, s, map[string]any{"cmd": "cdp open internal ftp://example.com"})
 	if !res.IsError || !strings.Contains(toolResultText(res), "devtools endpoint") {
 		t.Fatalf("cdp open accepted a scheme it cannot read:\n%s", toolResultText(res))
+	}
+}
+
+// TestGatewayOpenRequiresASession pins the new first argument.
+//
+// A bare URL used to mean "connect from this process", which is a different network
+// from the one the target host sees: localhost:9222 is a devtools port on the machine
+// termcp runs on, not on the machine being controlled. Naming the session is what
+// makes the URL mean what it looks like, so a missing session is refused with the two
+// spellings that fix it rather than defaulted.
+func TestGatewayOpenRequiresASession(t *testing.T) {
+	s := newTestServer(t)
+	internalSession(t, s)
+	for _, op := range []string{"mcp", "cdp", "jrpc"} {
+		res := termCall(t, s, map[string]any{"cmd": op + " open http://127.0.0.1:9/"})
+		body := toolResultText(res)
+		if !res.IsError || !strings.Contains(body, "needs a session") {
+			t.Errorf("%s open accepted a URL with no session:\n%s", op, body)
+		}
+		if !strings.Contains(body, op+" open <session> <url>") {
+			t.Errorf("%s open must show the shape that works:\n%s", op, body)
+		}
+	}
+}
+
+// TestGatewayTunnelsThroughTheSession pins that the dial actually travels the SSH
+// connection rather than this process's network.
+//
+// The peer is a server bound to 127.0.0.1 inside the test process, and the session is
+// the built-in internal loopback — which is also this process. So the assertion is not
+// "the address is unreachable from here"; it is that the request ARRIVED, having gone
+// out through a session that was named. A gateway that ignored the session would still
+// pass a reachability check, which is why the earlier tests could not tell the two
+// apart.
+func TestGatewayTunnelsThroughTheSession(t *testing.T) {
+	s := newTestServer(t)
+	internalSession(t, s)
+	ts := httptest.NewServer(s.StreamableHTTPHandler())
+	defer ts.Close()
+
+	out := termText(t, s, map[string]any{"cmd": "mcp open internal " + ts.URL})
+	h, ok := headerValue(t, out, "Handle")
+	if !ok {
+		t.Fatalf("mcp open did not return a handle, so the tunnel did not carry it:\n%s", out)
+	}
+	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
+	if !strings.Contains(out, "tools") {
+		t.Errorf("the tunnel reached the peer but discovery found no tools:\n%s", out)
 	}
 }

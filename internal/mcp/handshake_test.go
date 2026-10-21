@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,7 +63,8 @@ func countingPeer(t *testing.T, blockFirstInitialize <-chan struct{}) (*httptest
 func TestMcpHandshakeRunsOncePerHandle(t *testing.T) {
 	srv, inits := countingPeer(t, nil)
 	s := newTestServer(t)
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open ws" + strings.TrimPrefix(srv.URL, "http")}))
+	internalSession(t, s) // gateways need a session to tunnel through
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open internal ws" + strings.TrimPrefix(srv.URL, "http")}))
 	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
 
 	for i := 0; i < 4; i++ {
@@ -97,7 +100,12 @@ func TestJrpcReadyHoldsItsLockAcrossTheHandshake(t *testing.T) {
 	srv, inits := countingPeer(t, release)
 
 	ctx := t.Context()
-	ch, err := jrpc.Open(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"))
+	// A direct dialer: this test exercises the channel's own locking, not the SSH
+	// path a gateway takes, so it hands jrpc.Open the local network explicitly.
+	direct := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	ch, err := jrpc.Open(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), direct)
 	if err != nil {
 		t.Fatal(err)
 	}

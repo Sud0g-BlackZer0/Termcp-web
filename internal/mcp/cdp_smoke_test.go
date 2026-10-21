@@ -77,7 +77,8 @@ func TestRealBrowserThroughTheCdpDoor(t *testing.T) {
 	}
 
 	s := newTestServer(t)
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open http://127.0.0.1:" + port}))
+	internalSession(t, s) // gateways need a session to tunnel through
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "cdp open internal http://127.0.0.1:" + port}))
 	defer termText(t, s, map[string]any{"cmd": "cdp close " + h})
 
 	targets := termText(t, s, map[string]any{"cmd": `cdp call ` + h + ` {"method":"Target.getTargets"}`})

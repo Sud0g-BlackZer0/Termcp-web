@@ -85,16 +85,17 @@ func TestTermEmptyCallIsTheGuide(t *testing.T) {
 	if !strings.HasPrefix(text, "TERM/1 200 OK\n") {
 		t.Errorf("status line = %q", strings.SplitN(text, "\n", 2)[0])
 	}
-	// It must say where am I, what can I do, and what is here.
-	for _, want := range []string{"Syntax", "ps", "ext list", "help", "running now"} {
+	// It must say what this is, where capability lives, where state lives, and what
+	// is running right now.
+	for _, want := range []string{"cmd = the DSL", "sh = a shell command", "ext list", "ps", "help", "running now"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the guide misses %q:\n%s", want, text)
 		}
 	}
-	// And it must not require remembering anything: handles are obtained, not
+	// And it must not require remembering anything: an address is obtained, not
 	// supplied.
-	if !strings.Contains(text, "copy one from ps") {
-		t.Errorf("the guide must point at where handles come from:\n%s", text)
+	if !strings.Contains(text, "from ps") {
+		t.Errorf("the guide must point at where channel addresses come from:\n%s", text)
 	}
 }
 
@@ -119,7 +120,7 @@ func TestTermHelp(t *testing.T) {
 	if _, rest, ok := strings.Cut(single, "\n\n"); ok {
 		body = rest // skip the envelope: status line and headers
 	}
-	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <handle> <payload>") {
+	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <channel> <line>") {
 		t.Errorf("the body does not open with the usage template:\n%s", single)
 	}
 }
@@ -988,10 +989,11 @@ func TestTermLearnModeAttachesUsageToGeneratedReplies(t *testing.T) {
 // endpoint, and close actually removes the handle.
 func TestTermMCPStreamableHandshakeAndClose(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s) // mcp open tunnels through a session
 	ts := httptest.NewServer(s.StreamableHTTPHandler())
 	defer ts.Close()
 
-	text := termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL})
+	text := termText(t, s, map[string]any{"cmd": "mcp open internal " + ts.URL})
 	h := handleFrom(t, text)
 	tools := termText(t, s, map[string]any{"cmd": "mcp tools " + h})
 	if !strings.HasPrefix(tools, "TERM/1 200 OK") ||
@@ -1017,7 +1019,8 @@ func TestTermMCPStreamableHandshakeAndClose(t *testing.T) {
 // was actually unsupported was the SHAPE, and the shape is now handled.
 func TestTermMcpOpenValidatesURL(t *testing.T) {
 	s := newTestServer(t)
-	res := termCall(t, s, map[string]any{"cmd": "mcp open not-a-url"})
+	internalSession(t, s) // mcp open tunnels through a session
+	res := termCall(t, s, map[string]any{"cmd": "mcp open internal not-a-url"})
 	body := toolResultText(res)
 	if !res.IsError || !strings.Contains(body, "http(s)") || !strings.Contains(body, "ws(s)") {
 		t.Fatalf("mcp open refused a non-URL without naming what works:\n%s", body)
@@ -1026,7 +1029,7 @@ func TestTermMcpOpenValidatesURL(t *testing.T) {
 	// A URL with a scheme but no listener is a connection failure, which is a
 	// different reply from a refusal: the caller has to be able to tell a typo
 	// from a dead endpoint.
-	res = termCall(t, s, map[string]any{"cmd": "mcp open ftp://example.com"})
+	res = termCall(t, s, map[string]any{"cmd": "mcp open internal ftp://example.com"})
 	if !res.IsError || !strings.Contains(toolResultText(res), "unsupported scheme") {
 		t.Fatalf("an unknown scheme was not explained:\n%s", toolResultText(res))
 	}
@@ -1091,7 +1094,7 @@ func TestTermAliasChains(t *testing.T) {
 		t.Fatal(toolResultText(res))
 	}
 	text := termText(t, s, map[string]any{"cmd": "chain2"})
-	if !strings.Contains(text, "run <handle>") {
+	if !strings.Contains(text, "run <channel>") {
 		t.Fatalf("chained alias did not reach help:\n%s", text)
 	}
 }
@@ -1345,10 +1348,11 @@ func TestPipeToBadTargetIsAnError(t *testing.T) {
 // "needs a JSON-RPC frame" and only worked with a junk word in front of it.
 func TestMCPCallTakesTheFrameFirst(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s)
 	ts := httptest.NewServer(s.StreamableHTTPHandler())
 	defer ts.Close()
 
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open internal " + ts.URL}))
 	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
 
 	out := termText(t, s, map[string]any{"cmd": `mcp call ` + h + ` {"jsonrpc":"2.0","id":7,"method":"tools/list"}`})
@@ -1371,10 +1375,11 @@ func TestMCPCallTakesTheFrameFirst(t *testing.T) {
 // three spellings apart.
 func TestMCPCallAcceptsEveryQuotingOfTheFrame(t *testing.T) {
 	s := newTestServer(t)
+	internalSession(t, s)
 	ts := httptest.NewServer(s.StreamableHTTPHandler())
 	defer ts.Close()
 
-	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL}))
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open internal " + ts.URL}))
 	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
 
 	// Spaces in the params object are the point, not decoration.
@@ -1616,4 +1621,25 @@ func quoteArgv(argv []any) string {
 		parts = append(parts, "'"+strings.ReplaceAll(str, "'", `'''`)+"'")
 	}
 	return strings.Join(parts, " ")
+}
+
+// internalSession opens a session on the built-in loopback and returns its id.
+//
+// Gateways need a session: `mcp open internal <url>` says which network the URL is
+// resolved on. Tests that used to pass a bare URL now name `internal` and, to do that
+// meaningfully, need the session to exist first — the same two steps a caller takes.
+func internalSession(t *testing.T, s *Server) string {
+	t.Helper()
+	out := termText(t, s, map[string]any{"cmd": "pty internal"})
+	// pty answers with a channel handle (<session>:<index>); the session half is what
+	// a gateway needs, because `mcp open` tunnels through the link and not the shell.
+	h, ok := headerValue(t, out, "Handle")
+	if !ok {
+		t.Fatalf("pty internal returned no Handle header:\n%s", out)
+	}
+	sid, _, _ := strings.Cut(h, ":")
+	if sid == "" {
+		t.Fatalf("pty internal returned a handle with no session part: %q", h)
+	}
+	return sid
 }

@@ -14,7 +14,8 @@ what the peer receives, and what it answers is what you get back. That is the
 whole contract, and it is why any peer that speaks the envelope works — an LSP
 server, a private RPC, a device.
 
-  jrpc open <url>            ws:// wss:// http:// https:// — scheme picks transport
+  jrpc open <session> <url>  ws:// wss:// http:// https:// — scheme picks transport
+                             the session decides WHICH network the URL names
   jrpc call <handle> '<frame>'   send, wait for the answer with that id
   jrpc send <handle> '<frame>'   send, do not wait (a notification takes no answer)
   jrpc recv <handle>             read a frame that arrived while a call was waiting
@@ -41,7 +42,7 @@ where each door adds the one thing its protocol needs.`
 // precede it.
 const cdpDetail = `Chrome DevTools Protocol: the browser's own JSON-RPC over a socket.
 
-  cdp open <url>          ws://host:port/devtools/browser/<id>
+  cdp open <session> <url>  ws://host:port/devtools/browser/<id>
                           — or the http:// endpoint, whose /json/version is read
                           for the socket (a bare host:port works, no path needed)
   cdp call <handle> '{"method":"Target.getTargets"}'

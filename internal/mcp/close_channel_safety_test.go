@@ -28,7 +28,8 @@ func TestCloseChannelDoesNotTearDownSession(t *testing.T) {
 		t.Fatalf("close channel with --force must be refused 400, got:\n%s", got)
 	}
 	if !strings.Contains(got, "is gone") {
-		t.Logf("ACTUAL ERROR BODY:\n%s", got); t.Errorf("error should explain --force is gone")
+		t.Logf("ACTUAL ERROR BODY:\n%s", got)
+		t.Errorf("error should explain --force is gone")
 	}
 
 	// 2. s1 must still be fully alive after that refusal.

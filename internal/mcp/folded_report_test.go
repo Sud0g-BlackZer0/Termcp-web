@@ -15,6 +15,12 @@ func TestFoldSaysWhatItHid(t *testing.T) {
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	termText(t, s, map[string]any{"cmd": "run " + h + " seq 1 50", "timeout": 2})
+	// WAIT FOR THE BYTES, DO NOT ASSUME THE WINDOW WAS ENOUGH. A pty has no "the command
+	// finished" signal, so `run` returns whatever arrived in its window; on a loaded
+	// machine that can be fewer than five lines, in which case nothing overflows and
+	// the fold this test is about never happens. The same race `waitForGrepContent`
+	// documents — passed alone, failed in the full run.
+	waitForGrepContent(t, s, h, "\n50\n")
 
 	got := termText(t, s, map[string]any{
 		"cmd":               "read " + h + " --from-line 1",

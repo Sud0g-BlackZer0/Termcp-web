@@ -90,8 +90,8 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		return []envelope.Slot{s.directiveForward(ctx, stmt, win)}
 	case "file":
 		return []envelope.Slot{s.directiveFile(ctx, stmt, win)}
-	case "profile":
-		return []envelope.Slot{s.directiveProfile(ctx, stmt, win)}
+	case "host", "profile":
+		return []envelope.Slot{s.directiveHost(ctx, stmt, win)}
 	case "ext":
 		return []envelope.Slot{s.directiveExtension(ctx, stmt, win)}
 	case "jrpc", "mcp", "cdp":

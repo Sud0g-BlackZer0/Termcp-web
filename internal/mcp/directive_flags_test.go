@@ -69,10 +69,14 @@ func TestDocumentedProfileActionsExist(t *testing.T) {
 	src := readPackageSource(t)
 	// The handler states its own vocabulary in the refusal message; reading it
 	// from there means the two cannot drift without this test failing.
-	const marker = "profile needs --action "
+	//
+	// The directive is `host` now (`profile` survives as a synonym). The marker moved
+	// with it because the refusal is what a caller sees: teaching `host` while the
+	// error says `profile` would make the two names look like different things.
+	const marker = "host needs --action "
 	i := strings.Index(src, marker)
 	if i < 0 {
-		t.Fatal("the profile handler no longer states its action list; update this test")
+		t.Fatal("the host handler no longer states its action list; update this test")
 	}
 	rest := src[i+len(marker):]
 	// The list ends at the comma before "got ", not at the closing quote.

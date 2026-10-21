@@ -70,10 +70,34 @@ type jrpcHandle struct {
 	init bool
 }
 
-// jrpcOpen connects a URL and hands back a handle.
-func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, rawURL string) envelope.Slot {
+// jrpcOpen connects a URL THROUGH a session and hands back a handle.
+//
+// THE SESSION IS NOT OPTIONAL, and that is a redesign rather than a restriction.
+// A gateway URL names a port on some machine's loopback — 9222 for devtools, 8080 for
+// a service that only listens locally — and "which machine" was previously answered by
+// accident: the one termcp happened to run on. That made the same call succeed or fail
+// depending on the deployment, and the only way to find out which was to try it. Naming
+// the session makes the URL mean what it looks like it means.
+//
+// It also puts gateways back inside the model the rest of the tool uses. A session is
+// an SSH link; its loopback, its internal DNS and its proxy settings are the ones a URL
+// reaches. Nothing new is exposed by travelling inside that link — the alternative,
+// dialling from this process, is the thing that would be a new capability, in the sense
+// of one the target host's own network never granted.
+func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, sessionID, rawURL string) envelope.Slot {
+	if sessionID == "" {
+		return badRequest(stmt, op+" open needs a session first: "+op+" open <session> <url>\n"+
+			"A gateway URL names a port on the network of the machine the session points at, "+
+			"so the session decides what the URL can reach. Use `internal` for this machine.")
+	}
 	if rawURL == "" {
-		return badRequest(stmt, op+" open needs a URL")
+		return badRequest(stmt, op+" open needs a URL after the session: "+op+" open <session> <url>\n"+
+			"Example: "+op+" open internal http://localhost:9222")
+	}
+	dial, bad := s.dialerForSession(sessionID)
+	if bad != nil {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeSessionNotRunning},
+			Body: fmt.Sprintf("session %q is not running, so there is no tunnel to reach %s through", sessionID, rawURL)}
 	}
 	// The whitelist gate. A session whose template lists capabilities cannot reach
 	// a door it did not name — and before the capability rows existed it could
@@ -91,14 +115,14 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, raw
 	// transport. The streamable door speaks both shapes now (a POST answered by
 	// JSON or by an event), so the refusal is gone rather than reworded.
 	if op == "cdp" {
-		resolved, err := devtoolsSocket(ctx, rawURL)
+		resolved, err := devtoolsSocket(ctx, rawURL, dial)
 		if err != nil {
 			return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConnectionFailed},
 				Body: "discovery: cannot find DevTools websocket endpoint at " + rawURL + ": " + err.Error()}
 		}
 		rawURL = resolved
 	}
-	ch, err := jrpc.Open(ctx, rawURL)
+	ch, err := jrpc.Open(ctx, rawURL, dial)
 	if err != nil {
 		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConnectionFailed},
 			Body: "transport: " + err.Error()}
@@ -237,7 +261,7 @@ func (s *Server) refuseDoor(ctx context.Context, stmt directive.Statement, op st
 // the http endpoint and resolving it here is what makes `cdp open
 // http://127.0.0.1:9222` work, instead of making the caller read a JSON document
 // with `file`/`run` and paste a URL out of it.
-func devtoolsSocket(ctx context.Context, rawURL string) (string, error) {
+func devtoolsSocket(ctx context.Context, rawURL string, dial jrpc.DialFunc) (string, error) {
 	if strings.HasPrefix(rawURL, "ws://") || strings.HasPrefix(rawURL, "wss://") {
 		return rawURL, nil
 	}
@@ -248,7 +272,13 @@ func devtoolsSocket(ctx context.Context, rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// THE DISCOVERY REQUEST TRAVELS THE SAME WAY THE SOCKET WILL. A devtools endpoint
+	// reachable only from the target host would otherwise be discovered from here and
+	// then fail to connect, reporting a connection error for a URL that is in fact
+	// correct on the host that owns it. The client is built here rather than reused
+	// because it is used exactly once and its transport must carry this session's dial.
+	client := &http.Client{Transport: &http.Transport{DialContext: dial}}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("no devtools endpoint at %s: %w", rawURL, err)
 	}

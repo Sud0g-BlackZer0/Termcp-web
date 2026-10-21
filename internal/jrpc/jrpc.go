@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"strings"
@@ -132,24 +133,90 @@ type Channel struct {
 	closeIn sync.Once     // closes c.in exactly once, whichever path ends the loop
 }
 
-// Open connects rawURL, choosing the transport by scheme: http(s) posts one
-// frame per request, ws(s) opens a socket.
-func Open(ctx context.Context, rawURL string) (*Channel, error) {
+// deadlineFreeConn wraps a net.Conn whose SetDeadline is unimplemented.
+//
+// THE SSH PACKAGE DOES NOT IMPLEMENT DEADLINES, and the net.Conn it returns answers
+// both SetDeadline methods with "ssh: tcpChan: deadline not supported". Callers that
+// set a deadline and check the error — gorilla's websocket dialer does exactly this —
+// therefore fail against an SSH tunnel with a message about the transport rather than
+// about anything the caller did.
+//
+// The deadline is what is being dropped, not the timeout. Cancellation still works,
+// because every dial through this seam already carries a context: the SSH channel is
+// torn down when that context ends, which is the guarantee the deadline was reaching
+// for. Pretending to accept a deadline we cannot honour is the lesser evil here —
+// the alternative is refusing every websocket tunnel outright, and a websocket over
+// SSH is the main reason the seam exists.
+// NoDeadlineConn wraps conn so deadline calls succeed silently.
+func NoDeadlineConn(c net.Conn) net.Conn { return deadlineFreeConn{c} }
+
+type deadlineFreeConn struct{ net.Conn }
+
+func (c deadlineFreeConn) SetDeadline(time.Time) error      { return nil }
+func (c deadlineFreeConn) SetReadDeadline(time.Time) error  { return nil }
+func (c deadlineFreeConn) SetWriteDeadline(time.Time) error { return nil }
+
+// DialFunc opens a TCP connection to addr. It is the single seam through which a
+// gateway reaches its peer.
+//
+// THE URL IS NOT RESOLVED HERE. Every address a gateway dials — "localhost:9222",
+// "mcp.internal:8080" — is a name on the network OF THE HOST THE SESSION POINTS AT,
+// not on the network of the termcp process. A devtools port bound to 127.0.0.1 on a
+// remote box is not reachable from here and never was; the whole point of running an
+// SSH session to that box is that its loopback is the loopback the URL means.
+//
+// Dialling from the process instead would be a second, silent rule: the same URL
+// would work or fail depending on where termcp happens to run, and a caller could
+// only discover which by trying. So the session is not a convenience parameter — it
+// is what the URL is relative to.
+type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// Transport timeouts. They are named rather than left as zero values because a
+// zero IdleConnTimeout keeps dead sockets forever and a zero TLSHandshakeTimeout
+// lets a half-open peer hold a call until the caller's context expires.
+const (
+	maxIdleConn           = 30 * time.Second
+	tlsHandshakeTimeout   = 10 * time.Second
+	expectContinueTimeout = 1 * time.Second
+)
+
+// Open connects rawURL over dial, choosing the transport by scheme: http(s) posts
+// one frame per request, ws(s) opens a socket.
+//
+// dial is required. A nil dial is refused rather than defaulted to the process's own
+// network, because that default is exactly the silent second rule DialFunc describes:
+// it would make `mcp open url` mean "connect from termcp" for some callers and
+// "connect from the host" for others, with nothing in the request to tell them apart.
+func Open(ctx context.Context, rawURL string, dial DialFunc) (*Channel, error) {
+	if dial == nil {
+		return nil, fmt.Errorf("no dialer: a gateway reaches its peer through the session's SSH connection, so a session is required")
+	}
 	u, err := neturl.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("not a URL: %s", rawURL)
 	}
 	c := &Channel{
 		url:      rawURL,
-		client:   &http.Client{},
 		callGate: make(chan struct{}, 1),
 		ev:       make(chan string, maxEvents),
 		done:     make(chan struct{}),
 	}
+	// The default transport dials from this process. Replacing its DialContext is the
+	// whole of the change: every request the channel makes, and every socket it opens,
+	// then travels inside the SSH connection.
+	c.client = &http.Client{Transport: &http.Transport{
+		DialContext:           dial,
+		MaxIdleConns:          4,
+		IdleConnTimeout:       maxIdleConn,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ExpectContinueTimeout: expectContinueTimeout,
+	}}
 	switch u.Scheme {
 	case "ws", "wss":
 		c.transport = WS
-		conn, _, err := websocket.DefaultDialer.DialContext(ctx, rawURL, nil)
+		d := *websocket.DefaultDialer
+		d.NetDialContext = dial
+		conn, _, err := d.DialContext(ctx, rawURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("dial %s: %w", rawURL, err)
 		}

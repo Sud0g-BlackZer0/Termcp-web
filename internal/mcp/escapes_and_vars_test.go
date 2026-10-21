@@ -121,7 +121,7 @@ func TestVarsASTSubstitution(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := termText(t, s, map[string]any{
-				"cmd": tc.cmd,
+				"cmd":  tc.cmd,
 				"vars": tc.env,
 			})
 			if strings.HasPrefix(got, "TERM/1 4") {
@@ -141,7 +141,7 @@ func TestVarsMissingVariableIsRefused(t *testing.T) {
 	s := newTestServer(t)
 
 	got := termText(t, s, map[string]any{
-		"cmd": "run a:1 echo $UNDEFINED_VAR",
+		"cmd":  "run a:1 echo $UNDEFINED_VAR",
 		"vars": map[string]any{"OTHER": "x"},
 	})
 	if !strings.HasPrefix(got, "TERM/1 4") {

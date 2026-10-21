@@ -322,7 +322,7 @@ func TestAbsentCmdIsStillTheGuide(t *testing.T) {
 		}
 		slots := termSlots(t, rec)
 		text, _ := slots[0]["body"].(string)
-		if !strings.Contains(text, "termcp terminal") {
+		if !strings.Contains(text, "termcp — a shell-like DSL") {
 			t.Errorf("%s did not return the guide: %q", body, text[:min(120, len(text))])
 		}
 	}
@@ -338,7 +338,7 @@ func TestHTTPTermEmptyBodyIsTheGuide(t *testing.T) {
 		t.Fatalf("code = %v, want 200", got)
 	}
 	body, _ := slots[0]["body"].(string)
-	if !strings.Contains(body, "termcp terminal") {
+	if !strings.Contains(body, "termcp — a shell-like DSL") {
 		t.Errorf("empty body did not return the guide: %q", body[:min(120, len(body))])
 	}
 }

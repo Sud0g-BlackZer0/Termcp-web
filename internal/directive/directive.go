@@ -46,7 +46,7 @@ const (
 	// reaches the shell as `'a'"b"'c'`, not as `abc`.
 	KindPayload
 	// KindInterpreted is a payload that is also a NAME, not a command line
-	// (`alias jira mcp open <url>`): the payload is one shell word, so a
+	// (`alias jira mcp open internal <url>`): the payload is one shell word, so a
 	// following argument is not part of it.
 	KindInterpreted
 )
@@ -321,17 +321,17 @@ type File struct {
 // so `help`, the error usage lines and the parser cannot disagree.
 var ops = []Op{
 	{Name: "run", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChannel,
-		Usage:  "run <handle> <payload>   |   payload: 原样交给 shell，协议不分词",
+		Usage:  "run <channel> <line>",
 		Detail: runDetail},
 	{Name: "type", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChannel,
-		Usage:  "type <handle> <payload>   |   只打字，不回车",
+		Usage:  "type <channel> <text>",
 		Detail: typeDetail},
 	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat"}, TargetKind: TargetChannel,
-		Usage: "key <handle> <key> [--repeat N]"},
+		Usage: "key <channel> <key> [--repeat N]"},
 	{Name: "read", Core: true, Kind: KindFlags, Target: true, TargetKind: TargetChannel,
 		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw", "grep", "grep-limit"},
 		Valueless: []string{"raw"},
-		Usage:     "read <handle> [--cursor N|--from-line N|--tail N] [--stream o|e] [--grep RE] [--grep-limit N] [--raw]",
+		Usage:     "read <channel> [--cursor N|--from-line N|--tail N] [--stream o|e] [--grep RE] [--grep-limit N] [--raw]",
 		Detail:    readDetail},
 	{Name: "pipe", Core: true, Kind: KindPayload, Target: true,
 		Flags: []string{"argv", "name", "on-exit", "rows", "cols"}, RestValue: []string{"argv"},
@@ -344,24 +344,24 @@ var ops = []Op{
 	{Name: "ps", Core: true, Kind: KindFlags, Flags: []string{"shells", "all"}, Valueless: []string{"shells", "all"},
 		Usage: "ps [--shells] [--all]"},
 	{Name: "info", Core: true, Kind: KindFlags, Target: true,
-		Usage: "info <session|handle>"},
+		Usage: "info <target>"},
 	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2, TargetKind: TargetChannel,
-		Usage: "resize <handle> <rows> <cols>"},
+		Usage: "resize <channel> <rows> <cols>"},
 	{Name: "close", Core: true, Kind: KindFlags, Target: true, Flags: []string{"grace"},
 		RetiredFlags: map[string]string{
 			"force": "--force is gone. `close` stops and keeps the record, `rm` erases it (and takes --force while running).",
 		},
-		Usage:  "close <handle|session> [--grace N]",
+		Usage:  "close <target> [--grace N]",
 		Detail: closeDetail},
 	{Name: "rm", Kind: KindFlags, Target: true, TargetKind: TargetSession,
 		Flags: []string{"force", "dry-run"}, Valueless: []string{"force", "dry-run"},
 		Usage:  "rm <session> [--force] [--dry-run]",
 		Detail: rmDetail},
 	{Name: "span", Kind: KindFlags, Target: true, TargetKind: TargetChannel,
-		Usage:  "span <handle>",
+		Usage:  "span <channel>",
 		Detail: spanDetail},
 	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"}, TargetKind: TargetChannel,
-		Usage: "reader <handle>   |   reader <handle> --drop <id>"},
+		Usage: "reader <channel>   |   reader <channel> --drop <id>"},
 	{Name: "notify", Kind: KindPayload, Flags: []string{"level", "sticky", "on", "title", "for"}, Valueless: []string{"sticky"},
 		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] [--title T] [--for SECONDS] <body>",
 		Detail: notifyDetail},
@@ -376,13 +376,16 @@ var ops = []Op{
 			"uid", "gid", "atime", "mtime", "size", "op", "action-verb"},
 		Usage:  "file <session> --action read|write|replace|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …",
 		Detail: fileDetail},
-	{Name: "profile", Kind: KindFlags,
+	// HOST, NOT PROFILE. A "profile" is a word this project invented; a host is the
+	// thing everyone already has. The rename costs one synonym and buys a caller that
+	// does not have to learn a private noun to connect to a machine.
+	{Name: "host", AlsoKnownAs: []string{"profile"}, Kind: KindFlags,
 		Flags: []string{"action", "name", "host", "user", "port", "password", "private-key", "key-passphrase",
 			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
 			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port", "source"},
 		Valueless: []string{"trust-unknown-host", "default-approval"},
-		Usage:     "profile list|create|edit|copy|delete …",
-		Detail:    profileDetail + "\n\n" + profileFileFormat},
+		Usage:     "host list|create|edit|copy|delete …",
+		Detail:    hostDetail + "\n\n" + hostFileFormat},
 	// ext IS CORE, because what it lists is not discoverable by acting: a pinned MCP
 	// server or a read-only skills directory is capability the session already has,
 	// and a caller that never suspects it exists will spend its turns building a
@@ -396,13 +399,13 @@ var ops = []Op{
 		Usage:       "ext list|get|create|update|delete|retry …",
 		Detail:      extDetail},
 	{Name: "jrpc", Kind: KindPayload, PayloadSpan: spanVerbatim,
-		Usage:  "jrpc open <url>   |   jrpc call|send|recv|close <handle> …",
+		Usage:  "jrpc open <session> <url>   |   jrpc call|send|recv|close <handle> …",
 		Detail: jrpcDetail},
 	{Name: "mcp", Kind: KindPayload, PayloadSpan: spanVerbatim,
-		Usage:  "mcp open <url>   |   mcp tools|send|recv|call|close <handle> …",
+		Usage:  "mcp open <session> <url>   |   mcp tools|send|recv|call|close <handle> …",
 		Detail: mcpDetail},
 	{Name: "cdp", Kind: KindPayload, PayloadSpan: spanVerbatim,
-		Usage:  "cdp open <url|http-endpoint>   |   cdp call|send|recv|close <handle> …",
+		Usage:  "cdp open <session> <url>   |   cdp call|send|recv|close <handle> …",
 		Detail: cdpDetail},
 	{Name: "alias", Kind: KindPayload, PayloadSpan: spanWords,
 		Usage: "alias <name> <directive>   |   alias   |   alias <name> --off"},
@@ -849,7 +852,7 @@ is not a one-shot.`
 // The file format is a SEPARATE page (see help profile, which appends both)
 // because the two answer different questions: these flags act on one profile,
 // the file shape is for a batch import the caller is asked to produce.
-const profileDetail = `Actions and the flags each one uses.
+const hostDetail = `Actions and the flags each one uses.
   list                      no flags
   create                    --name and the connection fields below
   edit                      --name plus whichever fields change
@@ -882,7 +885,7 @@ here is write-only: it is never echoed back by list or get.`
 // often the one asked to *produce* that text — a user pastes a list of hosts and
 // wants an importable file — and a format spec duplicated in prose would drift
 // from the parser the moment either is edited.
-const profileFileFormat = `profile file format (the batch import/export shape):
+const hostFileFormat = `host file format (the batch import/export shape):
 
   [[connections]]
   name = "prod"                 # letters/digits/_/- , max 64

@@ -54,8 +54,9 @@ func toolListPeer(t *testing.T) *httptest.Server {
 func TestMcpOpenReportsDiscoveredTools(t *testing.T) {
 	srv := toolListPeer(t)
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 
-	out := termText(t, s, map[string]any{"cmd": "mcp open ws" + strings.TrimPrefix(srv.URL, "http")})
+	out := termText(t, s, map[string]any{"cmd": "mcp open internal ws" + strings.TrimPrefix(srv.URL, "http")})
 	h := handleFrom(t, out)
 	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
 
@@ -81,8 +82,9 @@ func TestMcpOpenReportsDiscoveredTools(t *testing.T) {
 func TestMcpOpenSucceedsEvenWhenDiscoveryFails(t *testing.T) {
 	srv, _ := countingPeer(t, nil) // answers initialize, but tools/list returns no tools array
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 
-	out := termText(t, s, map[string]any{"cmd": "mcp open ws" + strings.TrimPrefix(srv.URL, "http")})
+	out := termText(t, s, map[string]any{"cmd": "mcp open internal ws" + strings.TrimPrefix(srv.URL, "http")})
 	if !strings.HasPrefix(out, "TERM/1 200") {
 		t.Fatalf("open must succeed even when discovery cannot list tools:\n%s", out)
 	}
@@ -95,8 +97,9 @@ func TestMcpOpenSucceedsEvenWhenDiscoveryFails(t *testing.T) {
 func TestJrpcOpenDoesNotClaimTools(t *testing.T) {
 	srv, _ := countingPeer(t, nil)
 	s := newTestServer(t)
+	internalSession(t, s) // gateways need a session to tunnel through
 
-	out := termText(t, s, map[string]any{"cmd": "jrpc open ws" + strings.TrimPrefix(srv.URL, "http")})
+	out := termText(t, s, map[string]any{"cmd": "jrpc open internal ws" + strings.TrimPrefix(srv.URL, "http")})
 	h := handleFrom(t, out)
 	defer termText(t, s, map[string]any{"cmd": "jrpc close " + h})
 

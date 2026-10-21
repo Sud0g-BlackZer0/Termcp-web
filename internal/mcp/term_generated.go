@@ -67,6 +67,25 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 	if body == "" {
 		body = "(nothing is running)\n"
 	}
+	// PS IS THE STATE, SO ITS learn_mode TEACHES THE STATE VERBS.
+	//
+	// `learn_mode` attaches the CURRENT directive's usage line, which is right for a
+	// reply about one command and useless here: a caller that just ran `ps` is holding
+	// addresses and wondering what can be done with them. The verbs that consume an
+	// address are exactly the ones worth naming at that moment — and they are not
+	// discoverable from the listing, which shows ids and states but never says that
+	// `close a1f3:1` archives one and `rm a1f3` erases the other.
+	//
+	// This is the manual's own ordering: learn what exists, then what can be done to
+	// it. One `ps learn_mode:true` replaces four `help` round trips.
+	if win.LearnMode {
+		body += "\nwhat an address in column 1 can be used for:\n"
+		for _, name := range []string{"info", "close", "rm", "resize", "read", "span"} {
+			if op, ok := directive.Lookup(name); ok {
+				body += "  " + op.Usage + "\n"
+			}
+		}
+	}
 	// A generated reply is capped by the same window as a byte stream: a listing is
 	// exactly as capable of flooding a context as a log is, and the directives with
 	// no stream to continue are the ones with no other protection.
@@ -622,12 +641,12 @@ func fileToolForAction(action string) (tool, capID string, ok bool) {
 	return "", "", false
 }
 
-// directiveProfile maps `profile` onto ssh_config.
-func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
+// directiveHost maps `host` onto the stored connection targets.
+func (s *Server) directiveHost(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	action, rest := resolveAction(stmt, "list")
 	capID, ok := profileCapability(action)
 	if !ok {
-		return badRequest(stmt, "profile needs --action list|create|edit|copy|delete, got "+quoteOrDash(action))
+		return badRequest(stmt, "host needs --action list|create|edit|copy|delete, got "+quoteOrDash(action))
 	}
 	if slot, refused := s.refuseAction(ctx, stmt, capID); refused {
 		return slot
@@ -858,6 +877,11 @@ func (s *Server) refuseAction(ctx context.Context, stmt directive.Statement, cap
 // own spaces (`"name": "x"` becomes two words), and the payload keeps the
 // caller's quoting, so a quoted frame reached json.Unmarshal with its quotes
 // still on and was refused as "not JSON".
+// looksLikeURL reports whether a word carries a scheme, which is how a bare URL is
+// told apart from a session name in `open`. Session ids are hex and host names are
+// identifiers; neither can contain "://".
+func looksLikeURL(word string) bool { return strings.Contains(word, "://") }
+
 func (s *Server) directiveJRPC(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	payload := strings.TrimSpace(stmt.Payload)
 	if payload == "" {
@@ -866,8 +890,23 @@ func (s *Server) directiveJRPC(ctx context.Context, stmt directive.Statement, wi
 	sub, rest := splitWord(payload)
 	switch sub {
 	case "open":
-		url, _ := splitWord(rest)
-		return s.jrpcOpen(ctx, stmt, stmt.Op, unquoteWord(url))
+		// open <session> <url>. The session is FIRST because it is the larger
+		// decision: it decides which network the URL is resolved on, and a caller
+		// that has not chosen one has not yet said what the URL means.
+		//
+		// ONE WORD IS NOT A SESSION AND AN EMPTY URL. A caller that typed a bare URL
+		// has already named the thing it wants to reach and merely omitted the network;
+		// reporting "needs a URL" would answer a sentence it did not say. Recognising a
+		// scheme is how the two mistakes stay distinguishable.
+		first, tail := splitWord(rest)
+		if tail = strings.TrimSpace(tail); tail == "" {
+			if looksLikeURL(first) {
+				return s.jrpcOpen(ctx, stmt, stmt.Op, "", unquoteWord(first))
+			}
+			return s.jrpcOpen(ctx, stmt, stmt.Op, unquoteWord(first), "")
+		}
+		rawURL, _ := splitWord(tail)
+		return s.jrpcOpen(ctx, stmt, stmt.Op, unquoteWord(first), unquoteWord(rawURL))
 	case "tools", "send", "recv", "call", "close":
 		handle, tail := splitWord(rest)
 		args := []string{}
@@ -940,56 +979,50 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 // the recovery path must not depend on remembering anything.
 func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	var b strings.Builder
-	b.WriteString("termcp terminal. Syntax:\n")
-	// Two examples, and only two: the batching line says something the directive
-	// table below CANNOT express (that `;` runs several statements in one call and
-	// gives one slot each), and the pty line shows what a reply's handle is for.
-	// The other examples that used to sit here (`run … one command, one call`,
-	// `read … read, list, inspect`, the pty/pipe usage) repeated the table verbatim
-	// — 308 bytes of the same information written twice, which is what a caller
-	// pays for on every recovery call.
-	b.WriteString("  pty internal                                  open an interactive shell -> Handle\n")
-	b.WriteString("  ps; read a1f3:1; info a1f3:1                 several statements, one call: one slot each\n")
-	b.WriteString("Handles are <session>:<index> (always with :N); copy one from ps or ext list into the next command.\n")
-	// PINNED CAPABILITY IS NOT DISCOVERABLE BY ACTING, which is why this line exists
-	// at all: an extension is an MCP server, a read-only skills tree, a prompt
-	// template or a hand-written terminal that somebody already set up. A caller
-	// that does not know to ask will hand-build a worse version of it, or conclude
-	// the capability is missing.
-	b.WriteString("`ext list` = capability already pinned here (mcp servers, skills trees, prompt terminals).\n")
-	b.WriteString("Every reply is TERM/1 <code>: 2xx ok, 4xx bad request, 5xx the command failed.\n")
 
-	// The CORE directive table, plus the pointer to the rest.
-	//
-	// This reply is read by a caller that has not decided what to do yet, so the
-	// lines it needs come first and the other eighteen are one `help` away. Both
-	// halves matter:
-	//
-	//   - Listing all 24 here cost the recovery path ~900 bytes of capability the
-	//     caller has no use for at that moment, on every wake-up.
-	//   - Listing ONLY the core ones and stopping there would make file/forward/
-	//     extension work invisible to anyone who never suspects there is more —
-	//     the failure the old "7 of 23 examples" had, one layer down.
-	//
-	// The pointer line is what keeps both true. It names `help` in the same wording
-	// `help` uses for itself, so a caller that follows it lands on the full table
-	// rather than on a detail page, and it says how many are waiting. Generated
-	// from the same ops array `help` prints, so the two cannot disagree.
-	b.WriteString("\ndirectives (core; `help` lists all " + strconv.Itoa(len(directive.Ops())) + "):\n")
+	b.WriteString("termcp — a shell-like DSL controlling hosts over SSH.\n")
+	b.WriteString("Local (\"internal\", if enabled) and remote targets are treated identically.\n\n")
+
+	b.WriteString("cmd = the DSL.  sh = a shell command.\n")
+	b.WriteString("cmd holds directives only. sh never appears in cmd — it enters as a value through\n")
+	b.WriteString("args ($1, $2) or vars ($NAME). cmd supports &&, ||, ;, and &.\n")
+	b.WriteString("  run a1f3:1 $1   args: [\"make && test\"]   one sh line, operators live\n")
+	b.WriteString("  run a1f3:1 make && notify done           two cmd directives\n\n")
+
+	b.WriteString("STRUCTURE:\n")
+	b.WriteString("  host     a saved connection target. `host list` shows them.\n")
+	b.WriteString("  session  one SSH link. host is used to open one; `ps` lists live ones.\n")
+	b.WriteString("  channel  one shell on that link, <session>:<index> (e.g. a1f3:1).\n")
+	b.WriteString("           Copy addresses from ps; never spell one.\n\n")
+
+	b.WriteString("TWO CENTRES:\n")
+	b.WriteString("  ext list  CAPABILITY HUB — start here. Lists resident, capability-trimmed\n")
+	b.WriteString("            extensions: mcp servers, skills (read-only SFTP), prompts.\n")
+	b.WriteString("            Notes inside an extension are its operating manual.\n")
+	b.WriteString("  ps        SSH STATE & LIFECYCLE — lists all links and channels.\n")
+	b.WriteString("            Pass learn_mode:true and it expands the verbs that take the\n")
+	b.WriteString("            addresses it just printed (info, close, rm, resize, span).\n\n")
+
+	b.WriteString("ACTIONS (every capability belongs to a session):\n")
 	for _, op := range directive.Ops() {
 		if !op.Core {
 			continue
 		}
 		b.WriteString("  " + op.Usage + "\n")
 	}
-	b.WriteString("\n")
+	b.WriteString("  file <session> --action sftp read/write/replace/stat/delete/rename/urls\n")
+	b.WriteString("  fwd <session> --action  SSH tunnels: local, remote, dynamic\n")
+	b.WriteString("  mcp open <session> <url>  |  cdp open <session> <url>\n")
+	b.WriteString("  notify <text>           reach human before sudo/password/choice, then wait\n\n")
 
-	// What is running right now, in the same columns `ps` prints: the recovery path
-	// is "ask, then copy a handle", not "ask, then translate".
+	b.WriteString("`help` lists all " + strconv.Itoa(len(directive.Ops())) + " directives; `help <directive>` explains one.\n")
+	b.WriteString("Pass learn_mode:true on any call and its usage arrives with the reply.\n")
+
+	// Live state: ps listing
 	ps := s.directivePS(ctx, directive.Statement{Op: "ps", Path: "ps"}, win)
-	b.WriteString("running now:\n")
+	b.WriteString("\nrunning now (from ps):\n")
 	if strings.TrimSpace(ps.Body) == "" {
-		b.WriteString("  (nothing)\n")
+		b.WriteString("  (nothing — `pty internal` opens a local shell; `host list` shows targets)\n")
 	} else {
 		for _, line := range strings.Split(strings.TrimRight(ps.Body, "\n"), "\n") {
 			b.WriteString("  " + line + "\n")
@@ -999,9 +1032,6 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	return termReply{win: win, slots: []envelope.Slot{{Code: code, Body: body}}}
 }
 
-// --- small helpers ---
-
-// dash renders an empty field as a placeholder, so columns stay aligned.
 func dash(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "-"
