@@ -100,47 +100,28 @@ func TestWatchAddActuallySubscribes(t *testing.T) {
 		t.Fatalf("input: %v", err)
 	}
 
-	// The output pump coalesces, so the marker may arrive split across frames;
-	// accumulate the payloads rather than requiring one frame to hold it all.
+	// ONE DEADLINE FOR THE WHOLE WAIT, NOT A POLL PER FRAME.
+	//
+	// gorilla caches the first read error on a connection and NEVER clears it: one
+	// expired read deadline poisons the socket for the rest of its life, and every
+	// later read returns that same error in microseconds without touching the wire.
+	// A poll loop with a 2s deadline per iteration therefore kills its own connection
+	// the first time it waits for output that has not arrived yet -- and then spins,
+	// because the failures come back instantly.
+	//
+	// So the deadline is armed once, for the whole budget. A timeout at the end means
+	// the marker never showed up, which is the thing worth failing on. A non-timeout
+	// error means the peer is gone. Nothing in between needs a heuristic.
 	deadline := time.Now().Add(20 * time.Second)
 	var got strings.Builder
-	early := 0 // consecutive timeouts that arrived before their deadline
-	for time.Now().Before(deadline) {
-		started := time.Now()
-		_ = conn.SetReadDeadline(started.Add(readDeadline))
+	_ = conn.SetReadDeadline(deadline)
+	for {
 		var m map[string]any
 		if err := conn.ReadJSON(&m); err != nil {
-			// A read timeout means the channel is quiet, which is expected while
-			// waiting for output — but it is NOT the only way ReadJSON fails, and
-			// treating every failure as "quiet" re-reads a dead connection. gorilla
-			// panics on that ("repeated read on failed websocket connection"), which
-			// turned a slow CI runner into a panic instead of a test failure.
-			if !isTimeout(err) {
-				t.Fatalf("reading the watch channel: %v", err)
+			if isTimeout(err) {
+				t.Fatalf("the marker never arrived within %v; got %q", 20*time.Second, got.String())
 			}
-			// isTimeout ALONE STILL SPINS ON A DEAD CONNECTION. Once the peer is
-			// gone gorilla caches the failure and every read returns at once, so the
-			// loop no longer waits out its two seconds — it retries thousands of times
-			// inside the same 20s budget and trips the same panic through the door that
-			// was left open.
-			//
-			// A healthy idle connection waits the WHOLE deadline before reporting a
-			// timeout, so a timeout that arrives early is not "quiet" — it is usually
-			// broken. But ONE early timeout is not proof: the deadline is armed per
-			// read, and the first read after the drain can surface a deadline left
-			// over from before it was reset (6.9µs on a loaded macOS runner, with the
-			// connection perfectly alive). Two in a row, each against a freshly armed
-			// deadline, cannot be a leftover — that is the cached failure.
-			if elapsed := time.Since(started); elapsed < readDeadline/2 {
-				early++
-				if early >= 2 {
-					t.Fatalf("the watch channel stopped answering (%d early timeouts, last after %v); got %q",
-						early, elapsed, got.String())
-				}
-				continue
-			}
-			early = 0
-			continue
+			t.Fatalf("reading the watch channel: %v (got %q)", err, got.String())
 		}
 		if m["type"] != "terminal" {
 			continue
@@ -154,7 +135,6 @@ func TestWatchAddActuallySubscribes(t *testing.T) {
 			return // the tab received the channel's live output
 		}
 	}
-	t.Fatalf("watch_add did not deliver the channel's output; got %q", got.String())
 }
 
 // shellForTest and shellArgsForTest pick a shell that stays alive and echoes,
