@@ -90,7 +90,7 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 			action, ok := fileGroupForOp(op)
 			if !ok {
 				return []envelope.Slot{badRequest(stmt, "get --op does not know "+quoteOrDash(op)+
-					". It takes stat, realpath, readlink, getwd, or one of: chmod, chown, chtimes, symlink, link, truncate, statvfs.")}
+					". It takes stat, realpath, readlink, getwd, urls, or one of: chmod, chown, chtimes, symlink, link, truncate, statvfs.")}
 			}
 			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
 				"action": action, "op": op, "remote-path": stmt.Key,
@@ -1180,10 +1180,21 @@ func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win 
 	case "forward":
 		return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}
 	case "file":
-		// A directory listing is the fs action; the path is the node's key.
-		return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
-			"action": "fs", "remote-path": stmt.Key,
-		}), win)}
+		// THERE IS NO DIRECTORY LISTING, and this says so instead of guessing.
+		//
+		// `file --action find` was added and then reverted; the word `ls <session>
+		// file <path>` survived in the usage line and here, wrapped around the fs group,
+		// whose only members are truncate/realpath/statvfs. A caller asking to list a
+		// directory got "file --action fs needs the sub-action", which names a layer
+		// they never mentioned and says nothing about the capability being absent.
+		//
+		// The kind stays DECLARED so it can be refused by name: dropping it would make
+		// `file` a stray positional argument and the command would silently list the
+		// session instead — the same fall-through that closed a session from `close`.
+		return []envelope.Slot{badRequest(stmt, "there is no directory listing here. `ls` enumerates "+
+			"nodes termcp knows (sessions, channels, forwards, hosts, extensions), not files: a directory "+
+			"is the target's own business, so ask the shell — `run "+stmt.Target+":1 $1` with args [\"ls -la "+
+			stmt.Key+"\"]. For one path's metadata use `get "+stmt.Target+" file "+stmt.Key+"`.")}
 	}
 	if stmt.Target == "" {
 		// Bare `ls`: every live link and every channel on it.
@@ -1243,8 +1254,11 @@ func aliasStatement(stmt directive.Statement, off bool) directive.Statement {
 // is an implementation detail. This is the one place that detail lives.
 func fileGroupForOp(op string) (string, bool) {
 	switch op {
-	case "stat", "getwd":
-		// Their own actions, not members of a group.
+	case "stat", "getwd", "urls":
+		// Their own actions, not members of a group. `urls` belongs here: it hands back
+		// the download/upload addresses for a path, which is the only way to deliver a
+		// file to something outside termcp, and leaving it out of the table made
+		// `get <session> file <path> --op urls` answer "does not know".
 		return op, true
 	case "chmod", "chown", "chtimes":
 		return "perm", true

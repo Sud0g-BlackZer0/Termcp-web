@@ -91,7 +91,7 @@ func TestEveryFileOpReachesItsGroup(t *testing.T) {
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	for _, op := range []string{
-		"stat", "getwd", "realpath", "readlink",
+		"stat", "getwd", "urls", "realpath", "readlink",
 		"chmod", "chown", "chtimes", "symlink", "link", "truncate", "statvfs",
 	} {
 		for _, verb := range []string{"get", "write"} {
