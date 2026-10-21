@@ -234,6 +234,34 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 
 // directiveRemove deletes a session and its logs.
 func (s *Server) directiveRemove(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
+	// --dry-run ANSWERS WHAT WOULD HAPPEN WITHOUT DOING IT, and it runs FIRST.
+	//
+	// FIRST, because a preview that can itself be refused is not a preview: the
+	// running-session guard below answered 409 to a `--dry-run` call, which is
+	// exactly the call a cautious caller makes BEFORE deciding whether to pass
+	// --force. The preview is the place where "it is running, you will need --force"
+	// is stated, not the place where it is enforced.
+	//
+	// The shape exists now, before review mode does: a destructive directive either
+	// supports a preview or it does not, and leaving it for later means the calls
+	// written today cannot use it.
+	if boolFlag(stmt, "dry-run") {
+		what := "session '" + stmt.Target + "' does not exist, so nothing would be erased"
+		if sess, bad := s.requireSession(stmt.Target); bad == nil && sess != nil {
+			info := sess.Info()
+			what = "would erase session '" + stmt.Target + "' (status " + string(info.Status) +
+				"): manifests, transcript and every trace. This cannot be undone."
+			if info.Status == api.SessionRunning {
+				what += "\nIt is running, so the real call needs --force."
+			}
+		}
+		return envelope.Slot{
+			Code:    200,
+			Headers: map[string]string{"Path": stmt.Path, "Dry-Run": "true"},
+			Body:    what,
+		}
+	}
+
 	// A RUNNING SESSION NEEDS --force.
 	//
 	// The distinction rm draws is not "is it alive" but "is the record recoverable",

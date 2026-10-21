@@ -68,6 +68,8 @@ var headerOrder = []string{
 	"Folded",
 	"Still-Running",
 	"Executed",
+	"Dry-Run",
+	"Pending-ID",
 	"Error-Code",
 	"Idempotent",
 	"Hint",

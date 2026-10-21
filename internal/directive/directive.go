@@ -344,8 +344,8 @@ var ops = []Op{
 		Usage:  "close <handle|session> [--grace N]",
 		Detail: closeDetail},
 	{Name: "rm", Kind: KindFlags, Target: true, TargetKind: TargetSession,
-		Flags: []string{"force"}, Valueless: []string{"force"},
-		Usage:  "rm <session> [--force]",
+		Flags: []string{"force", "dry-run"}, Valueless: []string{"force", "dry-run"},
+		Usage:  "rm <session> [--force] [--dry-run]",
 		Detail: rmDetail},
 	{Name: "span", Kind: KindFlags, Target: true, TargetKind: TargetChannel,
 		Usage:  "span <handle>",
@@ -2024,6 +2024,12 @@ session is left untouched, so the guard costs one extra word rather than a mista
 
   rm <session>              a stopped session, no ceremony
   rm <session> --force      a running one; its channels and forwards are released first
+  rm <session> --dry-run    say what would be erased, erase nothing
+
+--dry-run is the cautious call, and it comes first: it is answered even for a RUNNING
+session, because that is exactly when a caller wants to ask before passing --force.
+The reply is 200 with a Dry-Run header and a sentence naming what the real call would
+destroy. Use it whenever you are not certain which session a handle belongs to.
 
 The target is the SESSION, not a channel. rm <session>:1 is refused: a caller who
 named a channel asked about that channel, and erasing the container is a bigger
