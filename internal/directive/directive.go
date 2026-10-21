@@ -364,9 +364,9 @@ var ops = []Op{
 	{Name: "file", Kind: KindFlags, Target: true,
 		Flags: []string{"action", "remote-path", "from-path", "to-path", "local-path", "data", "mode",
 			"offset", "length", "local-offset", "target", "link-path", "existing-path", "new-path",
-			"old-text", "new-text",
+			"old-text", "new-text", "pattern", "exclude", "limit",
 			"uid", "gid", "atime", "mtime", "size", "op", "action-verb"},
-		Usage:  "file <session> --action read|write|replace|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …",
+		Usage:  "file <session> --action read|write|replace|find|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …",
 		Detail: fileDetail},
 	{Name: "profile", Kind: KindFlags,
 		Flags: []string{"action", "name", "host", "user", "port", "password", "private-key", "key-passphrase",
@@ -540,6 +540,13 @@ const fileDetail = `Actions and the flags each one uses.
                        --offset is the REMOTE write position; --local-offset the
                        position inside --local-path; --length caps the transfer
   replace              --remote-path --old-text --new-text
+  find                 --remote-path [--pattern <glob>] [--exclude <csv>] [--limit N]
+
+FIND RECURSES AND RETURNS STRUCTURED HITS, NOT TEXT. The reply is
+[{"path":..., "size":..., "is_dir":...}] plus "total" and "truncated".
+It walks through SFTP, so it behaves identically on Linux, macOS and Windows,
+unlike a remote find(1) or rg(1) which may not exist. The default exclude skips
+node_modules and .git so you never spend a search budget inside them by accident.
 
 REPLACE IS EXACT AND UNIQUE, AND THAT IS THE FEATURE. --old-text must appear in the
 file EXACTLY ONCE; zero matches and several matches are both errors, and the
