@@ -337,6 +337,15 @@ func (s *Client) ReplaceInFile(remotePath, oldText, newText string) (int64, erro
 	if err != nil {
 		return 0, fmt.Errorf("read remote file: %w", err)
 	}
+	// CLOSE BEFORE RENAMING OVER IT. The deferred Close above runs when the function
+	// returns, which is after the rename — fine on POSIX, where an open handle does not
+	// block a rename, and fatal on Windows, where the rename and then the remove both
+	// fail with "The process cannot access the file because it is being used by another
+	// process". Closing here (and tolerating the second Close from the defer) makes the
+	// handle's lifetime match the read that needs it.
+	if err := f.Close(); err != nil {
+		return 0, fmt.Errorf("close remote file: %w", err)
+	}
 
 	count := strings.Count(string(original), oldText)
 	if count == 0 {
