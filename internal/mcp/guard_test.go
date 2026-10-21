@@ -366,7 +366,7 @@ func TestGuardResolvesIndirectResourceIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDynamic: %v", err)
 	}
-	rule, err := s.notifyMgr.Register(sid, shellID, notify.ChannelResource, notify.EventOutput, 0, nil)
+	rule, err := s.notifyMgr.Register(sid, shellID, notify.ChannelResource, notify.EventOutput, nil, nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestGuardResolvesIndirectResourceIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDynamic: %v", err)
 	}
-	rule2, err := s.notifyMgr.Register(plain, plainShell, notify.ChannelResource, notify.EventOutput, 0, nil)
+	rule2, err := s.notifyMgr.Register(plain, plainShell, notify.ChannelResource, notify.EventOutput, nil, nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -636,3 +636,6 @@ func TestGuardGatesEveryHandleSpelling(t *testing.T) {
 		}
 	}
 }
+
+// intPtr names a value the API sends as an optional integer.
+func intPtr(v int) *int { return &v }

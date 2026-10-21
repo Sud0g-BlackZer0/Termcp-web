@@ -177,7 +177,7 @@ func TestRESTRespectsSessionRestriction(t *testing.T) {
 	if code := p.del(t, "/api/forwards/"+fw.ForwardID); code != http.StatusForbidden {
 		t.Errorf("REST forward close on a session that granted no forwards = %d, want 403", code)
 	}
-	rule, err := p.notifyMgr.Register(sid, p.shellID, notify.ChannelResource, notify.EventOutput, 0, nil)
+	rule, err := p.notifyMgr.Register(sid, p.shellID, notify.ChannelResource, notify.EventOutput, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
