@@ -1,9 +1,13 @@
 package sftp
 
 import (
+	crand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"path"
+	"strings"
 
 	"github.com/open-mcp-ai/termcp/internal/encoding"
 )
@@ -285,4 +289,121 @@ func writeOpenFlags(offset *int64) (int, int64) {
 		off = 0
 	}
 	return flag, off
+}
+
+// maxReplaceSize bounds how large a file ReplaceInFile will load into memory.
+// An exact-replace primitive is for editing text, not for rewriting a 4 GB log:
+// loading the latter would OOM the daemon rather than edit it. Callers with
+// bigger files have file write + offsets.
+const maxReplaceSize = 16 << 20 // 16 MiB
+
+// ReplaceInFile replaces exactly one occurrence of oldText with newText.
+//
+// THE UNIQUENESS CONSTRAINT IS THE FEATURE. A replace that "just replaces" is how
+// an edit lands in the wrong place: an agent asked to change `timeout = 5` in a
+// config with three such lines would silently pick the first, and the mistake is
+// invisible until the wrong service misbehaves. Matching zero or several times is
+// an error that names the count, so the caller narrows the pattern instead of
+// guessing which one it got.
+//
+// ATOMIC ON POSIX: the result is written to a temporary file in the SAME directory
+// and renamed over the original. rename(2) within a filesystem is atomic, so a
+// reader either sees the old file or the new one — never a half-written one, which
+// is what an in-place write produces if the process dies mid-way.
+//
+// Returns the number of bytes written (the new file's size).
+func (s *Client) ReplaceInFile(remotePath, oldText, newText string) (int64, error) {
+	if oldText == "" {
+		return 0, fmt.Errorf("old_text must not be empty")
+	}
+	f, err := s.client.Open(remotePath)
+	if err != nil {
+		return 0, fmt.Errorf("open remote file: %w", err)
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat remote file: %w", err)
+	}
+	if fi.IsDir() {
+		return 0, fmt.Errorf("%s: %w; use --action stat to list its contents", remotePath, ErrIsDirectory)
+	}
+	if fi.Size() > maxReplaceSize {
+		return 0, fmt.Errorf("%s is %d bytes, over the %d-byte limit for exact replace; use file read + file write with --offset for a file this large",
+			remotePath, fi.Size(), maxReplaceSize)
+	}
+
+	original, err := io.ReadAll(io.LimitReader(f, maxReplaceSize+1))
+	if err != nil {
+		return 0, fmt.Errorf("read remote file: %w", err)
+	}
+
+	count := strings.Count(string(original), oldText)
+	if count == 0 {
+		return 0, fmt.Errorf("%w: %q does not appear in %s", ErrPatternNotFound, previewForError(oldText), remotePath)
+	}
+	if count > 1 {
+		return 0, fmt.Errorf("%w: %q appears %d times in %s; include more surrounding context so it matches once",
+			ErrPatternAmbiguous, previewForError(oldText), count, remotePath)
+	}
+
+	updated := strings.Replace(string(original), oldText, newText, 1)
+
+	// Temporary file in the same directory, so the rename stays within one
+	// filesystem and is therefore atomic.
+	dir := path.Dir(remotePath)
+	base := path.Base(remotePath)
+	tmpPath := path.Join(dir, "."+base+".termcp-replace-"+randomSuffix())
+
+	if err := s.writeWholeFile(tmpPath, []byte(updated)); err != nil {
+		_ = s.RemoveFile(tmpPath)
+		return 0, fmt.Errorf("write temporary file: %w", err)
+	}
+	// Preserve the mode: a replace must not silently change permissions, which is
+	// exactly what a freshly created temp file would otherwise do (0644).
+	if err := s.client.Chmod(tmpPath, fi.Mode().Perm()); err != nil {
+		_ = s.RemoveFile(tmpPath)
+		return 0, fmt.Errorf("preserve permissions on temporary file: %w", err)
+	}
+	if err := s.RenameFile(tmpPath, remotePath); err != nil {
+		_ = s.RemoveFile(tmpPath)
+		return 0, fmt.Errorf("rename temporary file over %s: %w", remotePath, err)
+	}
+	return int64(len(updated)), nil
+}
+
+// writeWholeFile creates (or truncates) remotePath and writes data.
+func (s *Client) writeWholeFile(remotePath string, data []byte) error {
+	f, err := s.client.Create(remotePath)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// previewForError shortens a pattern for an error message. A replace pattern can be
+// a whole paragraph, and pasting it into an error would bury the count and the hint.
+func previewForError(s string) string {
+	const limit = 60
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return string(r[:limit]) + "…"
+}
+
+// randomSuffix returns a short unique token for a temporary filename.
+func randomSuffix() string {
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		// crypto/rand failing is not a reason to refuse the edit; the pid is enough
+		// to avoid a collision within one process.
+		return fmt.Sprintf("%d", os.Getpid())
+	}
+	return hex.EncodeToString(b[:])
 }

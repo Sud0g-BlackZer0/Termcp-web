@@ -364,8 +364,9 @@ var ops = []Op{
 	{Name: "file", Kind: KindFlags, Target: true,
 		Flags: []string{"action", "remote-path", "from-path", "to-path", "local-path", "data", "mode",
 			"offset", "length", "local-offset", "target", "link-path", "existing-path", "new-path",
+			"old-text", "new-text",
 			"uid", "gid", "atime", "mtime", "size", "op", "action-verb"},
-		Usage:  "file <session> --action read|write|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …",
+		Usage:  "file <session> --action read|write|replace|stat|delete|rename|mkdir|urls|perm|link|fs|getwd [--op <sub-action>] …",
 		Detail: fileDetail},
 	{Name: "profile", Kind: KindFlags,
 		Flags: []string{"action", "name", "host", "user", "port", "password", "private-key", "key-passphrase",
@@ -538,6 +539,16 @@ const fileDetail = `Actions and the flags each one uses.
   write                --remote-path --data | --local-path --mode text|hex|file
                        --offset is the REMOTE write position; --local-offset the
                        position inside --local-path; --length caps the transfer
+  replace              --remote-path --old-text --new-text
+
+REPLACE IS EXACT AND UNIQUE, AND THAT IS THE FEATURE. --old-text must appear in the
+file EXACTLY ONCE; zero matches and several matches are both errors, and the
+ambiguous one names the count so you can add surrounding context rather than guess.
+It reads, rewrites to a temporary file beside the original, and renames over it, so
+a reader sees the old file or the new one and never a half-written one, and the
+mode is preserved. Use it for editing a line in a file too big to rewrite by hand;
+--data on write replaces the WHOLE file, which loses anything that changed since
+you read it. Files over 16 MiB are refused: exact replace is an edit, not a copy.
 
 --mode MEANS TWO DIFFERENT THINGS, by action. For read and write it is a STRING:
 text, hex, or file ("file" reads or writes --local-path as raw bytes). For

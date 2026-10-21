@@ -470,7 +470,7 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	action, _ := stmt.Flag("action")
 	tool, capID, ok := fileToolForAction(action)
 	if !ok {
-		return badRequest(stmt, "file needs --action read|write|stat|delete|rename|mkdir|urls|perm|link|fs|getwd, got "+quoteOrDash(action))
+		return badRequest(stmt, "file needs --action read|write|replace|stat|delete|rename|mkdir|urls|perm|link|fs|getwd, got "+quoteOrDash(action))
 	}
 	if slot, refused := s.refuseAction(ctx, stmt, capID); refused {
 		return slot
@@ -505,6 +505,8 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 		[2]string{"link-path", "link_path"},
 		[2]string{"existing-path", "existing_path"},
 		[2]string{"new-path", "new_path"},
+		[2]string{"old-text", "old_text"},
+		[2]string{"new-text", "new_text"},
 	); bad {
 		return slot
 	}
@@ -578,6 +580,8 @@ func fileToolForAction(action string) (tool, capID string, ok bool) {
 		return "file_read", capability.FileRead, true
 	case "write":
 		return "file_write", capability.FileWrite, true
+	case "replace":
+		return "file_replace", capability.FileWrite, true
 	case "stat":
 		return "file_stat", capability.FileStat, true
 	case "delete":
