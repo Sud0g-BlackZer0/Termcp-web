@@ -19,6 +19,11 @@ import (
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
 
+// readDeadline bounds one wait for a frame while watching, and is also the
+// yardstick for "did that timeout arrive when it should have": a quiet connection
+// reports one only after the full deadline, a dead one reports immediately.
+const readDeadline = 2 * time.Second
+
 // TestWatchAddActuallySubscribes drives the Web UI socket the way a browser tab
 // does and asks the only question that matters to a user: once a tab says it is
 // watching a channel, does that channel's output reach the tab?
@@ -100,7 +105,8 @@ func TestWatchAddActuallySubscribes(t *testing.T) {
 	deadline := time.Now().Add(20 * time.Second)
 	var got strings.Builder
 	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		started := time.Now()
+		_ = conn.SetReadDeadline(started.Add(readDeadline))
 		var m map[string]any
 		if err := conn.ReadJSON(&m); err != nil {
 			// A read timeout means the channel is quiet, which is expected while
@@ -108,10 +114,21 @@ func TestWatchAddActuallySubscribes(t *testing.T) {
 			// treating every failure as "quiet" re-reads a dead connection. gorilla
 			// panics on that ("repeated read on failed websocket connection"), which
 			// turned a slow CI runner into a panic instead of a test failure.
-			if isTimeout(err) {
-				continue
+			if !isTimeout(err) {
+				t.Fatalf("reading the watch channel: %v", err)
 			}
-			t.Fatalf("reading the watch channel: %v", err)
+			// isTimeout ALONE STILL SPINS ON A DEAD CONNECTION. Once the peer is
+			// gone gorilla caches the failure and every read returns at once, so the
+			// loop no longer waits out its two seconds — it retries thousands of times
+			// inside the same 20s budget and trips the same panic through the door that
+			// was left open.
+			//
+			// A healthy idle connection waits the WHOLE deadline before reporting a
+			// timeout, so a timeout that arrives early is not "quiet" — it is broken.
+			if elapsed := time.Since(started); elapsed < readDeadline/2 {
+				t.Fatalf("the watch channel stopped answering (timeout after %v); got %q", elapsed, got.String())
+			}
+			continue
 		}
 		if m["type"] != "terminal" {
 			continue

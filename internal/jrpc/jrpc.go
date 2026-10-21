@@ -30,6 +30,7 @@ import (
 	neturl "net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -83,21 +84,52 @@ const (
 var ErrClosed = errors.New("the channel is closed")
 
 // Channel is one open peer.
+//
+// NO MUTEX. Every mutable field is either atomic, a channel, or immutable after
+// Open — because this type's operations WAIT, and a lock held across a wait is a
+// lock that Close cannot take. That was the actual failure: a reader parked inside
+// a wait with mu held made Close block until the reader's window expired, so
+// "stop now" became "stop in a few seconds".
+//
+// The three mutating concerns each have a mechanism that fits it:
+//
+//   - serialising calls is a ONE-SLOT SEMAPHORE (callGate). It is acquired, used,
+//     and released — never held while blocking on anything else.
+//   - hand-off between the socket reader and callers is the in channel. gorilla
+//     allows one reader, and readLoop is it.
+//   - the frame backlog is ev, itself a channel, so appending and popping need no
+//     coordination at all.
 type Channel struct {
 	url       string
 	transport Transport
 	client    *http.Client
 
-	// mu serialises calls. Both transports need it: gorilla allows one
-	// concurrent reader, and an HTTP call's reply must be matched against the
-	// events its own stream carried. Concurrent calls against one channel are
-	// therefore queued, which is what a request/response peer wants anyway.
-	mu   sync.Mutex
+	// callGate serialises calls: one call at a time, which is what a request/response
+	// peer wants and what keeps each reply matched to its request.
+	callGate chan struct{}
+
 	conn *websocket.Conn
-	sess string   // Mcp-Session-Id, once a reply carried one
-	next int      // next id to hand out
-	ev   []string // frames that arrived while a call waited for its own answer
-	shut bool
+
+	// sess is the Mcp-Session-Id, HTTP only. Atomic because httpPost writes it on one
+	// call and later calls read it while a peer may be answering concurrently.
+	sess atomic.Pointer[string]
+
+	// next is the next id to hand out.
+	next atomic.Int64
+
+	// ev holds frames that arrived while a call waited for its own answer. A channel
+	// rather than a slice: it is the only structure that lets one goroutine append
+	// while another pops without a lock.
+	ev chan string
+
+	// shut reports that Close ran.
+	shut atomic.Bool
+
+	// in carries every frame the socket delivers; readErr carries why it stopped.
+	in      chan string
+	readErr chan error
+	done    chan struct{} // closed by onceClose, releasing blocked readers and senders
+	closeIn sync.Once     // closes c.in exactly once, whichever path ends the loop
 }
 
 // Open connects rawURL, choosing the transport by scheme: http(s) posts one
@@ -107,7 +139,13 @@ func Open(ctx context.Context, rawURL string) (*Channel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("not a URL: %s", rawURL)
 	}
-	c := &Channel{url: rawURL, next: 1, client: &http.Client{}}
+	c := &Channel{
+		url:      rawURL,
+		client:   &http.Client{},
+		callGate: make(chan struct{}, 1),
+		ev:       make(chan string, maxEvents),
+		done:     make(chan struct{}),
+	}
 	switch u.Scheme {
 	case "ws", "wss":
 		c.transport = WS
@@ -116,6 +154,9 @@ func Open(ctx context.Context, rawURL string) (*Channel, error) {
 			return nil, fmt.Errorf("dial %s: %w", rawURL, err)
 		}
 		c.conn = conn
+		c.in = make(chan string, maxEvents)
+		c.readErr = make(chan error, 1)
+		go c.readLoop()
 	case "http", "https":
 		c.transport = HTTP
 	default:
@@ -130,6 +171,108 @@ func (c *Channel) Transport() Transport { return c.transport }
 // URL is the address the channel was opened on.
 func (c *Channel) URL() string { return c.url }
 
+// readLoop is the channel's ONLY reader of the socket, for the life of the
+// connection.
+//
+// gorilla permits exactly one concurrent reader, and one reader that never stops is
+// also what keeps read deadlines off the socket: a wait now happens on c.in or on the
+// caller's context, never inside a read, so a window that expires leaves nothing
+// behind. The goroutine ends when the socket fails or Close runs — a socket close
+// makes the blocked read return, which is the only way out of it.
+func (c *Channel) readLoop() {
+	for {
+		_, raw, err := c.conn.ReadMessage()
+		if err != nil {
+			// Report once, then stop. The channel stays usable for Call/Send as far
+			// as this layer knows; what is gone is the ability to receive.
+			select {
+			case c.readErr <- err:
+			default: // a reason was already recorded
+			}
+			c.closeIn.Do(func() { close(c.in) })
+			return
+		}
+		payload := strings.TrimSpace(string(raw))
+		if payload == "" {
+			continue
+		}
+		// The send can block when nobody is reading and the buffer is full, and
+		// closing the socket does NOT release it — the read already succeeded. done is
+		// what Close closes, so this goroutine always ends.
+		select {
+		case c.in <- payload:
+		case <-c.done:
+			c.closeIn.Do(func() { close(c.in) })
+			return
+		}
+	}
+}
+
+// awaitFrame returns the next frame from the socket, waiting no longer than ctx.
+//
+// nil and true mean a frame arrived; "" and false mean the wait itself expired (or
+// the socket is gone) — which is an answer about THIS WINDOW, not about the socket.
+// Nothing here can damage the connection.
+func (c *Channel) awaitFrame(ctx context.Context) (string, bool) {
+	select {
+	case frame, ok := <-c.in:
+		if !ok {
+			return "", false
+		}
+		return frame, true
+	case <-c.done:
+		// Close ran, so nothing more will arrive. Without this arm a waiting reader
+		// would only ever see its window expire, turning "stop now" into "stop in a few
+		// seconds".
+		return "", false
+	case <-ctx.Done():
+		return "", false
+	}
+}
+
+// awaitAnswer waits for the frame carrying want, buffering anything else, up to ctx.
+func (c *Channel) awaitAnswer(ctx context.Context, want any) (string, error) {
+	for {
+		select {
+		case frame, ok := <-c.in:
+			if !ok {
+				return "", c.readFailure()
+			}
+			if carriesID(frame, want) {
+				return frame, nil
+			}
+			c.buffer(frame)
+		case <-c.done:
+			return "", ErrClosed
+		case <-ctx.Done():
+			// The window expired with no answer. Nothing was damaged, so a later call
+			// can still use the channel.
+			return "", ctx.Err()
+		}
+	}
+}
+
+// readFailure reports why the socket stopped reading, falling back to ErrClosed.
+func (c *Channel) readFailure() error {
+	select {
+	case err := <-c.readErr:
+		return err
+	default:
+		return ErrClosed
+	}
+}
+
+// writeFrame sends one frame with a write deadline.
+//
+// Only the WRITE side keeps a deadline. Writes have no sticky state — a write error
+// fails that write — while a write that can hang would hang the caller's turn.
+func (c *Channel) writeFrame(ctx context.Context, frame map[string]any) error {
+	if err := c.conn.SetWriteDeadline(deadlineOf(ctx)); err != nil {
+		return err
+	}
+	return c.conn.WriteJSON(frame)
+}
+
 // Call sends frame and returns the reply carrying its id.
 //
 // An id is allocated when the frame has none, so a caller can write the frame it
@@ -137,15 +280,18 @@ func (c *Channel) URL() string { return c.url }
 // not carry this id are NOT answers — a CDP peer interleaves events with
 // replies — so they are buffered for Recv rather than dropped.
 func (c *Channel) Call(ctx context.Context, frame map[string]any) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.shut {
+	if err := c.acquire(ctx); err != nil {
+		return "", err
+	}
+	defer c.release()
+
+	if c.shut.Load() {
 		return "", ErrClosed
 	}
 	id, ok := frame["id"]
 	if !ok || id == nil {
-		id = c.next
-		c.next++
+		n := c.next.Add(1) - 1
+		id = int(n)
 		frame["id"] = id
 	}
 	if c.transport == WS {
@@ -154,20 +300,34 @@ func (c *Channel) Call(ctx context.Context, frame map[string]any) (string, error
 	return c.httpCall(ctx, frame, id)
 }
 
+// acquire takes the one-slot call semaphore, or gives up when ctx does.
+func (c *Channel) acquire(ctx context.Context) error {
+	select {
+	case c.callGate <- struct{}{}:
+		return nil
+	case <-c.done:
+		return ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Channel) release() { <-c.callGate }
+
 // Send writes frame and returns at once, without waiting for an answer: a
 // notification has none, and a caller that wants to poll can ask for it with
 // Recv instead of holding a call open.
 func (c *Channel) Send(ctx context.Context, frame map[string]any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.shut {
+	if err := c.acquire(ctx); err != nil {
+		return err
+	}
+	defer c.release()
+
+	if c.shut.Load() {
 		return ErrClosed
 	}
 	if c.transport == WS {
-		if err := c.conn.SetWriteDeadline(deadlineOf(ctx)); err != nil {
-			return err
-		}
-		return c.conn.WriteJSON(frame)
+		return c.writeFrame(ctx, frame)
 	}
 	resp, err := c.httpPost(ctx, frame)
 	if err != nil {
@@ -178,9 +338,8 @@ func (c *Channel) Send(ctx context.Context, frame map[string]any) error {
 	if err != nil {
 		return err
 	}
-	// A notification is owed no answer, but a peer that answers anyway must not
-	// have its frame dropped on the floor: Send is "do not wait", not "do not
-	// look", so whatever came back is buffered for Recv.
+	// A notification is owed no answer, but a peer that answers anyway must not have
+	// its frame dropped on the floor: Send is "do not wait", not "do not look".
 	if body := strings.TrimSpace(string(raw)); body != "" {
 		c.buffer(body)
 	}
@@ -192,9 +351,30 @@ func (c *Channel) Send(ctx context.Context, frame map[string]any) error {
 // bytes are only buffered as a side effect of a Call or a Next, so a reader that
 // wants new events has to wait for them.
 func (c *Channel) Recv() (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	return c.pop()
+}
+
+// Take returns the next frame of ANY kind: a buffered one first, then whatever the
+// socket delivers before ctx expires.
+//
+// Next deliberately skips answers, which is right for an event reader but wrong for
+// a caller that paired Send with recv: that answer is the frame it is waiting for,
+// and Next would file it into the buffer that only Recv reads. Take is the door that
+// sees both, and it is what `recv` uses so a `send` can be answered.
+//
+// Buffered frames come first because they arrived first; the socket is only touched
+// when nothing is already in hand.
+func (c *Channel) Take(ctx context.Context) (string, bool) {
+	if c.shut.Load() {
+		return "", false
+	}
+	if frame, ok := c.pop(); ok {
+		return frame, true
+	}
+	if c.transport != WS {
+		return "", false
+	}
+	return c.awaitFrame(ctx)
 }
 
 // Next waits up to the context's deadline for the next frame that is NOT an
@@ -209,9 +389,7 @@ func (c *Channel) Recv() (string, bool) {
 // On a channel with no push side (HTTP answers per request) it reports "nothing"
 // immediately rather than waiting out a deadline that could not be met.
 func (c *Channel) Next(ctx context.Context) (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.shut {
+	if c.shut.Load() {
 		return "", false
 	}
 	if frame, ok := c.pop(); ok {
@@ -220,52 +398,40 @@ func (c *Channel) Next(ctx context.Context) (string, bool) {
 	if c.transport != WS {
 		return "", false
 	}
-	deadline := deadlineOf(ctx)
+	// THE WAIT IS ON A CHANNEL, NOT ON THE SOCKET. A read deadline that fires leaves
+	// gorilla's cached read error set forever, so one expired window made the channel
+	// permanently deaf while the peer's frame sat unread on the wire.
 	for {
-		if err := c.conn.SetReadDeadline(deadline); err != nil {
+		frame, ok := c.awaitFrame(ctx)
+		if !ok {
 			return "", false
 		}
-		_, raw, err := c.conn.ReadMessage()
-		if err != nil {
-			// A deadline with nothing on the wire is the ordinary answer: the
-			// window expired. Reporting it as an error would make every quiet
-			// second look like a broken peer.
-			return "", false
-		}
-		payload := strings.TrimSpace(string(raw))
-		if payload == "" {
+		if hasID(frame) {
+			// An answer to a call nobody is waiting for is still data: keep it.
+			c.buffer(frame)
 			continue
 		}
-		if hasID(payload) {
-			// An answer to a call that is no longer waiting (or one that arrived
-			// between calls) is still data: keep it for the next Recv.
-			c.buffer(payload)
-			continue
-		}
-		return payload, true
+		return frame, true
 	}
 }
 
 // pop takes the oldest buffered frame. The caller holds mu.
 func (c *Channel) pop() (string, bool) {
-	if len(c.ev) == 0 {
+	select {
+	case frame := <-c.ev:
+		return frame, true
+	default:
 		return "", false
 	}
-	frame := c.ev[0]
-	c.ev = c.ev[1:]
-	return frame, true
 }
 
 // Close shuts the channel. A socket is closed with a normal closure frame so the
 // peer does not log an abnormal one.
 func (c *Channel) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.shut {
+	if !c.shut.CompareAndSwap(false, true) {
 		return nil
 	}
-	c.shut = true
-	c.ev = nil
+	close(c.done)
 	if c.conn != nil {
 		_ = c.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
@@ -276,27 +442,10 @@ func (c *Channel) Close() error {
 
 // wsCall writes one frame and reads until its answer arrives.
 func (c *Channel) wsCall(ctx context.Context, frame map[string]any, id any) (string, error) {
-	deadline := deadlineOf(ctx)
-	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+	if err := c.writeFrame(ctx, frame); err != nil {
 		return "", err
 	}
-	if err := c.conn.WriteJSON(frame); err != nil {
-		return "", err
-	}
-	for {
-		if err := c.conn.SetReadDeadline(deadline); err != nil {
-			return "", err
-		}
-		_, raw, err := c.conn.ReadMessage()
-		if err != nil {
-			return "", err
-		}
-		payload := strings.TrimSpace(string(raw))
-		if carriesID(payload, id) {
-			return payload, nil
-		}
-		c.buffer(payload)
-	}
+	return c.awaitAnswer(ctx, id)
 }
 
 // httpCall posts one frame and reads its answer.
@@ -357,27 +506,39 @@ func (c *Channel) httpPost(ctx context.Context, frame map[string]any) (*http.Res
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	if c.sess != "" {
-		req.Header.Set("Mcp-Session-Id", c.sess)
+	if sid := c.sess.Load(); sid != nil && *sid != "" {
+		req.Header.Set("Mcp-Session-Id", *sid)
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
-		c.sess = sid
+		c.sess.Store(&sid)
 	}
 	return resp, nil
 }
 
 // buffer keeps an unmatched frame for Recv, dropping the oldest past the cap.
+//
+// A non-blocking send: a full backlog means the reader is not draining, and the
+// documented policy for that is "lose the oldest" — blocking here would stall the
+// only socket reader instead.
 func (c *Channel) buffer(frame string) {
 	if frame == "" {
 		return
 	}
-	c.ev = append(c.ev, frame)
-	if len(c.ev) > maxEvents {
-		c.ev = c.ev[len(c.ev)-maxEvents:]
+	for {
+		select {
+		case c.ev <- frame:
+			return
+		default:
+		}
+		// Full: drop the oldest and retry.
+		select {
+		case <-c.ev:
+		default:
+		}
 	}
 }
 

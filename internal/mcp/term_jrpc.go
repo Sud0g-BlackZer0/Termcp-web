@@ -235,8 +235,14 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		// The window is the tool's, the same one `read` uses — a caller that
 		// wants to wait three seconds says so with `timeout`, and one that wants
 		// to peek says `timeout: 0`.
+		// TAKE, NOT NEXT: recv is the counterpart of `send`, and send's answer carries
+		// an id — which Next deliberately skips (it is an event reader, and an answer
+		// to a call nobody is waiting for is filed in the buffer). Pairing `send` with
+		// a recv that only calls Next therefore could never deliver the answer: the
+		// frame was on the channel, in its own buffer, unreachable. Take sees both, so
+		// a pushed event still arrives first and a sent call can finally be answered.
 		waitCtx, cancel := recvContext(ctx, win)
-		frame, ok := h.ch.Next(waitCtx)
+		frame, ok := h.ch.Take(waitCtx)
 		cancel()
 		if ok {
 			return envelope.Slot{Code: 200, Headers: headers, Body: frame}
