@@ -249,8 +249,15 @@ func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) term
 		// definition, so it is resolved here before the error is reported — with the
 		// SAME substitution table, because the alias's expansion is the caller's
 		// command line and may reference the same $1/$NAME values.
-		if stmt, ok := aliases.expandError(err); ok {
+		// resolved says a directive was actually produced; cycle says the chain
+		// never got there. Neither means the word is simply not a directive, and that
+		// case must keep falling through to the normal parse-error teaching below.
+		stmt, resolved, cycle := aliases.expandErrorCycle(err)
+		if resolved {
 			return s.runStatements(ctx, []directive.Statement{stmt}, win)
+		}
+		if len(cycle) > 0 {
+			return termReply{win: win, slots: []envelope.Slot{aliasCycleSlot(directive.Statement{Path: cmd}, cycle)}}
 		}
 		return termReply{win: win, slots: []envelope.Slot{s.parseErrorSlot(err)}}
 	}
@@ -277,7 +284,13 @@ func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) term
 func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement, win termArgs) termReply {
 	out := termReply{win: win, seenUsage: map[string]bool{}}
 	for _, stmt := range stmts {
-		expanded := aliases.Expand(stmt)
+		expanded, cycle := aliases.Expand(stmt)
+		if cycle != nil {
+			// The chain came back to where it started, so there is no directive to
+			// dispatch. Saying "unknown directive" here would blame the wrong thing.
+			out.slots = append(out.slots, aliasCycleSlot(stmt, cycle))
+			continue
+		}
 		slots := s.runDirective(ctx, expanded, win)
 		// learn_mode is a property of the reply, so it is attached here rather
 		// than in each directive: generated replies (ps, help, detect, …) carry

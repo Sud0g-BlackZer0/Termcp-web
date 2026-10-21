@@ -29,6 +29,12 @@ func sshConfigErrCode(err error) string {
 	if errors.Is(err, sshconfig.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
 		return CodeSSHConfigNotFound
 	}
+	// A profile the caller wrote badly is their argument, not a server fault: a
+	// missing host or credential answered 500 operation_failed, which reads like an
+	// outage and invites a retry that cannot succeed.
+	if errors.Is(err, sshconfig.ErrInvalid) {
+		return CodeInvalidArgument
+	}
 	return CodeOperationFailed
 }
 

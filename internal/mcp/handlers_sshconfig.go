@@ -99,10 +99,14 @@ func (s *Server) handleCreateSSHConfig(ctx context.Context, request mcpgo.CallTo
 		return toolError(CodeOperationFailed, "%s", err.Error()), nil
 	}
 	if _, err := sshconfig.ParseAndValidate(body); err != nil {
-		return toolError(CodeOperationFailed, "%s", err.Error()), nil
+		// A body that fails validation is the caller's argument, not a server
+		// fault: this used to answer 500 operation_failed for a profile missing its
+		// host or credential, which reads like an outage and invites a retry that
+		// cannot succeed.
+		return toolError(sshConfigErrCode(err), "%s", err.Error()), nil
 	}
 	if err := s.sshConfigs.Save(name, body); err != nil {
-		return toolError(CodeOperationFailed, "%s", err.Error()), nil
+		return toolError(sshConfigErrCode(err), "%s", err.Error()), nil
 	}
 	return successResult(), nil
 }
@@ -136,7 +140,7 @@ func (s *Server) handleCopySSHConfig(ctx context.Context, request mcpgo.CallTool
 		return toolError(sshConfigErrCode(err), "%s", err.Error()), nil
 	}
 	if err := s.sshConfigs.Save(dst, data); err != nil {
-		return toolError(CodeOperationFailed, "%s", err.Error()), nil
+		return toolError(sshConfigErrCode(err), "%s", err.Error()), nil
 	}
 	return successResult(), nil
 }
@@ -165,10 +169,14 @@ func (s *Server) handleEditSSHConfig(ctx context.Context, request mcpgo.CallTool
 		return toolError(CodeOperationFailed, "%s", err.Error()), nil
 	}
 	if _, err := sshconfig.ParseAndValidate(body); err != nil {
-		return toolError(CodeOperationFailed, "%s", err.Error()), nil
+		// A body that fails validation is the caller's argument, not a server
+		// fault: this used to answer 500 operation_failed for a profile missing its
+		// host or credential, which reads like an outage and invites a retry that
+		// cannot succeed.
+		return toolError(sshConfigErrCode(err), "%s", err.Error()), nil
 	}
 	if err := s.sshConfigs.Save(name, body); err != nil {
-		return toolError(CodeOperationFailed, "%s", err.Error()), nil
+		return toolError(sshConfigErrCode(err), "%s", err.Error()), nil
 	}
 	return successResult(), nil
 }

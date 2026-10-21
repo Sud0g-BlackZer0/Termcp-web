@@ -621,13 +621,7 @@ func fileToolForAction(action string) (tool, capID string, ok bool) {
 
 // directiveProfile maps `profile` onto ssh_config.
 func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	action, _ := stmt.Flag("action")
-	if action == "" && len(stmt.Args) > 0 {
-		action = stmt.Args[0]
-	}
-	if action == "" {
-		action = "list"
-	}
+	action, rest := resolveAction(stmt, "list")
 	capID, ok := profileCapability(action)
 	if !ok {
 		return badRequest(stmt, "profile needs --action list|create|edit|copy|delete, got "+quoteOrDash(action))
@@ -641,8 +635,8 @@ func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement,
 	); bad {
 		return slot
 	}
-	if _, ok := args["name"]; !ok && len(stmt.Args) > 1 {
-		args["name"] = stmt.Args[1]
+	if _, ok := args["name"]; !ok && len(rest) > 0 {
+		args["name"] = rest[0]
 	}
 	if slot, bad := stringFlags(args, stmt,
 		[2]string{"host", "host"},
@@ -673,10 +667,23 @@ func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement,
 	); bad {
 		return slot
 	}
+	// COPY SPEAKS `--source`, THE HANDLER SPEAKS `source_name`/`target_name`.
+	//
+	// The directive used to forward `--source` verbatim and the handler read
+	// `source_name`, so copy failed with "source_name and target_name are required"
+	// no matter what the caller wrote — the two names never met. The rename happens
+	// here, at the boundary between the two vocabularies, rather than in the handler:
+	// the handler's argument names are part of the MCP tool's own schema and other
+	// callers (the Web UI) already use them.
 	if slot, bad := stringFlags(args, stmt,
-		[2]string{"source", "source"},
+		[2]string{"source", "source_name"},
 	); bad {
 		return slot
+	}
+	if _, ok := args["target_name"]; !ok {
+		if v, ok := args["name"]; ok {
+			args["target_name"] = v
+		}
 	}
 	if boolFlag(stmt, "trust-unknown-host") {
 		args["trust_unknown_host"] = true
@@ -719,13 +726,7 @@ func profileCapability(action string) (string, bool) {
 
 // directiveExtension maps `ext` onto the extension tool.
 func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	action, _ := stmt.Flag("action")
-	if action == "" && len(stmt.Args) > 0 {
-		action = stmt.Args[0]
-	}
-	if action == "" {
-		action = "list"
-	}
+	action, rest := resolveAction(stmt, "list")
 	capID, ok := extensionCapability(action)
 	if !ok {
 		return badRequest(stmt, "ext needs --action list|get|create|update|delete|retry, got "+quoteOrDash(action))
@@ -739,8 +740,8 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	); bad {
 		return slot
 	}
-	if _, ok := args["name"]; !ok && len(stmt.Args) > 1 {
-		args["name"] = stmt.Args[1]
+	if _, ok := args["name"]; !ok && len(rest) > 0 {
+		args["name"] = rest[0]
 	}
 	if slot, bad := stringFlags(args, stmt,
 		[2]string{"kind", "kind"},
@@ -1388,4 +1389,33 @@ func setFlagJSONList(args map[string]any, stmt directive.Statement, flag, arg st
 	}
 	args[arg] = out
 	return nil
+}
+
+// resolveAction settles WHERE a profile/ext action came from, and returns the
+// positional words that remain once it is consumed.
+//
+// THE AMBIGUITY WAS REAL AND THIS REMOVES IT. These two forms both exist:
+//
+//	profile create demo …        the action is the first positional word
+//	profile demo --action edit   the action is a flag
+//
+// so "which positional word is the name" depended on where the action came from —
+// the old code hardcoded the first shape and answered "name is required" to every
+// call spelled the second way. Tracking that with a boolean at the name site (as a
+// first attempt did) only moved the conditional around.
+//
+// Consuming the action word instead makes the two shapes converge: whatever is left
+// at Args[0] IS the name, in both of them. Same idea as Op.Target in the directive
+// parser — a word that names grammar is removed from the argument list, so the words
+// that remain all mean data.
+func resolveAction(stmt directive.Statement, fallback string) (action string, rest []string) {
+	if v, ok := stmt.Flag("action"); ok && v != "" {
+		// Spelled as a flag: every positional word is data.
+		return v, stmt.Args
+	}
+	if len(stmt.Args) > 0 {
+		// Spelled positionally: consume it, so Args[0] is the name again.
+		return stmt.Args[0], stmt.Args[1:]
+	}
+	return fallback, stmt.Args
 }

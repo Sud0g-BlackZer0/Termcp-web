@@ -75,41 +75,78 @@ func (a *aliasTable) snapshot() map[string]string {
 // Expand resolves a directive's first word through the alias table. The
 // expansion may itself name an alias, so resolution repeats until it reaches a
 // real directive (with a cycle guard).
-func (a *aliasTable) Expand(stmt directive.Statement) directive.Statement {
+//
+// THE SECOND RESULT IS A CYCLE, NOT A FAILURE. When the chain loops, the statement
+// comes back untouched so the caller reports the name it was given — but expanding
+// `aa` (→ bb → aa) and dispatching the word `aa` produced "unknown directive: aa",
+// which sends the caller looking for a typo in a directive that is in fact defined.
+// A cycle is only reachable through the alias table, so saying so is the difference
+// between a puzzle and a fix.
+func (a *aliasTable) Expand(stmt directive.Statement) (directive.Statement, []string) {
 	if _, ok := a.get(stmt.Op); !ok {
-		return stmt
+		return stmt, nil
 	}
 	// NO SUBSTITUTION HERE: this runs on an already-parsed statement, so the
 	// caller's values have been filled in. Passing an empty table keeps the
 	// expansion's own `$N` text as the shell's own positional parameters, which is
 	// what it was before this path existed.
 	if resolved, ok := a.resolve(stmt.Op, strings.TrimSpace(stmt.Target+" "+stmt.Payload), directive.Subst{}); ok {
-		return resolved
+		return resolved, nil
 	}
-	return stmt
+	return stmt, a.cyclePath(stmt.Op)
 }
 
-// expandError resolves a statement the parser could not parse against the alias
-// table: an alias is a directive the caller invented, so the parser is right to
-// refuse it and we are right to run it.
+// cyclePath replays the expansion chain from name and returns the names it
+// revisits, or nil when the chain simply does not end at a directive.
+func (a *aliasTable) cyclePath(name string) []string {
+	seen := map[string]bool{}
+	var path []string
+	for {
+		if seen[name] {
+			return append(path, name)
+		}
+		seen[name] = true
+		path = append(path, name)
+		expansion, ok := a.get(name)
+		if !ok {
+			return nil
+		}
+		// The next hop can come from a SUCCESSFUL parse or from the parse ERROR:
+		// an expansion naming another alias is not a directive, so ParseWithSubst
+		// rejects it and carries the offending word in Error.Op. resolve() reads the
+		// chain the same way; ignoring the error path here is what made this walk stop
+		// at the first hop and report no cycle.
+		f, err := directive.ParseWithSubst(strings.TrimSpace(expansion), directive.Subst{})
+		next := ""
+		if err == nil && len(f.Statements) == 1 {
+			next = f.Statements[0].Op
+		} else if derr, ok := err.(*directive.Error); ok && derr.Op != "" {
+			next = derr.Op
+		}
+		if _, ok := a.get(next); !ok {
+			return nil
+		}
+		name = next
+	}
+}
+
+// expandErrorCycle resolves the directive a parse error named, reporting a cycle
+// separately from "this word never resolved".
 //
-// NO SUBSTITUTION TABLE IS PASSED ON, and that is deliberate. `derr.Rest` is the
-// caller's text AFTER the first parse already filled it in — the `$1` in `ech $1`
-// became the caller's value before this function ran. Re-applying the same table
-// would fill the ALIAS'S OWN `$1` with that same value a second time, so
-// `alias ech run h $1` used as `ech $1` sent the argument twice:
-//
-//	run h:1 'echo hello' 'echo hello'
-//
-// The two `$` namespaces belong to different authors. A caller's `$N` is the
-// caller's value; an alias's `$N` is whatever the alias author meant, which this
-// server cannot know and must not guess. Leaving it alone hands it to the shell.
-func (a *aliasTable) expandError(err error) (directive.Statement, bool) {
+// THE PARSE ERROR IS WHERE AN ALIAS IS FIRST SEEN. An invented directive is unknown
+// to the parser by definition, so it fails there and is resolved from the error —
+// which means Expand() below is never reached for the common case, and a cycle that
+// only Expand() knew how to report still came back as "unknown directive: aa". Both
+// doors need the same answer.
+func (a *aliasTable) expandErrorCycle(err error) (directive.Statement, bool, []string) {
 	derr, ok := err.(*directive.Error)
 	if !ok || derr.Op == "" {
-		return directive.Statement{}, false
+		return directive.Statement{}, false, nil
 	}
-	return a.resolve(derr.Op, derr.Rest, directive.Subst{})
+	if stmt, ok := a.resolve(derr.Op, derr.Rest, directive.Subst{}); ok {
+		return stmt, true, nil
+	}
+	return directive.Statement{}, false, a.cyclePath(derr.Op)
 }
 
 // resolve follows a name through the table until it lands on a directive the
@@ -176,4 +213,14 @@ func (s *Server) directiveAlias(_ context.Context, stmt directive.Statement, win
 	}
 	aliases.set(name, expansion)
 	return envelope.Slot{Code: 204, Headers: headers}
+}
+
+// aliasCycleSlot reports an alias chain that never reaches a directive.
+func aliasCycleSlot(stmt directive.Statement, cycle []string) envelope.Slot {
+	return envelope.Slot{
+		Code:    400,
+		Headers: map[string]string{"Error-Code": "alias_cycle", "Path": stmt.Path},
+		Body: "alias cycle: " + strings.Join(cycle, " → ") +
+			"\nthe chain never reaches a directive; break it with `alias <name> --off`",
+	}
 }

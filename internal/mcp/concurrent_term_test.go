@@ -35,7 +35,7 @@ func TestAliasTableIsSafeUnderConcurrency(t *testing.T) {
 				a.set(name, "ps")
 				_, _ = a.get(name)
 				_ = a.snapshot()
-				_ = a.Expand(directive.Statement{Op: name, Target: "h"})
+				_, _ = a.Expand(directive.Statement{Op: name, Target: "h"})
 				a.drop(name)
 			}
 		}()

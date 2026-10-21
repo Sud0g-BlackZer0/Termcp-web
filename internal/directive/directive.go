@@ -748,7 +748,10 @@ other channels intact; terminating the session stops every channel and drops the
 transport, keeping the entry in the archive as exited with its output still
 readable via shell_output.
 
---grace N gives a process N seconds to exit before SIGKILL. Default: 5.`
+--grace N gives a process N seconds to exit before SIGKILL. Default: 5.
+--force SKIPS THAT WAIT ENTIRELY: it closes the transport without sending SIGTERM
+first, so --grace has no effect next to it. Use one or the other — --grace when the
+process deserves a chance to clean up, --force when it is already wedged.`
 
 // argvDetail is the --argv contract: a word list, not a command line. It is
 // stated on `help pipe` because both failure modes are silent or come from the
