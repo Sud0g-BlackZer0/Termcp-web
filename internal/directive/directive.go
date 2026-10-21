@@ -764,9 +764,20 @@ interpreted — for 'cd /srv && make' pass a script: --argv sh -c 'cd /srv && ma
 Put --argv LAST: every word after it belongs to the program, so --name, --on-exit
 and --size must come before it. Write it as you would in a terminal: wrapping the
 whole argv in one pair of quotes makes it ONE program name
-(--argv 'go build ./...' runs a program with spaces in its name). --on-exit
-defaults to keep: the session survives its last shell; --on-exit close ends a
-one-shot session with it.`
+(--argv 'go build ./...' runs a program with spaces in its name).
+
+--on-exit defaults to keep: the session survives its last shell. --on-exit close
+ends the session when its last SHELL exits, which is what makes a one-shot job leave
+no tile behind.
+
+"Last shell" means exactly that: channels only. A port forward (fwd), an SFTP handle
+or a jrpc/mcp/cdp connection does not keep the session alive, because none of them
+is a shell. So 'pipe internal --on-exit close --argv make' plus a 'fwd' gives you a
+port that lives for as long as the build and disappears with it — usually what you
+want for a tunnel to a one-shot job, and a surprise if you opened the forward for
+something else to use afterwards. When a forward must outlive its command, keep the
+session (--on-exit keep, the default) or open the forward on a session whose shell
+is not a one-shot.`
 
 // profileFileFormat is the import/export file shape (Web UI batch import; HTTP
 // GET/POST /api/connections/batch). It is stated here, once, because the agent is
