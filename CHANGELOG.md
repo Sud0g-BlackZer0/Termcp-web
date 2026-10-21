@@ -19,6 +19,10 @@
 
   `help <verb>` 现在还会打印一张**从同一张表派生**的 flag 清单（`flagList`），所以 25 个 flag 的 `create host` 也不必在手写 usage 行里塞满；`TestEveryFlagIsDiscoverableFromHelp` 盯着这条线真的到达调用方。
 
+- **被动监听与唤醒机制整体移除（破坏性）**。`watch` 指令、`shell_notify` 工具（及其 `notify.list` / `notify.delete`）、`internal/notify` 的规则管理器、以及「审批状态变化唤醒 Agent」的那条接线，一并删掉了。它们要解决的是同一个问题：命令跑到一半停下来等人在终端里回答时，Agent 怎么知道自己该回来了。实测这条路走不通——`notifications/resources/updated` 是订阅作用域且无 payload，MCP 也没有「把通知注入模型对话」的原语，所以注册成功的规则可能一次都不响，而失败是静默的：调用方以为自己挂了监听，实际在等一个不会来的信号。留着比删掉更危险，因为它把「继续轮询」伪装成「已经安排好了」。现在只有单向的 `notify`：它把人叫过来，然后**停下来等人**——等待由回复本身承载（长命令的回复会带回窗口内到达的字节，`Still-Running: true` 说明还没结束），而不是靠一个可能永不触发的回调。能力表里 `shell.notify` 随之消失，新增 `shell_archive`（关闭通道时归档其记录）。
+
+- **`write --old-text / --new-text`：精确替换，命中必须唯一**。新增的 `file --action replace` 在动词重写后并入 `write`：`--old-text` 必须在文件里**恰好出现一次**，0 次或多次都报错，多次时错误给出命中次数。这是特性不是限制——改错地方的代价远高于多写几个字符的上下文。实现是「写同目录临时文件 + rename」，POSIX 上原子且保留原文件权限；Windows 上 rename 不能覆盖已存在的文件，退化为先删后改名（一处短暂缺失，明确取舍而非将就）。超过 16 MiB 的文件被拒绝——那是搬运，不是编辑。
+
 - **`mcp` / `cdp` / `jrpc` 的连接改从 session 里穿过去（破坏性）**。`... open <url>` 变成 `... open <session> <url>`。此前这三个网关用的是 termcp 自己的网络栈：`http.DefaultClient` 与 `websocket.DefaultDialer`，于是同一个 URL 的含义取决于 termcp 恰好跑在哪台机器上——`cdp open http://localhost:9222` 连的是**进程所在机器**的调试端口，不是被控主机的。这不只是别扭：它等于给 termcp 加了一项目标主机的网络从未授予的能力（从本机打出任意出站连接），而走 session 则什么也没加——复用的就是 `-L` 那条已有隧道。现在 `internal/jrpc` 的 `Open` 必须拿到一个 `DialFunc`，`dialerForSession` 用 `sess.SSHClient().Dial` 实现它，HTTP transport 与 websocket dialer 都换成这一条。`<session>` 既接受 `ps` 打印的 id，也接受 host 名（`internal`、`prod`），后者解析到该 host 下**唯一**在跑的 session；有两三个同名目标时报错并列出 id 让你选，而不是替你在可能不同的跳板/代理之间猜一个。顺带修掉一处必然的失败：x/crypto 的 SSH channel 不实现 deadline（`ssh: tcpChan: deadline not supported`），而 gorilla 拨号时会设 deadline 并检查返回值，所以 websocket 过隧道一开始就必然失败；`deadlineFreeConn` 让三个 SetDeadline 静默成功，超时仍由 context 负责（channel 随 context 结束而拆掉）。
 
 - **`profile` 改名 `host`**。`profile` 是这个项目自己造的词，而它描述的东西——一台机器在哪、用什么用户和密钥连——调用方本来就有名字：host。`host` 现在是正式名，`profile` 作为别名保留（`Lookup` 的 `AlsoKnownAs`），所以老脚本照常工作。用法行、拒绝信息（`host needs --action …`）、审批摘要（`create host x`）一并改了。同时把全表 `Usage` 里的 `<handle>` 换成 `<channel>`：`handle` 这个词已经废除，通道就叫 channel，写成 `<session>:<index>`。
@@ -28,6 +32,9 @@
 - **`initialize` 的 instructions 重写成「这是什么」**。原来是七条规则，其中三条是「不要做 X」：读完只知道每一种失败方式，不知道手里拿着什么。现在按世界本身组织——`cmd` 是 DSL 而 `sh` 是 shell 命令（`sh` 只作为值经 `args`/`vars` 进入）、`session`／`channel` 是什么、能力集中在 `ext list`、状态集中在 `ps`、以及一条无法从任何东西推导出来的硬边界（越过人的权限不可逆）与被 held 的调用不能重试。1799 B，仍在上限内；`TestNoSpecDriftBetweenDirectivesAndSkill` 与 `TestTokenBudgetGuard` 两个方向都还锁着。
 
 ## v0.2.8-rc.3 — 2026-10-21
+
+- **构建工具链升到 Go 1.27，纳入 crypto/x509 中间证书 denylist（GO-2026-6809 / CVE-2026-111943）**。此前 `go.mod`、CI 与 Dockerfile 全部钉在 Go 1.25，而 1.25 已停止维护、永远不会带这个修复：连接 HTTPS/WSS 的远程 MCP server 时，若对端证书链途经已被吊销的中间证书且系统信任库未更新，未修补的 `x509.Certificate.Verify` 会放行。仓库没有自定义 TLS 验证（全走标准库默认路径），所以修复就是工具链：`go.mod` 最低版本提到 `go 1.27.3`（`go install` 构建随之强制带修复），CI 与 Docker 镜像跟到 1.27，本次发布起的预编译二进制都带 denylist。
+
 
 - **底部会话栏列出的是会话，不再是窗口**。它原来只遍历 `allShellWins()`，于是底栏只认识「这个页面自己打开过的窗口」：MCP 的 `pty` / `session_start`、`POST /api/sessions`、以及「窗口关了但会话还在跑」这三种会话全都不在栏里——服务端一直在广播完整的 snapshot，是前端把列表建在了 DOM 上。现在 `dockEntries()` 取「所有打开窗口 ∪ snapshot 里运行中的会话」，以会话为键（`sess:<id>`；占位窗口与扩展状态卡仍是 `win:<id>`），所以关掉窗口标签不会消失，勾选也跟着会话走。没有窗口的会话以虚线上边框绘制，点一下即开终端（`focusSessionWindow`）；中键仍只丢窗口、不动会话。归档会话留在右列，扩展自己的连接留在扩展列——与两张卡片的 `isHiddenSession` 同一条规则。关闭对话框的计数与动作现在用同一个谓词（`entries`），连接中的窗口不再被排除在「要停止几个会话」之外。
 
