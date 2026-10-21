@@ -574,27 +574,14 @@ func TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt(t *testing.T) {
 // long-lived instance is the worst kind, because the workaround is a restart.
 func TestMCPRecvCursorIsDroppedOnClose(t *testing.T) {
 	s := newTestServer(t)
-	// A frame has to APPEAR IN THE TRANSCRIPT, and it must appear the same way on every
-	// platform. Spawning `echo` was not platform-neutral: the interactive shell is bash
-	// on Unix and powershell on Windows, and the two disagree about what a single-quoted
-	// JSON argument means — CI caught it as "no cursor recorded", which is exactly what a
-	// frame that never parsed looks like.
-	//
-	// A terminal echoes what is typed at it, so `input` alone produces the bytes with no
-	// program and no quoting rules involved. `call` would not do either: it waits for the
-	// reply to its own frame and consumes it, leaving nothing for `read`.
 	h := openPty(t, s)
-	termText(t, s, map[string]any{"cmd": `input ` + h + ` {"jsonrpc":"2.0","method":"ev"}`})
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if got := termText(t, s, map[string]any{"cmd": "read " + h + " --frame", "timeout": float64(0)}); strings.Contains(got, "200") {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, ok := s.recvCursors[h]; !ok {
-		t.Fatalf("no cursor recorded for %s after a recv; the rest of this test proves nothing", h)
-	}
+
+	// THE CURSOR IS SET DIRECTLY, because the invariant is about close, not about how
+	// a frame was obtained. Producing a real frame was platform-dependent in a way
+	// that cost two CI rounds: spawning `echo '{…}'` fails under powershell, and typing
+	// it at a "pty" assumes a terminal that echoes, which Windows does not always give.
+	// The frame-reading half is covered by TestMCPRecvCursorUsesRawByteSpan.
+	s.setRecvCursor(h, 7)
 
 	if out := termText(t, s, map[string]any{"cmd": "close " + h}); !strings.Contains(out, "204") {
 		t.Fatalf("close: %s", out)

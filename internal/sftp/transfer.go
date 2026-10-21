@@ -363,9 +363,22 @@ func (s *Client) ReplaceInFile(remotePath, oldText, newText string) (int64, erro
 		_ = s.RemoveFile(tmpPath)
 		return 0, fmt.Errorf("preserve permissions on temporary file: %w", err)
 	}
+	// RENAME OVER THE TARGET IS NOT PORTABLE. On POSIX the rename replaces the
+	// destination atomically, which is the whole reason for the temp file. Windows
+	// answers SSH_FX_FAILURE "Access is denied" when the destination exists, so the
+	// atomic swap is unavailable there and the best remaining sequence is remove then
+	// rename — a window where the file is briefly absent, chosen deliberately over a
+	// replace that simply does not work.
 	if err := s.RenameFile(tmpPath, remotePath); err != nil {
-		_ = s.RemoveFile(tmpPath)
-		return 0, fmt.Errorf("rename temporary file over %s: %w", remotePath, err)
+		if rmErr := s.RemoveFile(remotePath); rmErr != nil {
+			_ = s.RemoveFile(tmpPath)
+			return 0, fmt.Errorf("rename temporary file over %s: %w (and removing the target first failed: %w)",
+				remotePath, err, rmErr)
+		}
+		if err := s.RenameFile(tmpPath, remotePath); err != nil {
+			_ = s.RemoveFile(tmpPath)
+			return 0, fmt.Errorf("rename temporary file over %s after removing it: %w", remotePath, err)
+		}
 	}
 	return int64(len(updated)), nil
 }
