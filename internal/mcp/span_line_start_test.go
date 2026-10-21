@@ -17,8 +17,9 @@ func TestSpanListsLineStartOffset(t *testing.T) {
 	})
 	h := handleFrom(t, text)
 
-	// Wait for output.
-	termText(t, s, map[string]any{"cmd": "read " + h + " --from-line 1"})
+	// Wait for the program to exit so its bytes are all in the log; a read is a
+	// snapshot and does not wait (see waitForShellToExit).
+	waitForShellToExit(t, s, shellIDFromHandle(t, s, h))
 
 	// Span must include the @ column.
 	got := termText(t, s, map[string]any{"cmd": "span " + h})

@@ -17,6 +17,13 @@ func TestWriteToFinishedPipeSaysWhatHappened(t *testing.T) {
 	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "pipe internal --argv sh -c 'echo hi'"}))
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
+	// THE RACE THIS PINS IS "process gone, status not yet reaped" — so the process
+	// must actually be gone before the write is attempted. Without this the test
+	// asserted the behaviour of a LIVE process on a fast machine (where the write
+	// lost the race by luck) and got 200 OK on a slow one, where the write arrived
+	// first and the program happily read it.
+	waitForShellToExit(t, s, shellIDFromHandle(t, s, h))
+
 	for _, cmd := range []string{"run " + h + " extra", "type " + h + " extra"} {
 		got := termText(t, s, map[string]any{"cmd": cmd, "timeout": 2})
 		if !strings.HasPrefix(got, "TERM/1 5") {
@@ -64,6 +71,10 @@ func TestDeadPtyIsNotToldToReadItsExitCode(t *testing.T) {
 func TestFinishedPipeRefusesTheWriteNotTheRead(t *testing.T) {
 	s := newTestServer(t)
 	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "pipe internal --argv sh -c 'echo kept'"}))
+
+	// The process must have exited, or this tests the wrong state: the refusal is
+	// about a FINISHED pipe, and a live one accepts the write (200 OK on CI).
+	waitForShellToExit(t, s, shellIDFromHandle(t, s, h))
 
 	// The write is refused with a readable reason...
 	got := termText(t, s, map[string]any{"cmd": "run " + h + " x", "timeout": 2})

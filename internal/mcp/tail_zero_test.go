@@ -17,8 +17,14 @@ func TestTailZeroReturnsEmptyWindow(t *testing.T) {
 	})
 	h := handleFrom(t, text)
 
-	// Wait for the process to finish so its bytes are in the log.
-	termText(t, s, map[string]any{"cmd": "read " + h + " --from-line 1"})
+	// WAIT FOR THE PROCESS, NOT FOR A READ.
+	//
+	// `read` is a snapshot: it returns what is in the buffer at that instant and does
+	// not wait for anything. Using it as "wait until the output is complete" worked on
+	// a fast machine and failed on a CI runner, where the read landed before the
+	// program's bytes did — the reply was `Content-Range: bytes */0` and the assertions
+	// below compared against an empty log.
+	waitForShellToExit(t, s, shellIDFromHandle(t, s, h))
 
 	// Tail 0: an empty window, not the whole log.
 	got := termText(t, s, map[string]any{"cmd": "read " + h + " --tail 0"})
@@ -39,4 +45,19 @@ func TestTailZeroReturnsEmptyWindow(t *testing.T) {
 	if strings.Contains(got, "LINE_ONE") {
 		t.Errorf("--tail 1 must not contain the first line: %s", got)
 	}
+}
+
+// shellIDFromHandle resolves a printed handle to the internal shell id that
+// waitForShellToExit polls.
+//
+// A handle is `<session>:<index>` and the internal id is a bare uuid+index; the
+// mapping goes through the same door every directive uses, so a test cannot drift
+// from what the code resolves.
+func shellIDFromHandle(t *testing.T, s *Server, handle string) string {
+	t.Helper()
+	cs, bad := s.requireShell(handle)
+	if bad != nil {
+		t.Fatalf("requireShell(%s): %s", handle, toolResultText(bad))
+	}
+	return cs.ID
 }

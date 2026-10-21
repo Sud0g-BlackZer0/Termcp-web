@@ -289,6 +289,30 @@ func TestTermRunStartsAtItsOwnOffset(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
 	termText(t, s, map[string]any{"cmd": "run " + h + " seq 1 500", "timeout": float64(2), "bytes_limit": float64(64)})
+
+	// LET seq FINISH PRODUCING before the next command.
+	//
+	// The 64-byte window deliberately leaves most of seq's output unread — that is the
+	// point of the test — but the WRITER is still going when this call returns. Sending
+	// the next command immediately made the two interleave differently on a CI runner
+	// than on a workstation, and the assertion below then saw "1\n2\n3" in the second
+	// body because seq was still writing it, not because run replayed anything.
+	//
+	// Waiting for the shell to go quiet (not for it to exit — it is a pty and stays
+	// up) is what separates "unread tail exists" from "output is still arriving".
+	shellID := shellIDFromHandle(t, s, h)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		before := s.sessMgr.GetChildShell(shellID).BufferLen()
+		time.Sleep(50 * time.Millisecond)
+		if s.sessMgr.GetChildShell(shellID).BufferLen() == before {
+			break // the producer stopped adding bytes
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("seq never stopped writing")
+		}
+	}
+
 	second := termText(t, s, map[string]any{"cmd": "run " + h + " echo SECOND", "timeout": float64(2)})
 	if !strings.Contains(second, "SECOND") {
 		t.Fatalf("the second command's output is missing:\n%s", second)
