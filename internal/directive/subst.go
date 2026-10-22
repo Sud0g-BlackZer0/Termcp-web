@@ -69,6 +69,22 @@ const (
 	// shell rules a reference inside the frame's own single quotes was not expanded at
 	// all — while the frame directives' help says to quote the frame.
 	spanVerbatim
+
+	// spanArithmetic is the inside of `$(( ))` / `(( ))`, where a QUOTED WORD IS
+	// NOT AN OPERAND.
+	//
+	// The shell reads an arithmetic expansion as an expression, so the data rule's
+	// one quoted word is a syntax error there and the line never runs:
+	//
+	//	run h:1 echo $(( $1 + 1 ))   args ["2"]  ->  echo $(( '2' + 1 ))
+	//	                                             syntax error: operand expected
+	//
+	// The parser already knows where these regions are (an ArithmExp or ArithmCmd
+	// node), so they are reported by the same AST pass that reports payloads rather
+	// than guessed at from the text. Inside one, a value is inserted as the caller's
+	// own bytes — the caller chose an arithmetic context, and only a bare operand can
+	// be one.
+	spanArithmetic
 )
 
 // span is a half-open byte range of cmd with the insertion mode that governs it.
@@ -84,7 +100,7 @@ type span struct {
 // flag value is.
 func (s span) admits(src string, start, end int) (mode spanMode, inside bool, raw bool) {
 	switch s.mode {
-	case spanVerbatim:
+	case spanVerbatim, spanArithmetic:
 		// Covers, not equals: a frame is one region holding many references, and a
 		// target's own bounds are exactly the reference that filled it.
 		if start >= s.start && end <= s.end {
@@ -108,83 +124,30 @@ func (s span) admits(src string, start, end int) (mode spanMode, inside bool, ra
 		if start == s.start && end == s.end {
 			return s.mode, true, true
 		}
-		// THE COMMAND LINE, WITH PUNCTUATION AFTER IT.
-		//
-		// `start == s.start && end == s.end` asks "is the reference the whole span",
-		// and the span is a BYTE RANGE — so a trailing space is enough to answer no.
-		// Three forms a caller writes constantly were answered no for exactly that
-		// reason, and each of them silently turned a command line into one quoted
-		// word:
-		//
-		//	run h:1 $1 &            span "$1 &"   -> terminal got `'echo C' &`
-		//	run h:1 $1 ; ls host    span "$1 "    -> terminal got `'echo D' `
-		//	run h:1 $1 && run h:1 $2  (split, and the first span is "$1 ")
-		//
-		// In all three the caller DID name the command line: what follows the
-		// reference is not another word of it, it is the termcp/shell punctuation that
-		// ends it or backgrounds it. So the test is what the rest of the span holds,
-		// not how long it is.
-		if start >= s.start && end <= s.end &&
-			commandLineStartsAt(src[s.start:start]) && commandLineEndsAfter(src[end:s.end]) {
-			return s.mode, true, true
-		}
 		return s.mode, false, false
 	}
 }
 
-// commandLineStartsAt reports whether the head of a payload span is empty of words.
+// spanAt resolves one reference against the statement's spans.
 //
-// It is the other half of the question and it is not optional: without it
-// `run h:1 echo $1` reads as "the reference is the command line", which is the case
-// the quoting rule exists for — the caller named a word inside a line they wrote, and
-// splicing a whole command line into it turns one command into several.
-func commandLineStartsAt(head string) bool {
-	for i := 0; i < len(head); i++ {
-		switch head[i] {
-		case ' ', '\t', '\n', '\r':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// commandLineEndsAfter reports whether the tail of a payload span holds nothing but
-// the punctuation that closes a command line.
-//
-// WHITESPACE AND A BACKGROUND `&`, and deliberately no more. A redirect or a pipe
-// tail (`$1 > /tmp/out`, `$1 | wc -l`) is a line the caller is still writing, and
-// splicing a whole command line into it is the thing the quoting rule exists to
-// prevent — `$1 && echo done` means "then echo done", which is two directives, while
-// `$1 > /tmp/out` means "that command, redirected", which the caller can write as one
-// argument. Widening this to every shell operator would make `run h:1 $1; rm -rf /`
-// and `run h:1 $1 | sh` indistinguishable from the harmless forms above.
-func commandLineEndsAfter(tail string) bool {
-	seenAmp := false
-	for i := 0; i < len(tail); i++ {
-		switch c := tail[i]; {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
-		case c == '&' && !seenAmp:
-			seenAmp = true
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// spanAt resolves one reference against the statement's spans, in source order.
-//
-// The first span that CONTAINS the reference wins, which matters where two overlap:
-// a target inside a payload region is the target, not part of the command line.
+// THE INNERMOST SPAN THAT CONTAINS IT WINS. Regions nest — an arithmetic expansion
+// sits inside the payload of the directive that carries it, and a target sits inside
+// the words of the statement that names it — and in every nesting it is the smaller,
+// more specific region that says how the value is read. First-match-in-source-order
+// gave the same answer only while no two spans overlapped.
 func spanAt(spans []span, src string, start, end int) (mode spanMode, raw bool) {
-	for _, s := range spans {
-		if s.start > end {
-			break
-		}
+	best := -1
+	for i, s := range spans {
 		if _, inside, r := s.admits(src, start, end); inside {
-			return s.mode, r
+			if best < 0 || s.start > spans[best].start {
+				best = i
+				_ = r
+			}
 		}
+	}
+	if best >= 0 {
+		_, _, r := spans[best].admits(src, start, end)
+		return spans[best].mode, r
 	}
 	// NO SPAN OWNS IT, so the data rule applies: a reference outside every payload,
 	// argv or target is a flag value or a positional argument, and one quoted word is
@@ -310,7 +273,9 @@ func scanSubstitutions(src string, sub Subst, spans []span) ([]occ, error) {
 		// single quotes is worth looking at — a verbatim region (a frame, a target)
 		// has no shell to honour, so the quote state does not apply to it.
 		mode, raw := spanAt(spans, src, i, refEnd)
-		if b != '$' || (inSingle && mode != spanVerbatim) {
+		// A verbatim or arithmetic region is not read by the shell's quoting rules at
+		// all, so a `$` inside the caller's single quotes is still a reference there.
+		if b != '$' || (inSingle && mode != spanVerbatim && mode != spanArithmetic) {
 			i = refEnd
 			continue
 		}
@@ -380,7 +345,7 @@ func scanSubstitutions(src string, sub Subst, spans []span) ([]occ, error) {
 			// whole payload: `run h:1 $CMD` is a whole payload, but the caller chose the
 			// data channel and splicing it unquoted would turn its semicolons into
 			// syntax.
-			raw: raw && mode == spanVerbatim,
+			raw: raw && (mode == spanVerbatim || mode == spanArithmetic),
 			dq:  inDouble,
 		})
 		i = refEnd

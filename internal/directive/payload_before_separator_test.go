@@ -25,15 +25,20 @@ func TestAPayloadBeforeASeparatorIsStillTheCommandLine(t *testing.T) {
 		// want is the payload of each statement, in order.
 		want []string
 	}{
-		{"background", `run h:1 $1 &`, []string{"echo C"}, []string{"echo C "}},
+		{"background", `run h:1 $1 &`, []string{"echo C"}, []string{"echo C &"}},
 		{"separator", `run h:1 $1 ; ls host`, []string{"echo D"}, []string{"echo D ", ""}},
 		{"and chain", `run h:1 $1 && run h:1 $2`, []string{"echo A", "echo B"}, []string{"echo A", "echo B"}},
 		{"or chain", `run h:1 $1 || run h:1 $2`, []string{"echo A", "echo B"}, []string{"echo A", "echo B"}},
-		// The narrowing that must survive: a reference with words on EITHER side is a
-		// word in a line the caller wrote, and quoting is right there.
+		// The narrowing that must survive: a reference with a word BEFORE it is a word
+		// in a line the caller wrote, and quoting is right there.
 		{"word before it", `run h:1 echo $1`, []string{"a; b"}, []string{"echo 'a; b'"}},
-		{"pipeline head", `run h:1 $1 | wc -l`, []string{"echo C"}, []string{"'echo C' | wc -l"}},
-		{"redirect", `run h:1 $1 > /tmp/out`, []string{"echo C"}, []string{"'echo C' > /tmp/out"}},
+		// A pipeline head and a redirect target are still the caller's command line:
+		// the payload words of `$1 | wc -l` are `$1`, so `$1` IS the payload and the
+		// pipeline tail is the line it is part of. Before the region came from the AST
+		// word list these were quoted too, and `'echo C' | wc -l` is a pipeline whose
+		// head is a program that does not exist.
+		{"pipeline head", `run h:1 $1 | wc -l`, []string{"echo C"}, []string{"echo C | wc -l"}},
+		{"redirect", `run h:1 $1 > /tmp/out`, []string{"echo C"}, []string{"echo C > /tmp/out"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

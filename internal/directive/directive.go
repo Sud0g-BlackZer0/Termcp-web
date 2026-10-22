@@ -640,10 +640,15 @@ so all of these hand the terminal a command line:
   run h:1 $1 ; ls host               this directive, then another
   run h:1 $1 && run h:1 $2           two directives with a condition between
 
-One that sits BESIDE other words is substituted as ONE QUOTED WORD, because
-there the caller named a word rather than the command line: run h:1 echo $1,
-run h:1 $1 | wc -l, run h:1 $1 > /tmp/out. When a command needs a prefix or a
-suffix, put the whole line in one argument: args: ["cd /app && make test"].
+One that has a word BEFORE it is substituted as ONE QUOTED WORD, because there
+the caller named an argument rather than the command line: run h:1 echo $1. When
+a command needs a prefix, put the whole line in one argument:
+args: ["cd /app && make test"].
+
+What follows the reference is the rest of the line, and it does not change the
+answer: run h:1 $1 | wc -l and run h:1 $1 > /tmp/out hand the terminal a command
+line with a pipe or a redirect after it, because the payload of that directive is
+the reference.
 
 $0 is refused (args is 1-based), and ${N} is the unambiguous spelling at 10 or
 more. Named values are a different channel: vars substitutes $NAME as one quoted
@@ -1514,6 +1519,35 @@ func payloadSpans(src string) []span {
 		return nil
 	}
 	var out []span
+	// ARITHMETIC CONTEXT COMES FROM THE PARSER TOO. `$(( ))` is an expression, not a
+	// word list, so the quoting that makes a value data would make the expression
+	// invalid — and the node type is the only thing that knows the difference between
+	// a `$1` in an operand and a `$1` in a command line.
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.ArithmExp:
+			out = append(out, span{start: int(n.Pos().Offset()), end: int(n.End().Offset()), mode: spanArithmetic})
+		case *syntax.Redirect:
+			// A HERE-DOCUMENT BODY IS ITS OWN NODE, and it is not a word list.
+			//
+			// `Redirect.Hdoc` is the body the parser already read — the lines between
+			// the `<<EOF` line and the terminator — so its bounds are a fact, not a
+			// scan for the terminator. Without this span a reference in a body took the
+			// data rule and arrived quoted:
+			//
+			//	run h:1 cat <<EOF / $1 / EOF   args ["echo C"]
+			//		body got  'echo C'   -> the file said `'echo C'`, quotes included
+			//
+			// Verbatim, not quoted, because a body is neither word-split nor globbed:
+			// the value is text that goes into the body as written. (An unquoted
+			// delimiter still expands `$name` in the body afterwards; that is the
+			// shell's rule and the caller's choice of delimiter.)
+			if n.Hdoc != nil {
+				out = append(out, span{start: int(n.Hdoc.Pos().Offset()), end: int(n.Hdoc.End().Offset()), mode: spanVerbatim})
+			}
+		}
+		return true
+	})
 	for _, stmt := range file.Stmts {
 		if stmt == nil || stmt.Cmd == nil {
 			continue
@@ -1560,8 +1594,6 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 	if !known {
 		return nil
 	}
-	bodyEnd := commandEnd(stmt)
-
 	rest := call.Args[1:]
 	// The target is consumed exactly where the parser consumes it, and it is RAW
 	// when it is there.
@@ -1597,7 +1629,7 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 			if restValueFlag(op, key) && i+1 < len(rest) {
 				// PER-WORD: `--args` on ext is parsed again by SplitArgv, so each
 				// whole-word `$N` is one argv element and must arrive unquoted.
-				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: bodyEnd, mode: spanWords})
+				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: wordsEnd(rest), mode: spanWords})
 			}
 			if !strings.Contains(w, "=") && !valuelessFlag(op, key) && i+1 < len(rest) {
 				i++ // the flag's value word
@@ -1622,7 +1654,7 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 			// reason as the flag kind above: each whole-word `$N` is one argv element
 			// and must arrive unquoted.
 			if i+1 < len(rest) {
-				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: bodyEnd, mode: spanWords})
+				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: wordsEnd(rest), mode: spanWords})
 			}
 			return out
 		}
@@ -1636,58 +1668,39 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 	}
 	return append(out, span{
 		start: int(rest[i].Pos().Offset()),
-		end:   payloadEndFor(src, stmt, bodyEnd),
-		mode:  op.payloadSpanMode(),
+		// THE END COMES FROM THE SAME WORD LIST AS THE START (issues #141, #155).
+		//
+		// It used to be `commandEnd(stmt)` — the end of the shell STATEMENT — and a
+		// shell statement is not a directive. `a && b` is ONE statement holding TWO
+		// directives, and `a | b` is one statement whose payload is only the leading
+		// command, so the region ran past what the directive calls its payload. The
+		// substitution rule then asks "is the reference the whole region" and answers
+		// no, which turns a command line into a single quoted word:
+		//
+		//	run h:1 $1 &              region "$1 "    terminal got `'echo C' &`
+		//	run h:1 $1 ; ls host      region "$1 "    terminal got `'echo D' `
+		//	run h:1 $1 && run h:1 $2  region "$1 && …" and `$2` had no region at all
+		//
+		// Taking both ends from the AST word list makes the region exactly the
+		// payload, so the exact-equality test in the substitution is right again and
+		// needs no heuristic about trailing punctuation.
+		//
+		// `bodyEnd` still bounds the payload TEXT that goes to the terminal: that is
+		// the whole line, pipes and redirects included. Only the REGION — the answer
+		// to "is this reference the payload" — stops at the last payload word.
+		end:  wordsEnd(rest),
+		mode: op.payloadSpanMode(),
 	})
 }
 
-// payloadEndFor is where a statement's payload region stops.
+// wordsEnd is the source offset just past the last of these words.
 //
-// THE SHELL AST AND THE DIRECTIVE GRAMMAR DISAGREE ABOUT `&&`, and the payload
-// region has to follow the directive grammar. `run h:1 $1 && run h:1 $2` is ONE
-// shell statement (a BinaryCmd) but TWO directives, so the payload span computed
-// from the shell AST covered `$1 && run h:1 $2` — which made `$1` "a word inside a
-// line the caller wrote" and quoted it into a single shell word. The terminal then
-// received `'echo A'` and answered "command not found: echo A", while the reply said
-// 200 (issues #141, #155).
-//
-// So the region stops at the first top-level `&&`/`||`, which is exactly where the
-// directive split happens. A trailing space is harmless: admits() asks what the rest
-// of the span HOLDS, not how long it is.
-func payloadEndFor(src string, stmt *syntax.Stmt, bodyEnd int) int {
-	if op := firstCondOperator(stmt.Cmd); op >= 0 && op < bodyEnd {
-		return op
+// Empty means there is no payload to bound, which callers check before asking.
+func wordsEnd(rest []*syntax.Word) int {
+	if len(rest) == 0 {
+		return 0
 	}
-	return bodyEnd
-}
-
-// firstCondOperator is the offset of the earliest top-level `&&` or `||` in cmd, or
-// -1 when there is none.
-//
-// It walks the LEFT SPINE because that is how the shell parser nests a chain:
-// `a && b && c` is BinaryCmd{X: BinaryCmd{X: a, Y: b}, Y: c}, so the outermost
-// operator is the LAST one in the line and the first is the deepest.
-func firstCondOperator(cmd syntax.Command) int {
-	b, ok := cmd.(*syntax.BinaryCmd)
-	if !ok {
-		return -1
-	}
-	// `&&` AND `||` ONLY — those are the operators the directive grammar also treats
-	// as statement boundaries, so they are the only ones where the payload region of
-	// one directive ends. A `|` is still inside a payload: `run h:1 $1 | wc -l` is one
-	// directive whose payload is a pipeline, and the reference sits beside other words
-	// there, which is the case the quoting rule is for.
-	switch b.Op {
-	case syntax.AndStmt, syntax.OrStmt:
-	default:
-		return -1
-	}
-	if b.X != nil {
-		if inner := firstCondOperator(b.X.Cmd); inner >= 0 {
-			return inner
-		}
-	}
-	return int(b.OpPos.Offset())
+	return int(rest[len(rest)-1].End().Offset())
 }
 
 // mustLiteralWord is literalWord for the span pass, which is allowed to give up.
@@ -1768,6 +1781,17 @@ func leadCall(cmd syntax.Command) *syntax.CallExpr {
 // `&&` chain is still one command, and its text still ends at its last word.
 func commandEnd(stmt *syntax.Stmt) int {
 	if stmt.Semicolon.IsValid() {
+		// A BACKGROUNDING `&` IS PART OF THE LINE, and the AST says where it is:
+		// `Stmt.Semicolon` is documented as "position of ';', '&', or '|&'".
+		//
+		// Trimming it the way a `;` is trimmed silently changed what the caller asked
+		// for: `run h:1 sleep 100 &` sent `sleep 100 `, so the shell ran it in the
+		// FOREGROUND and the call blocked until it finished — a 200 that did the
+		// opposite of the line as written. The `;` is different in kind: it ends the
+		// termcp statement, so it is termcp's punctuation and never the shell's.
+		if stmt.Background {
+			return int(stmt.Semicolon.Offset()) + 1
+		}
 		return int(stmt.Semicolon.Offset())
 	}
 	return int(stmt.End().Offset())
