@@ -19,9 +19,10 @@ import (
 // Every op is listed here by its USER-FACING spelling, with a file that suits it, so a
 // new op cannot be added to one place and forgotten in the other.
 func TestEveryFileOpIsReachable(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the ops below are POSIX: symlink targets, ownership and modes")
-	}
+	// NOT SKIPPED AS A BLOCK. Most of these ops are portable — reading a stat, a
+	// realpath, a truncate, a download — and skipping the whole set on Windows is how
+	// `ReplaceText`'s remove-then-rename fallback went untested on the one platform that
+	// needs it. Each case declares what it needs; the rest run everywhere.
 	s := newTestServer(t)
 	h := openPty(t, s)
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
@@ -38,28 +39,29 @@ func TestEveryFileOpIsReachable(t *testing.T) {
 	}
 
 	cases := []struct {
-		op  string
-		cmd func(p, dir string) string
+		op    string
+		posix bool // needs POSIX semantics: modes, ownership, symlink targets
+		cmd   func(p, dir string) string
 	}{
-		{"stat", func(p, _ string) string { return "get " + sid + " file " + p + " --op stat" }},
-		{"getwd", func(_, _ string) string { return "get " + sid + " file . --op getwd" }},
-		{"urls", func(p, _ string) string { return "get " + sid + " file " + p + " --op urls" }},
-		{"realpath", func(p, _ string) string { return "get " + sid + " file " + p + " --op realpath" }},
-		{"statvfs", func(_, d string) string { return "get " + sid + " file " + d + " --op statvfs" }},
-		{"readlink", func(_, d string) string { return "get " + sid + " file " + filepath.Join(d, "ln") + " --op readlink" }},
-		{"chmod", func(p, _ string) string { return "write " + sid + " file " + p + " --op chmod --mode 416" }},
-		{"chown", func(p, _ string) string { return "write " + sid + " file " + p + " --op chown --uid 0 --gid 0" }},
-		{"chtimes", func(p, _ string) string {
+		{"stat", false, func(p, _ string) string { return "get " + sid + " file " + p + " --op stat" }},
+		{"getwd", false, func(_, _ string) string { return "get " + sid + " file . --op getwd" }},
+		{"urls", false, func(p, _ string) string { return "get " + sid + " file " + p + " --op urls" }},
+		{"realpath", false, func(p, _ string) string { return "get " + sid + " file " + p + " --op realpath" }},
+		{"statvfs", false, func(_, d string) string { return "get " + sid + " file " + d + " --op statvfs" }},
+		{"readlink", true, func(_, d string) string { return "get " + sid + " file " + filepath.Join(d, "ln") + " --op readlink" }},
+		{"chmod", true, func(p, _ string) string { return "write " + sid + " file " + p + " --op chmod --mode 416" }},
+		{"chown", true, func(p, _ string) string { return "write " + sid + " file " + p + " --op chown --uid 0 --gid 0" }},
+		{"chtimes", true, func(p, _ string) string {
 			return "write " + sid + " file " + p + " --op chtimes --atime 1600000000 --mtime 1600000001"
 		}},
-		{"truncate", func(p, _ string) string { return "write " + sid + " file " + p + " --op truncate --size 2" }},
+		{"truncate", false, func(p, _ string) string { return "write " + sid + " file " + p + " --op truncate --size 2" }},
 		// The two links are CREATE operations, not write ops: the node's key is the new
 		// name and --target is what it refers to. Listing them under write was what sent
 		// a caller to a verb that could not take --target.
-		{"symlink", func(_, d string) string {
+		{"symlink", false, func(_, d string) string {
 			return "create " + sid + " file " + filepath.Join(d, "sym-new") + " --target " + filepath.Join(d, "target.txt")
 		}},
-		{"link", func(_, d string) string {
+		{"link", false, func(_, d string) string {
 			return "create " + sid + " file " + filepath.Join(d, "hard-new") + " --op link --target " + filepath.Join(d, "target.txt")
 		}},
 	}
@@ -72,6 +74,9 @@ func TestEveryFileOpIsReachable(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.op, func(t *testing.T) {
+			if tc.posix && runtime.GOOS == "windows" {
+				t.Skip("needs POSIX modes/ownership/symlinks")
+			}
 			p := file("op-"+tc.op+".txt", "0123456789")
 			cmd := tc.cmd(p, dir)
 			got := termText(t, s, map[string]any{"cmd": cmd})
@@ -94,9 +99,6 @@ func TestEveryFileOpIsReachable(t *testing.T) {
 // The two are one transposition away from each other and both orders "work": reversed,
 // the call answers 200 and creates a link in the wrong place, pointing the wrong way.
 func TestCreateFileMakesASymlinkForTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlinks need privileges Windows runners do not have")
-	}
 	s := newTestServer(t)
 	h := openPty(t, s)
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
@@ -111,6 +113,12 @@ func TestCreateFileMakesASymlinkForTarget(t *testing.T) {
 
 	got := termText(t, s, map[string]any{"cmd": "create " + sid + " file " + linkPath + " --target " + target})
 	if !strings.HasPrefix(got, "TERM/1 2") {
+		if runtime.GOOS == "windows" {
+			// A Windows runner may lack the privilege to create a symlink. That is a
+			// property of the runner, not of the directive — but the attempt has to be
+			// made, or the branch is never exercised on the platform whose paths differ.
+			t.Skipf("this runner cannot create symlinks: %s", got)
+		}
 		t.Fatalf("create … file --target was refused:\n%s", got)
 	}
 
@@ -132,9 +140,6 @@ func TestCreateFileMakesASymlinkForTarget(t *testing.T) {
 // before: the handler wanted existing_path and new_path, neither of which was a flag of
 // write, so the only hard link the surface could express was an error message.
 func TestCreateFileMakesAHardLink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("hard links need NTFS privileges Windows runners do not have")
-	}
 	s := newTestServer(t)
 	h := openPty(t, s)
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
@@ -149,6 +154,9 @@ func TestCreateFileMakesAHardLink(t *testing.T) {
 
 	got := termText(t, s, map[string]any{"cmd": "create " + sid + " file " + newPath + " --op link --target " + existing})
 	if !strings.HasPrefix(got, "TERM/1 2") {
+		if runtime.GOOS == "windows" {
+			t.Skipf("this runner cannot create hard links: %s", got)
+		}
 		t.Fatalf("create … file --op link was refused:\n%s", got)
 	}
 
