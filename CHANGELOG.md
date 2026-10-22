@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **host 配置在加载时就校验，坏条目在 `ls host` 里现形，`connect` 回 400 而不是 500**。此前一个写错的 profile 有两种坏法，都无声：一是根本读不出来（`kind = "bogus"`、漏写 `kind`），`ls host` 照样把名字印出来，于是清单、demo、runbook 里都是连不上的 host，唯一的发现方式是真去连一次；二是读得出来但用不了。现在 `ls host` 在名字后面直接跟一行 `broken: <原因>`，名字仍然列出——用户自己写的条目看不见，比看见了标坏更糟。
+
+  错误码同时归位：内容校验失败（`unknown kind`、`config must set "kind"`、`default_mode` 取值非法）现在包 `ErrInvalid`，于是回 400 `invalid_argument` 而不是 500 `operation_failed`。消息本来就是写给调用方的（「use "internal" or "remote"」），状态码却说是服务端坏了——那会招来一次注定失败的重试。
+
+  `kind = "internal"` 带 `host` / `user` / `port` / `password` / `private_key` / `jump` 现在被拒，并点名要删哪些字段。这是唯一一处「调用方的理解和现实分歧而没有任何信号」的组合：它连的是本机回环，却让人以为在连 `10.99.99.99`。
+
+  最后一条：profile 的 `default_shell` 指向不存在的程序时，`connect` 过去回 200 并给一个句柄，随后 `ls` 显示该通道已经 `exited`——调用方被告知「你有一个 shell」，拿到的是一具尸体，而死因（`executable file not found`）只有去读那个通道才看得到。现在 `connect` 在启动前就检查本机 profile 的 shell 是否可执行，不行回 404 并给出程序名。检查的是 **profile 的 shell**，不是调用方给的一次性命令：`--argv echo hi` 是正常的一次性会话，进程本来就秒退，用「退得快」当判据会在最快的机器上最先误报。
+
 ## v0.2.8-rc.4 — 2026-10-22
 
 - **`get host <name>` 读回一个 host，口令只报有无不改值**。此前 host 能建、能改、能列、能删，就是读不回来：`ls host` 只有名字，改一个字段时无法知道其余字段当前是什么，于是「部分修改」只能靠猜，而猜错就是覆盖。现在 `get host <name>` 返回条目内容，密码与密钥口令替换为 `has_password` / `has_passphrase`——把口令放进回复等于写进 transcript 和日志，而调用方真正要问的是「有没有设置」。读取不是变更，所以不受 `--mcp-manage-ssh-configs` 限制：列表本来就开放，只藏字段不藏名字没有意义。`ls host <name>` 也不再静默丢掉名字返回全表，而是明说要读单个条目该用哪个动词。

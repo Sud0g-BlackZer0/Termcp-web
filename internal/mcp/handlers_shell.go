@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -37,6 +38,30 @@ func (s *Server) handleStartSession(ctx context.Context, request mcpgo.CallToolR
 	cmd, execArgs := sshconfig.EffectiveCommand(ent, command, toolArgs)
 	if strings.TrimSpace(cmd) == "" && len(execArgs) > 0 {
 		return toolError(CodeInvalidArgument, "%s", "command is required when args are provided"), nil
+	}
+
+	// A PROFILE'S SHELL MUST EXIST, AND THAT IS CHECKABLE BEFORE ANYTHING STARTS.
+	//
+	// issue #154: a profile with default_shell = "nosuchshell_xyz" answered 200 with a
+	// handle, and `ls` a moment later showed the channel already `exited` — the caller
+	// was promised a pty and got a corpse, with the reason only visible by reading the
+	// channel. For automation the difference is everything: 200 means "you have a
+	// shell".
+	//
+	// The check is the PROFILE's shell, not the caller's command. A command is allowed
+	// to be anything and to exit immediately (`--argv echo hi` is a working one-shot),
+	// so a session that dies quickly is not by itself a failure. A profile is different:
+	// it names the shell every session on that host gets, it was written once and
+	// reused, and if the program is missing then every session from it is dead on
+	// arrival. That is a fact about the config, so it is answered as one.
+	//
+	// Only the loopback case can be checked here — a remote profile's PATH lives on the
+	// target, and probing it would mean running something on the host to answer a
+	// question about the config. For remote the check is skipped rather than guessed.
+	if command == "" && len(toolArgs) == 0 && ent != nil && remote == nil {
+		if err := profileShellExists(ent); err != nil {
+			return toolError(CodeShellNotFound, "%s", err.Error()), nil
+		}
 	}
 
 	mode := sshconfig.EffectiveMode(ent, getString(args, "mode", ""))
@@ -101,6 +126,26 @@ func stderrReceipt(mode string) string {
 		return "separate"
 	}
 	return "merged(pty)"
+}
+
+// profileShellExists reports why a loopback profile's default_shell cannot be run.
+//
+// The first field is the program and the rest are its arguments, matching how
+// EffectiveDefaultShell splits the line — so `bash -l` checks `bash`, which is the
+// only part that has to exist.
+//
+// A profile that names no shell is fine: the session then asks the server for its
+// own, which is the case that cannot fail here.
+func profileShellExists(ent *sshconfig.Entry) error {
+	line := sshconfig.EffectiveDefaultShell(ent)
+	if line == "" {
+		return nil
+	}
+	prog := strings.Fields(line)[0]
+	if _, err := exec.LookPath(prog); err != nil {
+		return fmt.Errorf("default_shell %q is not runnable on this host, so every session from this profile would die on arrival: %w", prog, err)
+	}
+	return nil
 }
 
 func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

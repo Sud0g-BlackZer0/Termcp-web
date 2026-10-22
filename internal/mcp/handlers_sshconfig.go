@@ -204,14 +204,44 @@ func (s *Server) handleListSSHConfigs(ctx context.Context, request mcpgo.CallToo
 	if err != nil {
 		return toolError(CodeOperationFailed, "%s", err.Error()), nil
 	}
+	// A LISTING THAT CANNOT TELL A USABLE HOST FROM A BROKEN ONE IS A LISTING THAT
+	// LIES. Every entry used to be printed as a bare name whether or not it parsed,
+	// so the only way to learn that a profile was unusable was to try connecting to
+	// it — and an inventory, a demo, or a runbook built from `ls host` claimed hosts
+	// that could never be reached.
+	//
+	// The config is read at startup anyway, so the validation is free: the entry is
+	// loaded here and the reason travels with it. The name is still listed rather
+	// than hidden, because an entry the user wrote and cannot see is worse than one
+	// they can see is broken.
 	arr := make([]any, 0, len(names))
 	for _, n := range names {
 		if s.NoInternal && strings.EqualFold(n, "internal") {
 			continue
 		}
-		arr = append(arr, n)
+		item := map[string]any{"name": n}
+		if _, err := s.sshConfigs.Load(n); err != nil {
+			item["broken"] = brokenReason(err)
+		}
+		arr = append(arr, item)
 	}
 	return jsonResult(map[string]any{"ssh_configs": arr}), nil
+}
+
+// brokenReason renders a load failure as one line fit for a listing column.
+//
+// The sentinel that told the surface which STATUS to answer is stripped: it is the
+// tail of a Go error chain ("...: invalid ssh config"), a detail about how the
+// failure is classified, not part of the sentence the operator has to act on.
+func brokenReason(err error) string {
+	msg := strings.TrimSpace(err.Error())
+	for _, sentinel := range []error{sshconfig.ErrInvalid, sshconfig.ErrNotFound} {
+		// Wrapped errors put the sentinel last ("...: invalid ssh config"), but a
+		// returned one puts it first, so both ends are trimmed.
+		msg = strings.TrimSuffix(msg, ": "+sentinel.Error())
+		msg = strings.TrimPrefix(msg, sentinel.Error()+": ")
+	}
+	return strings.Join(strings.Fields(msg), " ")
 }
 
 // handleGetSSHConfig returns one entry, with the secrets REDACTED.

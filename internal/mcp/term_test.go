@@ -1238,7 +1238,8 @@ func TestTermRefusalIsNeverSuccessShaped(t *testing.T) {
 // "ssh_configs", and listFromDoc treats a missing key as an empty list — so the
 // one call that says what you can connect to always answered "(none)" on an
 // instance holding four profiles. The fix is the key AND the shape: this listing
-// is a plain array of names, not objects with a description field.
+// is an array of entries, each carrying the name and — since issue #154 — the
+// reason it is unusable when it is.
 func TestProfileListRendersTheHandlerKey(t *testing.T) {
 	s := newTestServer(t)
 	dir := t.TempDir()

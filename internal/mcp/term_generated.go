@@ -1249,6 +1249,12 @@ func listFromDoc(res *mcpgo.CallToolResult, listKey, field string) string {
 		if desc := getString(item, "description", ""); desc != "" {
 			b.WriteString("\t" + desc)
 		}
+		// A BROKEN ENTRY SAYS WHY, on the same line as its name. The column exists
+		// because a name alone cannot answer "can I connect to this?" — the reader of
+		// a listing is deciding what to use, and the reason is the part that decides.
+		if why := getString(item, "broken", ""); why != "" {
+			b.WriteString("\tbroken: " + why)
+		}
 		b.WriteByte('\n')
 	}
 	if b.Len() == 0 {
