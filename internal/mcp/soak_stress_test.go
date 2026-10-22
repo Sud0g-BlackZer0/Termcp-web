@@ -30,7 +30,11 @@ func TestSoakChannelAndForwardChurn(t *testing.T) {
 	defer termText(t, s, map[string]any{"cmd": "close " + primary})
 
 	for i := 0; i < 40; i++ {
-		cmd := fmt.Sprintf("open %s --argv 'echo churn-%d'", sid, i)
+		// The channel has to OUTLIVE the reader registration: `--argv 'echo x'`
+		// finishes in milliseconds, and asking a finished channel for a reader is a 409
+		// by design (see TestReaderRefusesAFinishedChannel). A churn test that raced
+		// that would be measuring the scheduler.
+		cmd := fmt.Sprintf("open %s --argv 'sleep 5'", sid)
 		out := termText(t, s, map[string]any{"cmd": cmd})
 		h := firstHandle(out)
 		if h == "" {
@@ -39,7 +43,7 @@ func TestSoakChannelAndForwardChurn(t *testing.T) {
 		// Register a reader on it, then drop it. Both are asserted: a churn test that
 		// ignores the replies is measuring how fast the server refuses.
 		reg := termText(t, s, map[string]any{"cmd": "reader " + h})
-		if !strings.Contains(reg, "reader ") {
+		if !strings.HasPrefix(reg, "TERM/1 200") {
 			t.Fatalf("channel %d did not register a reader:\n%s", i, reg)
 		}
 		// The reader id is reported as "reader <id>". It must travel to --drop, or the
@@ -126,5 +130,41 @@ func TestHighVolumePtyReadAndGrep(t *testing.T) {
 	got := termText(t, s, map[string]any{"cmd": "read " + h + " --grep burst-line- --grep-limit 5"})
 	if !strings.HasPrefix(got, "TERM/1 2") {
 		t.Fatalf("grep read failed:\n%s", got)
+	}
+}
+
+// TestReaderRefusesAFinishedChannel pins the 409.
+//
+// A channel whose `--argv` command has finished still holds its transcript, so reading
+// it works — but attaching a reader to a closed buffer cannot. That used to answer 500
+// "buffer: closed", which reads as a failure inside the server and hides the one thing
+// the caller can still do.
+func TestReaderRefusesAFinishedChannel(t *testing.T) {
+	s := newTestServer(t)
+	primary := openPipe(t, s, "sleep 30")
+	sid := strings.SplitN(primary, ":", 2)[0]
+	defer termText(t, s, map[string]any{"cmd": "close " + primary})
+
+	out := termText(t, s, map[string]any{"cmd": "open " + sid + " --argv 'echo done'"})
+	h := firstHandle(out)
+	if h == "" {
+		t.Fatalf("no channel was opened:\n%s", out)
+	}
+
+	// Wait for the command to finish rather than sleeping a fixed time.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(termText(t, s, map[string]any{"cmd": "read " + h + " --from-line 1"}), "done") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	got := termText(t, s, map[string]any{"cmd": "reader " + h})
+	if !strings.HasPrefix(got, "TERM/1 409") {
+		t.Fatalf("a finished channel did not answer 409:\n%s", got)
+	}
+	if !strings.Contains(got, "read") {
+		t.Errorf("the refusal does not say that reading still works:\n%s", got)
 	}
 }

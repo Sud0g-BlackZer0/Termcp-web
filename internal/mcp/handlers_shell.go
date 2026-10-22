@@ -741,6 +741,16 @@ func (s *Server) handleRegisterReader(ctx context.Context, request mcpgo.CallToo
 	if bad != nil {
 		return bad, nil
 	}
+	// A CHANNEL WHOSE PROCESS HAS EXITED CANNOT TAKE A READER, and that is a fact about
+	// the channel, not a failure inside termcp. It used to surface as "buffer: closed"
+	// with a 500, which reads as a bug in the server; the caller's mistake was asking a
+	// finished channel to start a stream, and the answer should say so — along with what
+	// still works, which is reading what it already produced.
+	if status := shell.Info().Status; status != api.SessionRunning {
+		return toolError(CodeConflict, "%s", fmt.Sprintf(
+			"channel %s has %s, so no reader can be attached; its output is still readable with `read`",
+			shell.ID, status)), nil
+	}
 	readerID, err := shell.RegisterReader()
 	if err != nil {
 		return toolError(CodeOperationFailed, "%s", err.Error()), nil
