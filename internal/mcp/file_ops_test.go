@@ -3,6 +3,7 @@ package mcp
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -193,8 +194,15 @@ func TestGrepLimitCapsTheMatches(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// COUNT THE MATCHES, NOT THE WORD. The pty echoes the command that was typed, and
+	// that line contains the string "marker-line-$i" — so counting "marker-line-" finds
+	// the echo as well and reports one match too many.
 	got := termText(t, s, map[string]any{"cmd": "read " + h + " --grep marker-line --grep-limit 2"})
-	if n := strings.Count(got, "marker-line-"); n > 2 {
+	if n := len(grepMatch.FindAllString(got, -1)); n > 2 {
 		t.Errorf("--grep-limit 2 returned %d matches:\n%s", n, got)
 	}
 }
+
+// grepMatch is a real match: the marker followed by a digit, which the echoed command
+// line (marker-line-$i) is not.
+var grepMatch = regexp.MustCompile(`marker-line-[0-9]`)
