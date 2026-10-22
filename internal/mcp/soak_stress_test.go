@@ -30,11 +30,19 @@ func TestSoakChannelAndForwardChurn(t *testing.T) {
 	defer termText(t, s, map[string]any{"cmd": "close " + primary})
 
 	for i := 0; i < 40; i++ {
-		// The channel has to OUTLIVE the reader registration: `--argv 'echo x'`
-		// finishes in milliseconds, and asking a finished channel for a reader is a 409
-		// by design (see TestReaderRefusesAFinishedChannel). A churn test that raced
-		// that would be measuring the scheduler.
-		cmd := fmt.Sprintf("open %s --argv 'sleep 5'", sid)
+		// The channel has to OUTLIVE the reader registration: a command that finishes
+		// in milliseconds makes `reader` a 409 by design (see
+		// TestReaderRefusesAFinishedChannel), and a churn test that raced that would be
+		// measuring the scheduler instead of the lifecycle.
+		//
+		// `--argv sleep 60`, NOT `--argv 'sleep 5'`: quoting groups words, it does not
+		// form a command line, so the quoted form names one program called "sleep 5"
+		// and the channel dies with `executable file not found` before the first
+		// assertion. That version passed on a fast machine (the reader won the race
+		// against a process that was already dead) and failed on all three CI runners.
+		// 60s is the primary's lifetime: longer than the test can run, so it cannot
+		// expire mid-loop.
+		cmd := fmt.Sprintf("open %s --argv sleep 60", sid)
 		out := termText(t, s, map[string]any{"cmd": cmd})
 		h := firstHandle(out)
 		if h == "" {
@@ -145,7 +153,7 @@ func TestReaderRefusesAFinishedChannel(t *testing.T) {
 	sid := strings.SplitN(primary, ":", 2)[0]
 	defer termText(t, s, map[string]any{"cmd": "close " + primary})
 
-	out := termText(t, s, map[string]any{"cmd": "open " + sid + " --argv 'echo done'"})
+	out := termText(t, s, map[string]any{"cmd": "open " + sid + " --argv echo done"})
 	h := firstHandle(out)
 	if h == "" {
 		t.Fatalf("no channel was opened:\n%s", out)
