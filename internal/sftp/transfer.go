@@ -205,6 +205,27 @@ func (s *Client) writeInline(remotePath string, offset *int64, data string, mode
 		}
 		raw = decoded
 	case "text", "":
+		// `hex:` IS A PREFIX, AND IT IS READ HERE BECAUSE THE DOCUMENTATION
+		// PROMISES IT. `help write` says "--data hex:00ff" writes two bytes, but
+		// nothing decoded the prefix: the seven characters `hex:00ff` went into the
+		// file as text and the reply said 200 with an honest-looking byte count.
+		//
+		// That is the one failure mode worth spending code on, because it is
+		// SILENT: every other bad argument in this surface is refused by name, while
+		// this one produces a file that parses as neither hex nor the intended
+		// bytes, and the caller has no reason to look.
+		//
+		// Only the text mode interprets the prefix: `--mode hex --data hex:00ff` is a
+		// caller writing those characters deliberately, and a mode that already says
+		// "hex" must not then read a prefix off the front of its own payload.
+		if hex, ok := strings.CutPrefix(data, "hex:"); ok {
+			decoded, err := encoding.HexDecode(hex)
+			if err != nil {
+				return 0, fmt.Errorf("hex decode after the `hex:` prefix: %w", err)
+			}
+			raw = decoded
+			break
+		}
 		raw = encoding.DecodeText(data)
 	default:
 		return 0, fmt.Errorf("unknown mode %q", mode)
