@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestEveryWriteOpReachesTheFile drives each `write … file --op` and checks the file
@@ -172,14 +173,28 @@ func TestGrepLimitCapsTheMatches(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
-	// Ten matching lines.
+	// Five matching lines. A plain while loop, not `seq`: the test runs on Windows CI
+	// too, where the shell has no seq and the command would fail having printed
+	// nothing — which the wait below would report as a timeout, not as the cause.
 	termText(t, s, map[string]any{"cmd": "run " + h + " $1", "args": []any{
-		"for i in $(seq 1 10); do echo marker-line-$i; done",
+		"i=0; while [ $i -lt 5 ]; do i=$((i+1)); echo marker-line-$i; done",
 	}})
-	waitForGrepContent(t, s, h, "marker-line-10")
 
-	got := termText(t, s, map[string]any{"cmd": "read " + h + " --grep marker-line --grep-limit 3"})
-	if n := strings.Count(got, "marker-line-"); n > 3 {
-		t.Errorf("--grep-limit 3 returned %d matches:\n%s", n, got)
+	// Poll with --grep, not the whole transcript: reading from line 1 on every
+	// iteration made this test spend seconds in the wait on a slow shell.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if strings.Contains(termText(t, s, map[string]any{"cmd": "read " + h + " --grep marker-line-5"}), "marker-line-5") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the command's output never appeared")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	got := termText(t, s, map[string]any{"cmd": "read " + h + " --grep marker-line --grep-limit 2"})
+	if n := strings.Count(got, "marker-line-"); n > 2 {
+		t.Errorf("--grep-limit 2 returned %d matches:\n%s", n, got)
 	}
 }
