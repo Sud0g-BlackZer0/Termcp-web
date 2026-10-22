@@ -804,4 +804,4 @@ func fmtBytes(n int) string { return fmt.Sprintf("%d B", n) }
 // `help`/`learn_mode`, not in the tool's name or blurb. That is the difference
 // between a tool surface that can grow and one that cannot — every directive this
 // text listed would be a line to edit the day the command space gains one.
-const termDescription = "Run one terminal line on this instance and read its result: a session's bytes, a file, a listing, a directive's own output. No cmd = bearings (what runs, what is installed, the syntax); ext list = pinned capability (MCP servers, skills trees). Window parameters bound how much comes back, never what the command does."
+const termDescription = "Run one terminal line on this instance and read its result: a session's bytes, a file, a listing, a directive's own output. No cmd = bearings (what runs, what is installed, the syntax); ls ext = pinned capability (MCP servers, skills trees). Window parameters bound how much comes back, never what the command does."

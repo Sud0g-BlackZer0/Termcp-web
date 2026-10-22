@@ -117,7 +117,7 @@ func (s *Client) ReadFile(remotePath string, offset, length int64, mode string, 
 	// protocol's own wording. Stat already knows the answer, so say it in terms the
 	// caller can act on.
 	if fi.IsDir() {
-		return nil, fmt.Errorf("%s: %w; use --action stat to list its contents", remotePath, ErrIsDirectory)
+		return nil, fmt.Errorf("%s: %w; `get <session> file <path> --op stat` lists it, and the shell can list it too", remotePath, ErrIsDirectory)
 	}
 	totalSize := fi.Size()
 
@@ -326,7 +326,7 @@ func (s *Client) ReplaceInFile(remotePath, oldText, newText string) (int64, erro
 		return 0, fmt.Errorf("stat remote file: %w", err)
 	}
 	if fi.IsDir() {
-		return 0, fmt.Errorf("%s: %w; use --action stat to list its contents", remotePath, ErrIsDirectory)
+		return 0, fmt.Errorf("%s: %w; `get <session> file <path> --op stat` lists it, and the shell can list it too", remotePath, ErrIsDirectory)
 	}
 	if fi.Size() > maxReplaceSize {
 		return 0, fmt.Errorf("%s is %d bytes, over the %d-byte limit for exact replace; use file read + file write with --offset for a file this large",
