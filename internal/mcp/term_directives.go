@@ -1622,6 +1622,18 @@ func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win 
 	// `ls <session>`: that link's channels. directivePS lists everything, so the
 	// statement is narrowed by pointing the handler at one session through --all and
 	// filtering in psOne; see directivePS for the filter.
+	//
+	// A CHANNEL ADDRESS IS NOT A COLLECTION, AND IT USED TO BE ANSWERED AS ONE
+	// (issue #148). The parser folds `ls s1 5` into the address `s1:5`, so the index
+	// arrives on the target rather than in Key. Dropped here, `ls s1 5` answered the
+	// whole listing — or, on a session with no live channels, the global "(nothing is
+	// running)", which is a sentence about a different collection. A caller using a
+	// stale index to ask "is my channel up" read that as "the session is dead".
+	if idx := locator.SplitHandle(stmt.Target).Index; idx > 0 {
+		sid := locator.SplitHandle(stmt.Target).SessionID
+		return []envelope.Slot{badRequest(stmt, "`ls "+sid+"` lists every channel; for one of them "+
+			"use `get "+sid+":"+strconv.Itoa(idx)+"`.")}
+	}
 	return []envelope.Slot{s.directivePS(ctx, withFlags(stmt, map[string]string{
 		"shells": "true", "only-session": stmt.Target, "all": "true",
 	}), win)}

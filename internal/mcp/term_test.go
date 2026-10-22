@@ -442,17 +442,37 @@ func TestTermPSLinesAreCopyable(t *testing.T) {
 }
 
 // info is `key: value`, one fact per line.
+//
+// The two ADDRESSES are two different nodes and answer about different things: a bare
+// session id is the connection container, and `<id>:<index>` is one channel on it
+// (issue #142 — the channel address used to return the session record byte for byte,
+// so a mistyped index was indistinguishable from a hit).
 func TestTermInfoIsKeyValueLines(t *testing.T) {
 	s := newTestServer(t)
 	h := openPipe(t, s, "sleep 5")
-	text := termText(t, s, map[string]any{"cmd": "get " + h})
+	sid := strings.SplitN(h, ":", 2)[0]
+
+	// The session: what the link is, and which channels hang off it.
+	sess := termText(t, s, map[string]any{"cmd": "get " + sid})
 	for _, key := range []string{"id: ", "status: ", "ssh_config: ", "shell: "} {
-		if !strings.Contains(text, key) {
-			t.Errorf("get misses %q:\n%s", key, text)
+		if !strings.Contains(sess, key) {
+			t.Errorf("get <session> misses %q:\n%s", key, sess)
 		}
 	}
-	if strings.Contains(text, "{") {
-		t.Errorf("get must be key: value lines, not JSON:\n%s", text)
+	if strings.Contains(sess, "{") {
+		t.Errorf("get must be key: value lines, not JSON:\n%s", sess)
+	}
+
+	// The channel: the facts about THIS channel, which the session record never had.
+	chanInfo := termText(t, s, map[string]any{"cmd": "get " + h})
+	for _, key := range []string{"channel: " + h, "index: ", "mode: pipe", "status: ", "bytes: "} {
+		if !strings.Contains(chanInfo, key) {
+			t.Errorf("get <channel> misses %q:\n%s", key, chanInfo)
+		}
+	}
+	// A pipe has no terminal, so it must not be given a size.
+	if strings.Contains(chanInfo, "size: ") {
+		t.Errorf("a pipe channel was given a terminal size:\n%s", chanInfo)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/envelope"
 	"github.com/open-mcp-ai/termcp/internal/locator"
+	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
 
@@ -120,6 +121,23 @@ func (s *Server) directiveInfo(ctx context.Context, stmt directive.Statement, wi
 	if bad != nil {
 		return s.slotFromFailure(ctx, stmt, failureFromResult(bad))
 	}
+	// A CHANNEL ADDRESS IS A DIFFERENT NODE, AND IT USED TO BE ANSWERED WITH ITS
+	// PARENT (issue #142/#148).
+	//
+	// `get a1f3:2` returned the session record — byte-for-byte the same reply as
+	// `get a1f3`, with only `Path` differing. Nothing in it described channel 2, and
+	// `get a1f3:99` returned the same 200, so a mistyped index was indistinguishable
+	// from a hit. That is the worst shape for an answer: it looks like confirmation.
+	if idx := locator.SplitHandle(stmt.Target).Index; idx > 0 {
+		cs, ok := sess.ShellByIndex(idx)
+		if !ok {
+			return s.slotFromFailure(ctx, stmt, &toolFailure{
+				code: CodeShellNotFound,
+				msg:  fmt.Sprintf("no channel %d on %s; it has %s", idx, sess.ID, channelSummary(sess)),
+			})
+		}
+		return s.channelSlot(stmt, win, cs)
+	}
 	info := sess.Info()
 	var b strings.Builder
 	writeKV(&b, "id", info.ID)
@@ -138,6 +156,54 @@ func (s *Server) directiveInfo(ctx context.Context, stmt directive.Statement, wi
 	}
 	body, code := capGenerated(b.String(), win)
 	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: body}
+}
+
+// channelSlot renders one channel's own state.
+//
+// The fields are the ones a caller can act on and cannot get anywhere else: the
+// index (which channel this is), the mode (a pty has no exit code, a pipe has no
+// size), the status, the exit code when there is one, and where the transcript
+// currently ends. `ls` shows the first three for every channel at once; this is the
+// one address that answers about a single one, which is what a caller has after
+// copying a handle out of a reply.
+//
+// The byte count is the transcript length, not a reader's cursor: a cursor belongs
+// to a reader, and there is no reader here. It is the number that answers "is there
+// anything new since I last looked", which is the question this address is for.
+func (s *Server) channelSlot(stmt directive.Statement, win termArgs, cs *session.ChildShell) envelope.Slot {
+	info := cs.Info()
+	var b strings.Builder
+	writeKV(&b, "channel", handleOf(cs.ParentSessionID(), info.Index))
+	writeKV(&b, "index", fmt.Sprint(info.Index))
+	writeKV(&b, "name", dash(info.Name))
+	writeKV(&b, "mode", dash(string(info.Mode)))
+	writeKV(&b, "status", string(info.Status))
+	// A pty has a size; a pipe does not, and printing 24x80 for one would invent a
+	// fact about a channel that has no terminal.
+	if info.Mode == api.ModePTY {
+		writeKV(&b, "size", fmt.Sprintf("%dx%d", info.Rows, info.Cols))
+	}
+	if info.ExitCode != nil {
+		writeKV(&b, "exit_code", fmt.Sprint(*info.ExitCode))
+	}
+	writeKV(&b, "bytes", fmt.Sprint(cs.BufferLen()))
+	writeKV(&b, "created", ageOf(info.CreatedAt))
+	body, code := capGenerated(b.String(), win)
+	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: body}
+}
+
+// channelSummary names the channels a session does have, for a 404 that has to say
+// what was available instead. A bare "no channel 5" sends the caller back to `ls`.
+func channelSummary(sess *session.Session) string {
+	shells := sess.ListChildShells()
+	if len(shells) == 0 {
+		return "no channels"
+	}
+	parts := make([]string, 0, len(shells))
+	for _, sh := range shells {
+		parts = append(parts, fmt.Sprintf(":%d", sh.Index))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // directiveResize changes a pty's size.
