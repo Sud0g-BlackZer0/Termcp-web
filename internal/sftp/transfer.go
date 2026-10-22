@@ -3,10 +3,13 @@ package sftp
 import (
 	crand "crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+
+	pkgsftp "github.com/pkg/sftp"
 
 	"github.com/open-mcp-ai/termcp/internal/encoding"
 )
@@ -49,10 +52,9 @@ func (s *Client) StreamReadTo(w io.Writer, remotePath string, offset, length int
 // offset. A nil offset truncates the file; a pointer to 0 overwrites from the first
 // byte without truncating. Uses io.Copy to stream without buffering in memory.
 func (s *Client) StreamWriteFrom(r io.Reader, remotePath string, offset *int64) (int64, error) {
-	flag, off := writeOpenFlags(offset)
-	f, err := s.client.OpenFile(remotePath, flag)
+	f, off, err := s.openForWrite(remotePath, offset)
 	if err != nil {
-		return 0, fmt.Errorf("open remote file: %w", err)
+		return 0, err
 	}
 	defer f.Close()
 
@@ -208,10 +210,9 @@ func (s *Client) writeInline(remotePath string, offset *int64, data string, mode
 		return 0, fmt.Errorf("unknown mode %q", mode)
 	}
 
-	flag, off := writeOpenFlags(offset)
-	f, err := s.client.OpenFile(remotePath, flag)
+	f, off, err := s.openForWrite(remotePath, offset)
 	if err != nil {
-		return 0, fmt.Errorf("open remote file: %w", err)
+		return 0, err
 	}
 	defer f.Close()
 
@@ -425,6 +426,55 @@ func randomSuffix() string {
 		return fmt.Sprintf("%d", os.Getpid())
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// openForWrite opens remotePath for writing, and says WHICH part is missing when
+// the open fails because something does not exist.
+//
+// "open remote file: file does not exist" is a loop for a WRITE: the file is the
+// thing the caller is creating, and creating a new file in an existing directory
+// succeeds. The missing piece is the parent directory, and the caller cannot tell
+// the two apart from the message — it reads as "the file you asked me to create
+// does not exist", which is true of every file that is about to be created.
+//
+// Stat-ing the parent turns the same failure into the fact: the directory is
+// named, and the path that cannot be created in it is named beside it.
+//
+// The original error is wrapped rather than replaced, so the classification the
+// caller's status depends on (SSH_FX_NO_SUCH_FILE → 404) still travels with it.
+func (s *Client) openForWrite(remotePath string, offset *int64) (*pkgsftp.File, int64, error) {
+	flag, off := writeOpenFlags(offset)
+	f, err := s.client.OpenFile(remotePath, flag)
+	if err == nil {
+		return f, off, nil
+	}
+	// Only the not-found case is worth a second round trip; a permission refusal or
+	// a transport fault is already saying the right thing.
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, pkgsftp.ErrSSHFxNoSuchFile) {
+		return nil, 0, fmt.Errorf("open remote file: %w", err)
+	}
+	if dir, ok := parentOf(remotePath); ok {
+		if _, serr := s.client.Stat(dir); serr != nil {
+			return nil, 0, fmt.Errorf("the directory %s does not exist, so %s cannot be created in it: %w", dir, remotePath, err)
+		}
+	}
+	return nil, 0, fmt.Errorf("open remote file: %w", err)
+}
+
+// parentOf returns the containing directory of a REMOTE path, spelled the way the
+// caller spelled it. See siblingOf for why the local path package cannot be used.
+//
+// ok is false when the path has no separator at all (a bare name, whose directory
+// is the server's cwd and not something this can name).
+func parentOf(remotePath string) (string, bool) {
+	i := strings.LastIndexAny(remotePath, `/\`)
+	if i < 0 {
+		return "", false
+	}
+	if i == 0 {
+		return remotePath[:1], true
+	}
+	return remotePath[:i], true
 }
 
 // siblingOf builds a hidden name beside a REMOTE path, keeping the path's own
