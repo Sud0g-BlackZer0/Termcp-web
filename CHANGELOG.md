@@ -2,22 +2,6 @@
 
 ## Unreleased
 
-- **cdp 门补齐成一台可用的浏览器控制台，挂在 `cdp` 这个资源下面**。此前 `cdp` 只是把 WebSocket 当普通帧通道转发，于是把浏览器交给 Agent 的每一步都要手工拼装：`Target.getTargets` 找 targetId、`Target.attachToTarget` 拿 sessionId、之后每条帧自己往 JSON 里塞那串十六进制——而这一串最容易错的地方恰恰是静默的：少写 sessionId 的帧不会被拒绝，它被发给浏览器进程，于是 `Page.navigate` 回了 frameId、页面没动。现在：
-
-  - **地址沿用资源树的规则，`:N` 表示连接，不再是自增句柄**。一台机器上的第二个浏览器、第二个 MCP server 现在表示得出来：`open internal cdp http://…:9222` → `internal cdp:1`，再开一个 → `internal cdp:2`，编号由这一层给、不复用，并在 `ls` 里列出来。旧的自增句柄（`mcp1` / `cdp1` / `jrpc3`）整个删除：它只出现在 `open` 的那一行回复里，`ls` 看不见，丢了就找不回来，也不告诉你它挂在哪个 session 上。标签页**不编号**：一条连接就能管理整个浏览器实例，页靠浏览器自己的 targetId 指（`internal cdp:1@7D87…`），那是 `Target.getTargets` 已经打印的东西，再编一套号只会让同一个东西有两个名字。只开了一条连接时编号可以省略（`internal cdp`）；开了两条还省略就回 `400` 并列出候选，而不是替你猜一个——猜错的表现是驱动了另一个浏览器、而回复说成功。
-  - `mcp` / `jrpc` 用同一套（`internal mcp:1`、`internal mcp:2`），stdio server 仍按通道地址；`ls <session> <kind>` 列连接，`ls <session> cdp:1` 列标签页。
-  - `ls <session> cdp:1` 直接列标签页与已附着状态（问浏览器，不查缓存），`open <session> cdp:1 --target <targetId>` 创建一个页面地址 `<session> cdp:1@<targetId>`，之后 `call <session> cdp:1@<targetId> '<frame>'` 由这一层补 sessionId。顺序错（先 enable 后 attach）不再沉默：帧发到浏览器进程时回 `400` 并点明「这是页面级方法」。`close <session> cdp:1@<targetId>` 只断开附着，标签页还在。
-  - **一条连接上的帧按页过滤**。一条 socket 承载所有已附着页的帧，靠帧里的 sessionId 区分；`read <session> cdp:1@<targetId> --since N` 只回那一页的帧，不写目标时连浏览器级的帧一起回。
-  - **`call` 不再把帧当参数吃掉**。`call <session> cdp '<frame>'` 的帧是整行剩余部分，但解析器原先会把第一个词当成资源树的 key（那是 `read <session> file <path>` 的规则），于是报「needs a JSON-RPC frame」——说的正是它刚吞掉的那个帧。payload 类动词现在只从紧贴写法（`cdp:1`、`cdp@<targetId>`）取 key。
-  - **帧不再被吃掉**。`recv` 是一次性出队，CDP 又从不重放事件，于是「记录一个位置、做动作、回看期间发生了什么」根本做不到。`internal/jrpc` 现在给每个收到的帧编上单调序号并保留一个环形窗口，`read <session> cdp:1 --since N` 按游标取增量且**不消费**，回答带 `Latest`、`Frames` 两个头，所以下一次调用从上一个号继续。`--grep` 在窗口之前过滤。
-  - **大答案变回执，不再塞进上下文**。超过 4 KB 的应答不再内联——回执给出帧号、字节数和前 512 字节，正文留在帧日志里：`read <session> cdp:1 --at 57 --offset 4096` 按字节翻页，`Next-Offset` 可直接接着用。此前这种做法只有一个坏结局：外层窗口把它截成半截 JSON，既大到不值得付 token，又坏到没法用。`--at` 是帧日志的另一条轴——`--since` 沿时间翻，`--at` 在一帧内部翻，两者都不消费。分页边界会让出半个字符，所以一页可能比要求的少一两个字节。
-  - **大脚本不必穿过工具**。帧是命令行，所以 200 KB 的 bundle 得由调用方逐字节吐出来——这是唯一无法扩展的一步。浏览器自己去取就行：在会话自己的网络上把它 serve 出来，再往页面里挂一个指向该 URL 的 `<script>`：`open <session> --argv python3 -m http.server 8123` 起服务，`Runtime.evaluate` 追加一个 `document.createElement('script')`。只有 URL 穿过工具，而 127.0.0.1 是浏览器自己的回环——文件根本不必离开它所在的那台机器。整个过程只用已有的动词：那个"服务器"是一个普通 pipe 通道，注入是一条普通 CDP 方法。原始 CDP 没有 `addScriptTag`（那是 Puppeteer 的助手），所以帧自己建元素。
-  - **unicode 转义还原成字符**。Chrome 把每个非 ASCII 都写成 `\uXXXX`，一路透传的结果是中文标题以转义形式到达调用方——两倍 token，且要人在脑子里解码。帧在出口做一次解码（其它转义、`\\u`、孤立代理项原样保留）。
-  - **协议取自浏览器自己**：`get <session> cdp:1 protocol [Domain]` 读 `/json/protocol`（与 socket 走同一条 SSH 链路），不再有第二份会漂移的方法表。
-  - 一次性形式 `call <session> cdp@<targetId> '<frame>'`（attach → call → detach，已有会话则复用而不拆掉；已附着的目标也可直接写 `cdp:1@<targetId>`）。传输/协议错误现在是**失败回复**（4xx/5xx）而不是 `200` 里裹一个 `{"error":…}`，并针对两种常见陷阱给出下一句该做什么。
-
-- **转发默认值全部改为 loopback**。`remote`（`ssh -R`）的 `--local-host` 默认从 `0.0.0.0` 改为 `127.0.0.1`，与 `local`/`dynamic` 的 `--bind-host` 一致：端口是经认证隧道的出口，发布到网络是一个决定，不是缺省行为。测试与示例里的 Chrome 调试端口也固定 `--remote-debugging-address=127.0.0.1`——裸的 `--remote-debugging-port` 会让 Chrome 监听所有网卡，在 Windows 上每次跑测试都弹一次防火墙确认框。
-
 ## v0.2.8-rc.4 — 2026-10-22
 
 - **`get host <name>` 读回一个 host，口令只报有无不改值**。此前 host 能建、能改、能列、能删，就是读不回来：`ls host` 只有名字，改一个字段时无法知道其余字段当前是什么，于是「部分修改」只能靠猜，而猜错就是覆盖。现在 `get host <name>` 返回条目内容，密码与密钥口令替换为 `has_password` / `has_passphrase`——把口令放进回复等于写进 transcript 和日志，而调用方真正要问的是「有没有设置」。读取不是变更，所以不受 `--mcp-manage-ssh-configs` 限制：列表本来就开放，只藏字段不藏名字没有意义。`ls host <name>` 也不再静默丢掉名字返回全表，而是明说要读单个条目该用哪个动词。
@@ -54,6 +38,21 @@
 
 - **`initialize` 的 instructions 重写成「这是什么」**。原来是七条规则，其中三条是「不要做 X」：读完只知道每一种失败方式，不知道手里拿着什么。现在按世界本身组织——`cmd` 是 DSL 而 `sh` 是 shell 命令（`sh` 只作为值经 `args`/`vars` 进入）、`session`／`channel` 是什么、能力集中在 `ext list`、状态集中在 `ps`、以及一条无法从任何东西推导出来的硬边界（越过人的权限不可逆）与被 held 的调用不能重试。1799 B，仍在上限内；`TestNoSpecDriftBetweenDirectivesAndSkill` 与 `TestTokenBudgetGuard` 两个方向都还锁着。
 
+- **cdp 门补齐成一台可用的浏览器控制台，挂在 `cdp` 这个资源下面**。此前 `cdp` 只是把 WebSocket 当普通帧通道转发，于是把浏览器交给 Agent 的每一步都要手工拼装：`Target.getTargets` 找 targetId、`Target.attachToTarget` 拿 sessionId、之后每条帧自己往 JSON 里塞那串十六进制——而这一串最容易错的地方恰恰是静默的：少写 sessionId 的帧不会被拒绝，它被发给浏览器进程，于是 `Page.navigate` 回了 frameId、页面没动。现在：
+
+  - **地址沿用资源树的规则，`:N` 表示连接，不再是自增句柄**。一台机器上的第二个浏览器、第二个 MCP server 现在表示得出来：`open internal cdp http://…:9222` → `internal cdp:1`，再开一个 → `internal cdp:2`，编号由这一层给、不复用，并在 `ls` 里列出来。旧的自增句柄（`mcp1` / `cdp1` / `jrpc3`）整个删除：它只出现在 `open` 的那一行回复里，`ls` 看不见，丢了就找不回来，也不告诉你它挂在哪个 session 上。标签页**不编号**：一条连接就能管理整个浏览器实例，页靠浏览器自己的 targetId 指（`internal cdp:1@7D87…`），那是 `Target.getTargets` 已经打印的东西，再编一套号只会让同一个东西有两个名字。只开了一条连接时编号可以省略（`internal cdp`）；开了两条还省略就回 `400` 并列出候选，而不是替你猜一个——猜错的表现是驱动了另一个浏览器、而回复说成功。
+  - `mcp` / `jrpc` 用同一套（`internal mcp:1`、`internal mcp:2`），stdio server 仍按通道地址；`ls <session> <kind>` 列连接，`ls <session> cdp:1` 列标签页。
+  - `ls <session> cdp:1` 直接列标签页与已附着状态（问浏览器，不查缓存），`open <session> cdp:1 --target <targetId>` 创建一个页面地址 `<session> cdp:1@<targetId>`，之后 `call <session> cdp:1@<targetId> '<frame>'` 由这一层补 sessionId。顺序错（先 enable 后 attach）不再沉默：帧发到浏览器进程时回 `400` 并点明「这是页面级方法」。`close <session> cdp:1@<targetId>` 只断开附着，标签页还在。
+  - **一条连接上的帧按页过滤**。一条 socket 承载所有已附着页的帧，靠帧里的 sessionId 区分；`read <session> cdp:1@<targetId> --since N` 只回那一页的帧，不写目标时连浏览器级的帧一起回。
+  - **`call` 不再把帧当参数吃掉**。`call <session> cdp '<frame>'` 的帧是整行剩余部分，但解析器原先会把第一个词当成资源树的 key（那是 `read <session> file <path>` 的规则），于是报「needs a JSON-RPC frame」——说的正是它刚吞掉的那个帧。payload 类动词现在只从紧贴写法（`cdp:1`、`cdp@<targetId>`）取 key。
+  - **帧不再被吃掉**。`recv` 是一次性出队，CDP 又从不重放事件，于是「记录一个位置、做动作、回看期间发生了什么」根本做不到。`internal/jrpc` 现在给每个收到的帧编上单调序号并保留一个环形窗口，`read <session> cdp:1 --since N` 按游标取增量且**不消费**，回答带 `Latest`、`Frames` 两个头，所以下一次调用从上一个号继续。`--grep` 在窗口之前过滤。
+  - **大答案变回执，不再塞进上下文**。超过 4 KB 的应答不再内联——回执给出帧号、字节数和前 512 字节，正文留在帧日志里：`read <session> cdp:1 --at 57 --offset 4096` 按字节翻页，`Next-Offset` 可直接接着用。此前这种做法只有一个坏结局：外层窗口把它截成半截 JSON，既大到不值得付 token，又坏到没法用。`--at` 是帧日志的另一条轴——`--since` 沿时间翻，`--at` 在一帧内部翻，两者都不消费。分页边界会让出半个字符，所以一页可能比要求的少一两个字节。
+  - **大脚本不必穿过工具**。帧是命令行，所以 200 KB 的 bundle 得由调用方逐字节吐出来——这是唯一无法扩展的一步。浏览器自己去取就行：在会话自己的网络上把它 serve 出来，再往页面里挂一个指向该 URL 的 `<script>`：`open <session> --argv python3 -m http.server 8123` 起服务，`Runtime.evaluate` 追加一个 `document.createElement('script')`。只有 URL 穿过工具，而 127.0.0.1 是浏览器自己的回环——文件根本不必离开它所在的那台机器。整个过程只用已有的动词：那个"服务器"是一个普通 pipe 通道，注入是一条普通 CDP 方法。原始 CDP 没有 `addScriptTag`（那是 Puppeteer 的助手），所以帧自己建元素。
+  - **unicode 转义还原成字符**。Chrome 把每个非 ASCII 都写成 `\uXXXX`，一路透传的结果是中文标题以转义形式到达调用方——两倍 token，且要人在脑子里解码。帧在出口做一次解码（其它转义、`\\u`、孤立代理项原样保留）。
+  - **协议取自浏览器自己**：`get <session> cdp:1 protocol [Domain]` 读 `/json/protocol`（与 socket 走同一条 SSH 链路），不再有第二份会漂移的方法表。
+  - 一次性形式 `call <session> cdp@<targetId> '<frame>'`（attach → call → detach，已有会话则复用而不拆掉；已附着的目标也可直接写 `cdp:1@<targetId>`）。传输/协议错误现在是**失败回复**（4xx/5xx）而不是 `200` 里裹一个 `{"error":…}`，并针对两种常见陷阱给出下一句该做什么。
+
+- **转发默认值全部改为 loopback**。`remote`（`ssh -R`）的 `--local-host` 默认从 `0.0.0.0` 改为 `127.0.0.1`，与 `local`/`dynamic` 的 `--bind-host` 一致：端口是经认证隧道的出口，发布到网络是一个决定，不是缺省行为。测试与示例里的 Chrome 调试端口也固定 `--remote-debugging-address=127.0.0.1`——裸的 `--remote-debugging-port` 会让 Chrome 监听所有网卡，在 Windows 上每次跑测试都弹一次防火墙确认框。
 ## v0.2.8-rc.3 — 2026-10-21
 
 - **构建工具链升到 Go 1.27，纳入 crypto/x509 中间证书 denylist（GO-2026-6809 / CVE-2026-111943）**。此前 `go.mod`、CI 与 Dockerfile 全部钉在 Go 1.25，而 1.25 已停止维护、永远不会带这个修复：连接 HTTPS/WSS 的远程 MCP server 时，若对端证书链途经已被吊销的中间证书且系统信任库未更新，未修补的 `x509.Certificate.Verify` 会放行。仓库没有自定义 TLS 验证（全走标准库默认路径），所以修复就是工具链：`go.mod` 最低版本提到 `go 1.27.3`（`go install` 构建随之强制带修复），CI 与 Docker 镜像跟到 1.27，本次发布起的预编译二进制都带 denylist。
