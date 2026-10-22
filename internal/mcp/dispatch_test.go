@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,10 +265,15 @@ func TestEveryForwardDirectionIsReachable(t *testing.T) {
 		{"", "--local-port 0 --remote-host 127.0.0.1 --remote-port 22"},
 		{"--dynamic", "--local-port 0"},
 		// A remote forward binds the port on the TARGET, so 0 ("any free port") is
-		// rejected there — the caller has to pick the number it wants published.
-		{"--remote", "--local-port 18080 --remote-host 127.0.0.1 --remote-port 22"},
+		// rejected there — the caller has to pick the number it wants published. That
+		// number cannot be a constant: the suite runs shuffled, in parallel, on a runner
+		// that may already have it. %PORT% is filled per attempt below.
+		{"--remote", "--local-port %PORT% --remote-host 127.0.0.1 --remote-port 22"},
 	} {
 		cmd := "open " + sid + " forward " + tc.flag + " " + tc.body
+		if strings.Contains(cmd, "%PORT%") {
+			cmd = strings.ReplaceAll(cmd, "%PORT%", fmt.Sprint(freePort(t)))
+		}
 		res := termCall(t, s, map[string]any{"cmd": cmd})
 		body := toolResultText(res)
 		if res.IsError {
@@ -317,4 +324,24 @@ func TestForwardIsAddressedTheSameWayEverywhere(t *testing.T) {
 	if got := termText(t, s, map[string]any{"cmd": "ls " + sid + " forward " + id}); !strings.HasPrefix(got, "TERM/1 4") {
 		t.Errorf("ls with a forward id was accepted:\n%s", got)
 	}
+}
+
+// freePort asks the kernel for a port nobody is using and hands the number back.
+//
+// A test that needs a SPECIFIC port (a remote forward cannot take 0) has to name one,
+// and a constant is a shared resource: the suite runs shuffled, in parallel, and the
+// runner may already have it. The release-then-use window is inherent to asking for a
+// number instead of a listener; it is small, and retrying is what the forward handler
+// already does for the same reason.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := l.Close(); err != nil {
+		t.Fatalf("release the reserved port: %v", err)
+	}
+	return port
 }
