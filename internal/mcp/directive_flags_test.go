@@ -23,16 +23,75 @@ import (
 // copied by setFlagString/setFlagNumber. Requiring its name to appear anywhere in
 // the package's non-test source is the cheap test that catches all three.
 func TestNoDirectiveFlagIsDead(t *testing.T) {
-	src := readPackageSource(t)
+	src := stripCommentsAndStrings(t, readPackageSource(t))
 	for _, op := range directive.Ops() {
 		for _, f := range op.Flags {
-			if !strings.Contains(src, `"`+f+`"`) {
-				t.Errorf("%s: flag --%s is accepted by the parser but never read anywhere in this package: "+
+			// A FLAG IS ALIVE ONLY IF SOMETHING READS IT, and the check has to be
+			// syntactic: the old version looked for the quoted name anywhere in the
+			// package, so `--directive` passed on the strength of the word appearing in
+			// a COMMENT, and `open --url` passed because `create ext` reads a flag of the
+			// same name. Both were accepted by the parser and read by nobody.
+			//
+			// The forms below are the only ways this package reads a flag; a prose
+			// mention or another verb's use of the same word no longer counts.
+			alive := []string{
+				`stmt.Flag("` + f + `")`,
+				`boolFlag(stmt, "` + f + `")`,
+				`atoiFlag(stmt, "` + f + `"`,
+				`setFlagString(args, stmt, "` + f + `"`,
+				`setFlagNumber(args, stmt, "` + f + `"`,
+				`setFlagList(args, stmt, "` + f + `"`,
+				`setFlagArgvList(args, stmt, "` + f + `"`,
+				`setFlagJSONObject(args, stmt, "` + f + `"`,
+				`setFlagJSONList(args, stmt, "` + f + `"`,
+				`[2]string{"` + f + `"`,
+			}
+			ok := false
+			for _, form := range alive {
+				if strings.Contains(src, form) {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				t.Errorf("%s: flag --%s is accepted by the parser but read by nobody: "+
 					"a caller can set it and the server ignores it. Either consume it or drop it from Flags.",
 					op.Name, f)
 			}
 		}
 	}
+}
+
+// stripCommentsAndStrings removes what cannot READ a flag: comments, and the string
+// literals themselves. It keeps the punctuation of the forms above intact by leaving
+// quoted text in place — the point is to drop the comment channel, not to parse Go.
+func stripCommentsAndStrings(t *testing.T, src string) string {
+	t.Helper()
+	var out strings.Builder
+	inBlock := false
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if inBlock {
+			if idx := strings.Index(line, "*/"); idx >= 0 {
+				inBlock = false
+				line = line[idx+2:]
+			} else {
+				continue
+			}
+		}
+		if strings.HasPrefix(trimmed, "/*") {
+			if !strings.Contains(trimmed, "*/") {
+				inBlock = true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		out.WriteString(line)
+		out.WriteString("\n")
+	}
+	return out.String()
 }
 
 // readPackageSource concatenates this package's non-test .go files.
