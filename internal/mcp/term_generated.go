@@ -1013,7 +1013,15 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 	if len(stmt.Args) > 0 {
 		op, ok := directive.Lookup(stmt.Args[0])
 		if !ok {
-			return envelope.Slot{Code: 404, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "unknown_directive"},
+			// 400, NOT 404 — AND THE SAME 400 THE BARE WORD GETS.
+			//
+			// Typing the word directly answered 400 ("this line is malformed"), while
+			// asking `help <word>` answered 404 ("this resource does not exist"). Same
+			// body, same situation, two answers: a caller that branches on the status
+			// concludes opposite things about the same missing verb depending on
+			// whether it asked for help first. Nothing is a resource here; the caller
+			// named a directive this build does not have, which is a bad request.
+			return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "unknown_directive"},
 				Body: "unknown directive: " + stmt.Args[0]}
 		}
 		body := op.Usage + "\n"
