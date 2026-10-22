@@ -378,7 +378,13 @@ var ops = []Op{
 	// --- on a session and what hangs off it ---
 
 	{Name: "connect", Core: true, Kind: KindFlags, Target: true,
-		Flags:     []string{"name", "mode", "argv", "rows", "cols", "size", "on-exit"},
+		// NO --mode. The mode is not a parameter of `connect`: it follows from --argv
+		// the way ssh's does (no --argv = a terminal, --argv = a pipe), and `open` is
+		// where --pty/--pipe live. The flag was accepted and never read, so
+		// `connect h --mode nonsense` answered 200 and `--mode pty --argv echo hi`
+		// answered with a pipe — the two ways a flag can lie at once. Removing it makes
+		// the refusal name the flag instead of the caller guessing (issue #143).
+		Flags:     []string{"name", "argv", "rows", "cols", "size", "on-exit"},
 		RestValue: []string{"argv"},
 		MaxArgs:   1,
 		Usage:     "connect <host> [--argv <command>] [--on-exit keep|close] [--name …]",
@@ -399,9 +405,9 @@ var ops = []Op{
 		Usage:     "ls   |   ls host   |   ls ext   |   ls alias   |   ls <session> [forward|file]",
 		Detail:    lsDetail},
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
-		Kinds:  []string{"file", "host", "protocol", "cdp", "mcp", "jrpc"},
+		Kinds:  []string{"file", "host", "ext", "protocol", "cdp", "mcp", "jrpc"},
 		Flags:  []string{"op"},
-		Usage:  "get <session|channel|host-name>   |   get <session> file <path> [--op stat|realpath|urls|…]   |   get <session> cdp[:N][@target] [protocol [Domain]]",
+		Usage:  "get <session|channel|host-name>   |   get host <name>   |   get ext <name>   |   get <session> file <path> [--op stat|realpath|urls|…]   |   get <session> cdp[:N][@target] [protocol [Domain]]",
 		Detail: getDetail},
 	{Name: "close", Core: true, Kind: KindFlags, Target: true,
 		// mcp/cdp/jrpc/file are DECLARED SO THEY ARE REFUSED BY NAME. Dropping them

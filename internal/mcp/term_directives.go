@@ -84,6 +84,15 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 				"action": "get", "name": stmt.Key,
 			}), win)}
 		}
+		if stmt.Kind == "ext" {
+			// `get ext <name>` reads one template back, which is what makes `ls ext
+			// <name>` refusable by name rather than by a shrug. Without it the only way
+			// to see one extension was the full listing, so a caller that mistyped a
+			// name got fourteen rows and believed it had filtered (issue #143).
+			return []envelope.Slot{s.directiveExtension(ctx, withFlags(stmt, map[string]string{
+				"action": "get", "name": stmt.Key,
+			}), win)}
+		}
 		// A PEER'S OWN STATE IS READ HERE, not from the SSH side. `get a1f3 cdp`
 		// describes the browser (attached pages, frame cursor); `get a1f3 cdp:1` names
 		// one page; `get a1f3 cdp protocol Page` reads the live signature the browser
@@ -1552,6 +1561,13 @@ func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win 
 		}
 		return []envelope.Slot{s.directiveHost(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}
 	case "ext":
+		// A NAME HERE WOULD BE SILENTLY DROPPED, exactly as it was on `ls host` and
+		// `ls <session> forward`. `ls ext evrything` answered the whole list, so a
+		// caller checking that an extension exists read fourteen rows as confirmation.
+		if stmt.Key != "" {
+			return []envelope.Slot{badRequest(stmt, "`ls` lists every extension; for one of them use `get ext "+
+				stmt.Key+"`.")}
+		}
 		return []envelope.Slot{s.directiveExtension(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}
 	case "alias":
 		return []envelope.Slot{s.directiveAlias(ctx, stmt, win)}
