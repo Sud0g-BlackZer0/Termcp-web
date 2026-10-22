@@ -153,9 +153,10 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 			// call discover it: a connection that opens and cannot negotiate is a
 			// fact about the open, and reporting it later moves the blame onto
 			// whatever call happened to be second.
-			body += "\nprotocol: the connection opened but the MCP handshake failed, so tool calls cannot work.\n" +
-				"The transport is fine and the URL is right — the problem is at the protocol layer (version, or a\n" +
-				"peer that does not speak MCP). Run `mcp tools " + handle + "` for the peer's own words.\n"
+			body += "\nprotocol: the MCP handshake failed" + discover + ", so tool calls cannot work.\n" +
+				"A refused connection means nothing is listening on that port; a version mismatch means the\n" +
+				"peer does not speak this protocol. The handle still addresses the channel — `close " + handle + "`\n" +
+				"frees it — but there is no tool list to read.\n"
 		}
 	}
 	return envelope.Slot{
@@ -174,7 +175,12 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 // worked, which IS a fact about the open.
 func (s *Server) jrpcDiscoverMCP(ctx context.Context, h *jrpcHandle, handle string) (string, bool) {
 	if err := s.jrpcReady(ctx, h); err != nil {
-		return "", false
+		// THE REASON TRAVELS OUT, not just the fact. The caller below used to print
+		// "the transport is fine and the URL is right" whoever failed, which is true for a
+		// peer that answers with the wrong protocol version and false for a port with
+		// nothing on it — and the second is the common case. Swallowing err here forced
+		// that sentence to be a guess.
+		return " (" + err.Error() + ")", false
 	}
 	raw, err := h.ch.Call(ctx, map[string]any{"jsonrpc": "2.0", "method": "tools/list"})
 	if err != nil {

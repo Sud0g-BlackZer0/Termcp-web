@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/open-mcp-ai/termcp/internal/directive"
+	"github.com/open-mcp-ai/termcp/internal/forward"
 )
 
 // TestNamedKindNeverFallsThroughToTheContainer pins the difference between "close
@@ -237,5 +238,43 @@ func TestRemoveFileDeletesTheNodeAndNotTheSession(t *testing.T) {
 	// The session outlived it — that is the whole point of the distinction.
 	if after := termText(t, s, map[string]any{"cmd": "ls"}); !strings.Contains(after, sid) {
 		t.Fatalf("rm file took the session with it:\n%s", after)
+	}
+}
+
+// TestEveryForwardDirectionIsReachable pins that `open <session> forward` can express
+// all three directions.
+//
+// The rewrite hardcoded --action local, so `--dynamic` and `--remote` were not flags
+// of `open` at all: SOCKS5 and remote forwards became unreachable while the detail
+// page went on describing all three. Nothing failed, because "a forward was created"
+// is true for every direction.
+func TestEveryForwardDirectionIsReachable(t *testing.T) {
+	s := newTestServer(t)
+	// The forward manager is what `open … forward` talks to, and newTestServer leaves it
+	// nil because most tests never need one — so a refusal here would be about the
+	// fixture, not about the direction being reachable.
+	s.forwardMgr = forward.NewForwardManager()
+	s.sessMgr.AddOnDeadHook(s.forwardMgr.CloseBySession)
+	h := openPipe(t, s, "sleep 30")
+	sid := strings.SplitN(h, ":", 2)[0]
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
+
+	for _, tc := range []struct{ flag, body string }{
+		{"", "--local-port 0 --remote-host 127.0.0.1 --remote-port 22"},
+		{"--dynamic", "--local-port 0"},
+		// A remote forward binds the port on the TARGET, so 0 ("any free port") is
+		// rejected there — the caller has to pick the number it wants published.
+		{"--remote", "--local-port 18080 --remote-host 127.0.0.1 --remote-port 22"},
+	} {
+		cmd := "open " + sid + " forward " + tc.flag + " " + tc.body
+		res := termCall(t, s, map[string]any{"cmd": cmd})
+		body := toolResultText(res)
+		if res.IsError {
+			t.Errorf("%q was refused:\n%s", cmd, body)
+			continue
+		}
+		if !strings.Contains(body, "forward_id") {
+			t.Errorf("%q created no forward:\n%s", cmd, body)
+		}
 	}
 }

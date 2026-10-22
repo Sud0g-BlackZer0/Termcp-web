@@ -110,8 +110,19 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 	case "open":
 		switch stmt.Kind {
 		case "forward":
+			// THE DIRECTION IS A FLAG, and local is the default because it is the one a
+			// caller reaches for when they say "forward this port" without qualifying it.
+			// Without this, every forward was local: `--dynamic` and `--remote` were not
+			// flags of `open` at all, so SOCKS5 and remote forwards became unreachable in
+			// the rewrite while the detail page still described all three.
+			action := "local"
+			if boolFlag(stmt, "dynamic") {
+				action = "dynamic"
+			} else if boolFlag(stmt, "remote") {
+				action = "remote"
+			}
 			return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{
-				"action": "local",
+				"action": action,
 			}), win)}
 		case "mcp", "cdp", "jrpc":
 			return s.openPeer(ctx, stmt, win, stmt.Kind)

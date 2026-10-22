@@ -386,8 +386,9 @@ var ops = []Op{
 	{Name: "open", Core: true, Kind: KindFlags, Target: true, TargetKind: TargetSession,
 		Kinds: []string{"forward", "mcp", "cdp", "jrpc"},
 		Flags: []string{"pipe", "pty", "argv", "name", "on-exit", "rows", "cols", "size",
-			"bind-host", "remote-host", "remote-port", "local-port", "local-host", "url"},
-		Valueless: []string{"pipe", "pty"},
+			"bind-host", "remote-host", "remote-port", "local-port", "local-host", "url",
+			"dynamic", "remote"},
+		Valueless: []string{"pipe", "pty", "dynamic", "remote"},
 		RestValue: []string{"argv"},
 		Usage:     "open <session> [--argv <cmd> [--pty]]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>",
 		Detail:    openDetail},
@@ -954,23 +955,27 @@ every read as protocol would break the ordinary case to serve the rare one.
 
 An HTTP peer spends no shell channel: opening a dozen costs no shells.`
 
-// fwdDetail is the flag set per direction, which the one-line usage cannot show:
-// `fwd <session> --action …` does not say which of --remote-host / --local-port
-// belong to which direction, and a missing one is reported by the handler as a
-// generic requirement rather than as "this direction does not take that flag".
-const forwardDetail = `Directions and their flags:
-  --action local    --local-port [--bind-host] --remote-host --remote-port
-                    termcp listens on local-port; the target dials remote-host:remote-port
-  --action remote   --local-port --remote-host --remote-port [--local-host]
-                    the TARGET listens on local-port and forwards to remote-host:remote-port
-                    from there; the reply echoes it as remote_port
-  --action dynamic  --local-port
-                    termcp listens as a SOCKS5 proxy; the target dials whatever is asked
-  --action list     no flags
-  --action close    --forward-id
+// forwardDetail is the flag set per direction, which the one-line usage cannot show:
+// `open <session> forward …` does not say which of --remote-host / --local-port belong
+// to which direction, and a missing one is reported by the handler as a generic
+// requirement rather than as "this direction does not take that flag".
+const forwardDetail = `A forward is a child of a session, made with open and removed with close:
 
-The session comes from the target position (fwd <session> --action …); --session
-is accepted as an alternative.
+  open  <session> forward --local-port 8080 --remote-host db --remote-port 5432
+  open  <session> forward --local-port 1080 --dynamic
+  open  <session> forward --local-port 9090 --remote-host x --remote-port 80 --remote
+  ls    <session> forward
+  close <session> forward <id>
+
+THE DIRECTION IS A FLAG, and local is the default — the one meant when someone says
+"forward this port" without qualifying it. What each direction means:
+  (default)         termcp listens on --local-port; it dials --remote-host:--remote-port
+                    on the far side. [--bind-host]
+  --remote          the TARGET listens on --local-port and forwards from there to
+                    --remote-host:--remote-port; the reply echoes it as remote_port.
+                    [--local-host]
+  --dynamic         termcp listens as a SOCKS5 proxy on --local-port; the target dials
+                    whatever is asked.
 
 --local-port 0 means "any free port" for local and dynamic only, and the reply's
 local_port is the one that was chosen. remote REJECTS 0 ("local_port required
