@@ -231,7 +231,7 @@ func (s *Server) writeShellInput(ctx context.Context, shell *session.ChildShell,
 	// An agent's keystrokes are tagged as AI input, so a transcript can say who
 	// typed what. The bytes themselves reach the log through the terminal's echo.
 	if err := shell.SendTerminalBytesFrom([]byte(text), false, callerInputSource(ctx)); err != nil {
-		return nil, toolError(CodeOperationFailed, "%s", err.Error())
+		return nil, toolError(inputErrCode(err), "%s", err.Error())
 	}
 	return result, nil
 }
@@ -280,13 +280,13 @@ func (s *Server) pressShellKey(ctx context.Context, shell *session.ChildShell, k
 		// ctrl+c interrupts a running process, and a bare enter runs an empty line,
 		// either of which a reviewer must still see.
 		if _, err := shell.CommitStagedForApproval(callerSource(ctx), key, repeat); err != nil {
-			return nil, toolError(CodeOperationFailed, "%s", err.Error())
+			return nil, toolError(inputErrCode(err), "%s", err.Error())
 		}
 		return reviewFields(true), nil
 	}
 
 	if err := shell.PressKeyFrom(key, repeat, callerInputSource(ctx)); err != nil {
-		return nil, toolError(CodeOperationFailed, "%s", err.Error())
+		return nil, toolError(inputErrCode(err), "%s", err.Error())
 	}
 	return map[string]any{"success": true}, nil
 }
@@ -844,4 +844,25 @@ func int64PtrFromArgs(args map[string]any, key string) *int64 {
 	}
 	v := int64(getFloat64(args, key, 0))
 	return &v
+}
+
+// inputErrCode classifies a failed write to a channel.
+//
+// THE TWO FAILURES ON THIS PATH ARE OPPOSITES AND USED TO SHARE ONE STATUS. A typo
+// in a key name answered 500 operation_failed, and so did writing to a pipe whose
+// process had already finished: a caller that retries on 5xx, alarms on 5xx, or
+// files a bug against 5xx does the wrong thing in both cases. One of them is the
+// caller's line being wrong (400), the other is the resource's state (409).
+//
+// The sentinels are in internal/session, next to the errors they name, because
+// that is where the distinction is created; a surface that guessed from the
+// message text would be re-deriving it in the wrong layer.
+func inputErrCode(err error) string {
+	switch {
+	case errors.Is(err, session.ErrUnknownKey):
+		return CodeInvalidArgument
+	case errors.Is(err, session.ErrProcessGone):
+		return CodeSessionNotRunning
+	}
+	return CodeOperationFailed
 }

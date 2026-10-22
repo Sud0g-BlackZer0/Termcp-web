@@ -647,8 +647,11 @@ func pipeClosedHint(handle string, f *toolFailure, s *Server) *toolFailure {
 	} else if cs.Info().Mode != api.ModePipe {
 		return f
 	}
+	// 409, NOT 500. The channel's process is over; nothing about the server broke and
+	// the caller's own line was fine. A 5xx here invites a retry of a write that can
+	// never land, and hides a finished channel behind "the server failed".
 	return &toolFailure{
-		code: CodeOperationFailed,
+		code: CodeSessionNotRunning,
 		msg: msg + "\nThis is a PIPE channel: its process has finished, so there is no stdin left to write to " +
 			"and `run`/`input` cannot drive it. Its output is still readable — `read " + handle + "` returns it, " +
 			"including the exit code. For an interactive session use `open <session>` instead (a pty).",
