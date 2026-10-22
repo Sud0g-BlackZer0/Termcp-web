@@ -1001,8 +1001,8 @@ func TestTermMCPStreamableHandshakeAndClose(t *testing.T) {
 		t.Fatalf("close failed:\n%s", toolResultText(res))
 	}
 	after := termText(t, s, map[string]any{"cmd": "read " + h})
-	if !strings.Contains(after, "not found") {
-		t.Fatalf("closed handle still resolves:\n%s", after)
+	if !strings.Contains(after, "404") || !strings.Contains(after, "names nothing") {
+		t.Fatalf("closed peer still resolves:\n%s", after)
 	}
 }
 
@@ -1665,4 +1665,23 @@ func TestEveryFlagIsDiscoverableFromHelp(t *testing.T) {
 			}
 		}
 	}
+}
+
+// statusCode reads the code off a rendered slot's status line.
+//
+// SEARCHING THE WHOLE REPLY FOR "400" IS WRONG: an objectId, a byte count or a
+// base64 blob can contain those digits, and the assertion then fails on a payload
+// that is perfectly healthy. The status line is the only place the code is a code.
+func statusCode(t *testing.T, text string) int {
+	t.Helper()
+	line, _, _ := strings.Cut(text, "\n")
+	field := strings.Fields(line)
+	if len(field) < 2 {
+		t.Fatalf("no status line in:\n%s", text)
+	}
+	n, err := strconv.Atoi(field[1])
+	if err != nil {
+		t.Fatalf("status line is not a code: %q", line)
+	}
+	return n
 }

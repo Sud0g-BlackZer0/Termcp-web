@@ -77,7 +77,15 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 		}
 	}
 	body := b.String()
-	if body == "" {
+	// PEERS ARE NODES ON THE SAME LISTING. `ls <session>` is the only place a caller
+	// can find out what an instance is holding without having memorised a reply, and a
+	// peer that exists but is invisible there is an address lost the moment you look
+	// away. They are printed with the address that addresses them, so column 1 is
+	// copyable for either kind of node.
+	if peers := peerLines(sessions); peers != "" {
+		body += peers
+	}
+	if strings.TrimSpace(body) == "" {
 		body = "(nothing is running)\n"
 	}
 	// PS IS THE STATE, SO ITS learn_mode TEACHES THE STATE VERBS.
@@ -1528,4 +1536,48 @@ func flagList(op directive.Op) string {
 	}
 	sort.Strings(w)
 	return "Flags: " + strings.Join(w, "  ")
+}
+
+// peerLines renders the open peers of the sessions in a listing.
+//
+// The address is `<session> <kind>` and is printed verbatim: it is what `call`,
+// `read`, `get` and `close` accept, so a caller can copy a line out of `ls` into the
+// next command without translating anything. The session half is the id in column 1
+// of the session's own line, which is why the id is repeated rather than implied.
+func peerLines(sessions []api.Session) string {
+	if len(sessions) == 0 {
+		return ""
+	}
+	want := make(map[string]bool, len(sessions))
+	for _, sess := range sessions {
+		want[sess.ID] = true
+	}
+	jrpcChannelsMu.Lock()
+	handles := make([]*jrpcHandle, 0, len(jrpcChannels))
+	for _, h := range jrpcChannels {
+		if want[h.sessionID] {
+			handles = append(handles, h)
+		}
+	}
+	jrpcChannelsMu.Unlock()
+	if len(handles) == 0 {
+		return ""
+	}
+	sort.Slice(handles, func(i, j int) bool {
+		if handles[i].sessionID != handles[j].sessionID {
+			return handles[i].sessionID < handles[j].sessionID
+		}
+		return handles[i].kind < handles[j].kind
+	})
+	var b strings.Builder
+	b.WriteString("\npeers (address, transport, endpoint, attached):\n")
+	for _, h := range handles {
+		b.WriteString("  " + peerAddress(h.sessionID, h.kind, h.index) + "\t" +
+			h.ch.Transport().String() + "\t" + h.ch.URL())
+		if h.cdp != nil {
+			b.WriteString(fmt.Sprintf("\t%d page(s) attached", len(h.cdp.snapshot())))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
 }

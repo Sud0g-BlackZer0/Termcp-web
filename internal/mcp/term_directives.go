@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -83,6 +84,34 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 				"action": "get", "name": stmt.Key,
 			}), win)}
 		}
+		// A PEER'S OWN STATE IS READ HERE, not from the SSH side. `get a1f3 cdp`
+		// describes the browser (attached pages, frame cursor); `get a1f3 cdp:1` names
+		// one page; `get a1f3 cdp protocol Page` reads the live signature the browser
+		// publishes about itself. All three are answered from the peer, so they are
+		// routed before the session/file branches that would otherwise refuse them.
+		if isPeerKind(stmt.Kind) {
+			h, index, bad := s.peerOf(stmt)
+			if bad != nil {
+				return []envelope.Slot{*bad}
+			}
+			// `protocol` IS A CHILD OF THE CONNECTION, so it arrives in one of two
+			// positions depending on whether the address was qualified:
+			//   get internal cdp protocol      -> Key="protocol"
+			//   get internal cdp:1 protocol    -> Key="1", Args[0]="protocol"
+			// Both mean the same thing; the second is what a caller copies out of a reply.
+			if stmt.Key == "protocol" || (len(stmt.Args) > 0 && stmt.Args[0] == "protocol") {
+				domain := ""
+				if stmt.Key == "protocol" {
+					if len(stmt.Args) > 0 {
+						domain = stmt.Args[0]
+					}
+				} else if len(stmt.Args) > 1 {
+					domain = stmt.Args[1]
+				}
+				return []envelope.Slot{s.cdpProtocol(ctx, stmt, h, domain)}
+			}
+			return []envelope.Slot{s.cdpDescribe(stmt, h, index)}
+		}
 		if stmt.Kind == "file" {
 			// --op names a SUB-ACTION; the sfTP layer groups those under an action
 			// (perm, link, fs) and dispatches again inside the group. The group is
@@ -133,6 +162,16 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 				"action": action,
 			}), win)}
 		case "mcp", "cdp", "jrpc":
+			// ATTACH RIDES ON OPEN, because attaching a page IS opening a child of the
+			// browser — the same verb that opened the browser. The target id is a flag
+			// because the key position already names the URL.
+			if target, ok := stmt.Flag("target"); ok {
+				h, _, bad := s.peerOf(stmt)
+				if bad != nil {
+					return []envelope.Slot{*bad}
+				}
+				return []envelope.Slot{s.cdpAttach(ctx, stmt, h, target)}
+			}
 			return s.openPeer(ctx, stmt, win, stmt.Kind)
 		default:
 			return s.directiveOpen(ctx, stmt, win, wantPTY(stmt))
@@ -186,6 +225,16 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 				flags["forward-id"] = stmt.Key
 			}
 			return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, flags), win)}
+		case "cdp", "mcp", "jrpc":
+			// `close a1f3 cdp:1` detaches one page; `close a1f3 cdp` closes the peer.
+			h, index, bad := s.peerOf(stmt)
+			if bad != nil {
+				return []envelope.Slot{*bad}
+			}
+			if index != "" {
+				return []envelope.Slot{s.cdpDetach(ctx, stmt, h, index)}
+			}
+			return []envelope.Slot{s.closePeer(stmt, h)}
 		case "":
 			if isPeerHandle(stmt.Target) {
 				return s.peerChannel(ctx, stmt, win, "close", nil)
@@ -193,7 +242,7 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 			return []envelope.Slot{s.directiveClose(ctx, stmt, win)}
 		default:
 			return []envelope.Slot{badRequest(stmt, "close does not take a "+stmt.Kind+
-				". A peer is closed by its own handle: `close <peer>`.")}
+				". A peer is closed by its address: `close <session> cdp`.")}
 		}
 
 	// --- read: a channel's new bytes, a file's content, or a peer's frames ---
@@ -210,7 +259,59 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		// "the next frame". A pipe channel is the opposite: it is usually a command's
 		// output, and only sometimes a JSON-RPC server — so frames need the flag, or
 		// every ordinary `read` of a command's output would be parsed as protocol.
-		if isPeerHandle(stmt.Target) || boolFlag(stmt, "frame") {
+		if isPeerKind(stmt.Kind) {
+			h, index, bad := s.peerOf(stmt)
+			if bad != nil {
+				return []envelope.Slot{*bad}
+			}
+			// THE FRAME LOG HAS TWO AXES, and the flags pick one of them.
+			//   --since  pages forward in TIME: what arrived after n, again and again.
+			//   --at     pages inside ONE frame: that frame's bytes from b onward. A
+			//            frame too big to inline is answered as a receipt naming its
+			//            number, and this is the read that receipt tells you to make.
+			// A plain read without either is the other question — the next frame off
+			// the queue, once — which is what `send` pairs with.
+			if at, ok := stmt.Flag("at"); ok {
+				n, err := strconv.ParseInt(strings.TrimSpace(at), 10, 64)
+				if err != nil || n < 1 {
+					return []envelope.Slot{badRequest(stmt, "--at takes a frame number (the number a receipt reported as Frame), got "+strconv.Quote(at))}
+				}
+				offset := 0
+				if raw, ok := stmt.Flag("offset"); ok {
+					v, err := strconv.Atoi(strings.TrimSpace(raw))
+					if err != nil || v < 0 {
+						return []envelope.Slot{badRequest(stmt, "--offset takes a byte offset, got "+strconv.Quote(raw))}
+					}
+					offset = v
+				}
+				limit := 0
+				if raw, ok := stmt.Flag("bytes"); ok {
+					v, err := strconv.Atoi(strings.TrimSpace(raw))
+					if err != nil || v <= 0 {
+						return []envelope.Slot{badRequest(stmt, "--bytes takes a positive page size, got "+strconv.Quote(raw))}
+					}
+					limit = v
+				}
+				// One page per frame at a time, so the answer is a slice of a known
+				// frame rather than an interleaving whose offsets mean nothing.
+				return []envelope.Slot{s.pageFrame(stmt, h, n, offset, limit)}
+			}
+			if since, ok := stmt.Flag("since"); ok {
+				n, err := parseSince(since)
+				if err != nil {
+					return []envelope.Slot{badRequest(stmt, err.Error())}
+				}
+				grep, _ := stmt.Flag("grep")
+				// THE PAGE IS A FILTER, NOT A DIFFERENT STREAM. One socket carries every
+				// attached page's frames interleaved, each tagged with its sessionId —
+				// so `read <session> cdp:1 --since N` means "the ones that belong to this
+				// page". Without the filter the index would be accepted and ignored,
+				// which reads like a scoped answer and is not.
+				return []envelope.Slot{s.cdpEvents(ctx, stmt, h, index, n, grep, win)}
+			}
+			return s.peerChannel(ctx, stmt, win, "read", nil)
+		}
+		if boolFlag(stmt, "frame") {
 			return s.peerChannel(ctx, stmt, win, "read", nil)
 		}
 		return s.directiveRead(ctx, stmt, win)
@@ -265,6 +366,12 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 	// kind of pipe it is talking through — so one verb covers both.
 	case "call":
 		return s.peerChannel(ctx, stmt, win, "call", nil)
+
+	// --- ls on a peer lists what it holds, not what the SSH side holds ---
+	//
+	// It is the same question `ls <session>` asks (`what hangs off this node`), so
+	// it is the same verb. A browser's children are tabs; a jrpc peer has none.
+	// (Handled in directiveLS, which every `ls` reaches.)
 
 	// --- configuration, which outlives every session ---
 	case "create", "edit":
@@ -1149,57 +1256,239 @@ func flagNumber(raw string) (float64, error) {
 	return f, nil
 }
 
-// isPeerHandle reports whether target names an opened peer rather than a session.
-//
-// A peer handle is the registry's own name for it (mcp1, cdp2, jrpc3), so asking the
-// registry is exact: a session id can never match, and a handle that was closed
-// stops matching the moment it is removed. Matching the shape instead
-// (^mcp\d+$) would keep answering yes for a handle that no longer exists.
-func isPeerHandle(target string) bool {
-	jrpcChannelsMu.Lock()
-	_, ok := jrpcChannels[target]
-	jrpcChannelsMu.Unlock()
-	return ok
+// isPeerKind reports whether a kind names a frame peer rather than a file or a
+// forward. Peers are the three doors that move JSON-RPC frames.
+func isPeerKind(kind string) bool {
+	switch kind {
+	case "cdp", "mcp", "jrpc":
+		return true
+	}
+	return false
 }
 
-// peerChannel routes read/write/call/close at a frame peer onto the jrpc layer.
+// isPeerHandle reports whether target is the old bare-handle spelling of a peer.
 //
-// THE HANDLE MAY BE A NETWORK PEER OR A SHELL. `open <session> mcp <url>` returns a
-// registry handle; a pipe channel already running a stdio server is addressed by its
-// channel handle. Both speak JSON-RPC, and the caller should not have to know which
-// kind of pipe it is talking through, so both arrive here and jrpcChannel sorts them
-// out — including the one-time MCP handshake, which is per handle and must not be
-// re-implemented at this layer.
+// KEPT BECAUSE THE CHANNEL FORM STILL USES IT: a stdio MCP server runs ON a shell, so
+// `read a1f3:1 --frame` and `call a1f3:1 '{…}'` address a channel, not a session plus
+// a kind. A registry key is `<session> <kind>`, which a channel handle can never be,
+// so the check stays exact.
+func isPeerHandle(target string) bool {
+	jrpcChannelsMu.Lock()
+	_, found := jrpcChannels[target]
+	jrpcChannelsMu.Unlock()
+	return found
+}
+
+// peerOf resolves the peer a statement addresses: `<session> <kind>:<index>[@<target>]`.
+//
+// THE SESSION HALF IS RESOLVED, NOT MATCHED. A caller names a session by its id
+// (what `ls` prints) or by its host (`internal`), and both mean the same link; the
+// registry is keyed by the id, so the name is resolved here exactly once.
+//
+// THE INDEX IS THE CONNECTION, and `@<target>` is the tab inside it. The bare
+// spelling (`internal cdp`) is accepted only while exactly one connection exists —
+// with two, an unqualified address would have to pick one, and picking is how a
+// caller ends up driving the wrong browser while the reply says it worked.
+func (s *Server) peerOf(stmt directive.Statement) (*jrpcHandle, string, *envelope.Slot) {
+	if !isPeerKind(stmt.Kind) {
+		slot := badRequest(stmt, "not a peer: "+stmt.Kind)
+		return nil, "", &slot
+	}
+	sess, bad := s.resolveTunnelSession(stmt.Target)
+	if bad != nil {
+		slot := envelope.Slot{Code: 404, Headers: map[string]string{
+			"Path": stmt.Path, "Error-Code": CodeSessionNotRunning,
+		}, Body: "no running session named " + stmt.Target + ", so there is no " + stmt.Kind +
+			" peer on it. `ls` lists the live sessions; `connect " + stmt.Target + "` makes one."}
+		return nil, "", &slot
+	}
+
+	// `<index>@<target>`: the index is the connection, everything after the `@` is the
+	// browser's own target id. Splitting on the LAST `@` keeps a target id containing
+	// one (none do today, but the rule should not depend on that).
+	connIndex, target := "", ""
+	if stmt.Key != "" {
+		if at := strings.IndexByte(stmt.Key, '@'); at >= 0 {
+			connIndex, target = stmt.Key[:at], stmt.Key[at+1:]
+			if target == "" {
+				slot := badRequest(stmt, "`"+stmt.Target+" "+stmt.Kind+"…@` names no target. "+
+					"A page address is `<session> "+stmt.Kind+":<n>@<targetId>`; `ls "+stmt.Target+" "+stmt.Kind+
+					":<n>` prints the ids.")
+				return nil, "", &slot
+			}
+		} else if idx, isIndex := directive.ChannelIndex(stmt.Key); isIndex {
+			connIndex = idx
+		} else if stmt.Key != "protocol" {
+			slot := badRequest(stmt, "`"+stmt.Target+" "+stmt.Kind+" "+stmt.Key+"` names nothing. "+
+				"An address is `<session> "+stmt.Kind+":<n>` (a connection) or `<session> "+stmt.Kind+
+				":<n>@<targetId>` (a page in it).")
+			return nil, "", &slot
+		}
+	}
+
+	h, refusal := s.peerConn(stmt, sess.ID, stmt.Kind, connIndex)
+	if refusal != nil {
+		return nil, "", refusal
+	}
+	// ONLY A BROWSER HAS PAGES.
+	if target != "" && stmt.Kind != "cdp" {
+		slot := badRequest(stmt, "`"+stmt.Target+" "+stmt.Kind+":"+h.index+"@"+target+"` names nothing: only a cdp peer has "+
+			"targets, and `"+stmt.Kind+"` is one connection with no children.")
+		return nil, "", &slot
+	}
+	return h, target, nil
+}
+
+// peerConn finds one connection by index, or the only one when no index is given.
+func (s *Server) peerConn(stmt directive.Statement, sessionID, kind, index string) (*jrpcHandle, *envelope.Slot) {
+	jrpcChannelsMu.Lock()
+	defer jrpcChannelsMu.Unlock()
+	if index != "" {
+		if h, ok := jrpcChannels[peerKey(sessionID, kind, index)]; ok {
+			return h, nil
+		}
+		live := liveAddrsLocked(sessionID, kind)
+		body := "this session has no " + kind + ":" + index + ", so that address names nothing."
+		if len(live) > 0 {
+			body += " Live connections: " + strings.Join(live, ", ") + "."
+		}
+		slot := envelope.Slot{Code: 404, Headers: map[string]string{
+			"Path": stmt.Path, "Error-Code": "not_found",
+		}, Body: body}
+		return nil, &slot
+	}
+	// No index: allowed only while the answer is unique.
+	var found *jrpcHandle
+	n := 0
+	for _, h := range jrpcChannels {
+		if h.sessionID == sessionID && h.kind == kind {
+			found, n = h, n+1
+		}
+	}
+	switch n {
+	case 1:
+		return found, nil
+	case 0:
+		slot := envelope.Slot{Code: 404, Headers: map[string]string{
+			"Path": stmt.Path, "Error-Code": "not_found",
+		}, Body: "this session has no " + kind + " connection, so `" + kind + "` names nothing. " +
+			"Open one first: `open <session> " + kind + " <url>` (a browser's devtools endpoint is http://host:port)."}
+		return nil, &slot
+	default:
+		live := liveAddrsLocked(sessionID, kind)
+		slot := envelope.Slot{Code: 400, Headers: map[string]string{
+			"Path": stmt.Path, "Error-Code": "ambiguous",
+		}, Body: "this session has " + fmt.Sprint(n) + " " + kind + " connections, so `" + kind +
+			"` alone is ambiguous. Name one: " + strings.Join(live, ", ") + "  (`ls` prints them too)."}
+		return nil, &slot
+	}
+}
+
+// liveAddrsLocked renders a session's connections of one kind, sorted.
+func liveAddrsLocked(sessionID, kind string) []string {
+	out := make([]string, 0, 2)
+	for key := range jrpcChannels {
+		if strings.HasPrefix(key, sessionID+" "+kind+":") {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// peerAddress renders a peer's address for a reply: `<session> <kind>[:<index>]`.
+func peerAddress(sessionID, kind, index string) string {
+	return sessionID + " " + kind + ":" + index
+}
+
+// pageAddress renders one attached tab: the peer, then the browser's own target id.
+//
+// THE PAGE IS NOT A NUMBERED NODE. A cdp peer manages a whole browser instance, and
+// the browser already names its tabs — `Target.getTargets` returns that id, the tab
+// keeps it for its lifetime, and no other tab will ever reuse it. Numbering them here
+// would be a second naming scheme for something the peer already names, and it would
+// make `:N` mean both "which browser" and "which tab".
+func pageAddress(h *jrpcHandle, target string) string {
+	return peerAddress(h.sessionID, h.kind, h.index) + "@" + target
+}
+
+// closePeer ends a peer and forgets it.
+func (s *Server) closePeer(stmt directive.Statement, h *jrpcHandle) envelope.Slot {
+	jrpcChannelsMu.Lock()
+	delete(jrpcChannels, peerKey(h.sessionID, h.kind, h.index))
+	jrpcChannelsMu.Unlock()
+	_ = h.ch.Close()
+	return noContent(stmt)
+}
+
+// parseSince reads the --since cursor.
+func parseSince(raw string) (int64, error) {
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("--since takes a frame number (the number a previous reply reported as Latest), got %q", raw)
+	}
+	return n, nil
+}
+
+// peerChannel routes read/call/close at a frame peer onto the jrpc layer.
+//
+// TWO SHAPES ARRIVE HERE. A peer opened as `<session> <kind>` (a browser, a network
+// MCP server) is resolved from the statement's own target and kind; a stdio MCP
+// server running ON a shell is addressed by its channel handle (`a1f3:1`) and never
+// reaches the registry at all. Both speak JSON-RPC, and the caller should not have
+// to know which kind of pipe it is talking through — so the mapping happens here,
+// once, and the one-time MCP handshake stays where it is (per handle).
 func (s *Server) peerChannel(ctx context.Context, stmt directive.Statement, win termArgs, sub string, rest []string) []envelope.Slot {
-	handle := stmt.Target
 	// `read`/`write` are this tool's general words for taking and putting bytes; on a
-	// peer they are its recv and send. The mapping is here rather than in jrpcChannel
-	// because that layer is shared with `jrpc`, which has no such words.
+	// peer they are its recv and send.
 	switch sub {
 	case "read":
 		sub = "recv"
 	case "write":
 		sub = "send"
 	}
-	args := []string{handle}
-	if sub == "call" || sub == "send" {
-		// The frame is the payload: verbatim, so the JSON arrives as written.
-		args = append(args, strings.TrimSpace(stmt.Payload))
+	frame := strings.TrimSpace(stmt.Payload)
+
+	var h *jrpcHandle
+	index := ""
+	if isPeerKind(stmt.Kind) {
+		var bad *envelope.Slot
+		h, index, bad = s.peerOf(stmt)
+		if bad != nil {
+			return []envelope.Slot{*bad}
+		}
+	} else {
+		// A CHANNEL HANDLE. It is usually a command's output, only sometimes a
+		// JSON-RPC server — and when it is not a peer, typing at the process is the
+		// right thing to do: no handshake, because a handshake would consume the very
+		// frames the caller is about to read.
+		jrpcChannelsMu.Lock()
+		found, ok := jrpcChannels[stmt.Target]
+		jrpcChannelsMu.Unlock()
+		if !ok {
+			return []envelope.Slot{s.mcpStdio(ctx, stmt, sub, stmt.Target, []string{frame})}
+		}
+		h = found
 	}
-	// A HANDLE THE REGISTRY DOES NOT KNOW IS A SHELL, and it goes straight to the stdio
-	// path. That path types at the process the caller started: no initialize
-	// handshake, because a handshake would consume the very frames the caller is about
-	// to read and answer a question nobody asked.
-	jrpcChannelsMu.Lock()
-	h, ok := jrpcChannels[handle]
-	jrpcChannelsMu.Unlock()
-	if !ok {
-		return []envelope.Slot{s.mcpStdio(ctx, stmt, sub, handle, args[1:])}
+
+	// A BROWSER SESSION IS NOT A CHANNEL: the frame is written by the caller, and the
+	// one thing this layer adds is the sessionId. Everything else (the method table,
+	// the parameters) stays the caller's, which is why there is no CDP command enum
+	// anywhere in this file.
+	if h.kind == "cdp" && (sub == "call" || sub == "send") {
+		f, bad := parseJRPCFrame(stmt, []string{frame})
+		if bad != nil {
+			return []envelope.Slot{*bad}
+		}
+		if sub == "send" || boolFlag(stmt, "send") {
+			return []envelope.Slot{s.cdpSend(ctx, stmt, h, index, f)}
+		}
+		return []envelope.Slot{s.cdpCall(ctx, stmt, h, index, f)}
 	}
-	kind := h.kind
+	addr := peerKey(h.sessionID, h.kind, h.index)
 	out := stmt
-	out.Op = kind
-	return []envelope.Slot{s.jrpcChannel(ctx, out, win, kind, sub, args)}
+	out.Op = h.kind
+	return []envelope.Slot{s.jrpcChannel(ctx, out, win, h.kind, sub, []string{addr, frame})}
 }
 
 // openPeer opens a peer through a session and returns the handle.
@@ -1259,6 +1548,23 @@ func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win 
 	if stmt.Target == "" {
 		// Bare `ls`: every live link and every channel on it.
 		return []envelope.Slot{s.directivePS(ctx, withFlags(stmt, map[string]string{"shells": "true"}), win)}
+	}
+	// `ls <peer>` ASKS THE PEER what hangs off it. For a browser those are tabs; the
+	// question is the same one `ls <session>` asks about channels, so it is the same
+	// verb — and it is answered by the peer rather than by the SSH side, which knows
+	// nothing about tabs.
+	if isPeerKind(stmt.Kind) {
+		// `ls <session> cdp` NAMES THE CONNECTIONS; `ls <session> cdp:1` names the tabs
+		// inside one. That is the tree rule — a listing shows a node's children — and it
+		// is also the only way to discover that a second browser exists.
+		if stmt.Key == "" {
+			return []envelope.Slot{s.listPeers(stmt)}
+		}
+		h, _, bad := s.peerOf(stmt)
+		if bad != nil {
+			return []envelope.Slot{*bad}
+		}
+		return []envelope.Slot{s.cdpList(ctx, stmt, h)}
 	}
 	// `ls <session>`: that link's channels. directivePS lists everything, so the
 	// statement is narrowed by pointing the handler at one session through --all and
@@ -1333,4 +1639,50 @@ func fileGroupForOp(op string) (string, bool) {
 		return "fs", true
 	}
 	return "", false
+}
+
+// listPeers renders every connection of one kind under a session.
+//
+// IT IS A LISTING, NOT A RESOLUTION: with two browsers open, `ls internal cdp` must
+// still answer — that is exactly the moment a caller needs the addresses. The verbs
+// that act on one peer refuse an unqualified address in that case; this one hands
+// them the names to qualify with.
+func (s *Server) listPeers(stmt directive.Statement) envelope.Slot {
+	sess, bad := s.resolveTunnelSession(stmt.Target)
+	if bad != nil {
+		return envelope.Slot{Code: 404, Headers: map[string]string{
+			"Path": stmt.Path, "Error-Code": CodeSessionNotRunning,
+		}, Body: "no running session named " + stmt.Target + ", so it holds no " + stmt.Kind + " connections."}
+	}
+	jrpcChannelsMu.Lock()
+	addrs := liveAddrsLocked(sess.ID, stmt.Kind)
+	handles := make([]*jrpcHandle, 0, len(addrs))
+	for _, addr := range addrs {
+		if h := jrpcChannels[addr]; h != nil {
+			handles = append(handles, h)
+		}
+	}
+	jrpcChannelsMu.Unlock()
+
+	var b strings.Builder
+	if len(handles) == 0 {
+		hint := map[string]string{
+			"cdp":  "a browser's devtools endpoint, http://host:port.",
+			"mcp":  "an MCP endpoint, http(s):// or ws(s)://.",
+			"jrpc": "any JSON-RPC endpoint over http(s):// or ws(s)://.",
+		}[stmt.Kind]
+		b.WriteString("no " + stmt.Kind + " connections on this session.\n\n")
+		b.WriteString("Next: `open " + stmt.Target + " " + stmt.Kind + " <url>` — " + hint + "\n")
+		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: b.String()}
+	}
+	b.WriteString(fmt.Sprint(len(handles)) + " " + stmt.Kind + " connection(s):\n")
+	for _, h := range handles {
+		b.WriteString("  " + peerAddress(h.sessionID, h.kind, h.index) + "\t" +
+			h.ch.Transport().String() + "\t" + h.ch.URL())
+		if h.cdp != nil {
+			b.WriteString(fmt.Sprintf("\t%d target(s) attached", len(h.cdp.snapshot())))
+		}
+		b.WriteString("\n")
+	}
+	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: b.String()}
 }

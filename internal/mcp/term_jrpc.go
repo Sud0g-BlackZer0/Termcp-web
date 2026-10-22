@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -40,24 +40,77 @@ import (
 // `mcp` keeps its stdio form unchanged: a handle that is a SHELL is still a
 // process to type at, and that path never touches this file's registry.
 
-// jrpcChannels is the registry of opened frame channels, keyed by handle.
+// jrpcChannels is the registry of opened peers, keyed by their ADDRESS:
+// `<session> <kind>:<index>` as one string, "a1f3 cdp:1".
 //
-// ponytail: an in-memory map with no eviction. A channel is opened inside one
+// THE KEY IS THE TREE ADDRESS, NOT A MINTED NAME. It used to be `cdp1` — a counter
+// printed once in a reply header and never by `ls`, so a caller that lost it had no
+// way to get it back, and a caller that had it could not tell which session it
+// belonged to. Every other node in the tool is addressed `<session> <kind> <key>`;
+// a peer is `<session> <kind>`, and that is now the name.
+//
+// ponytail: an in-memory map with no eviction. A peer is opened inside one
 // conversation and closed with `close`; the leak would be one struct per opened
 // URL. Add a reaper when a long-lived instance is observed accumulating them.
 var (
 	jrpcChannelsMu sync.Mutex
 	jrpcChannels   = map[string]*jrpcHandle{}
+	peerSeqMu      sync.Mutex
+	peerSeq        = map[string]int{}
 )
 
-// jrpcHandleSeq mints handles monotonically. len(map)+1 would reuse a handle
-// after a close and silently point two names at one channel.
-var jrpcHandleSeq atomic.Int64
+// peerKey renders a peer's address: `<session> <kind>:<index>`.
+//
+// THE INDEX NAMES THE CONNECTION, and it is what makes two browsers on one machine
+// representable. A cdp peer manages a whole browser instance — pages are reached
+// through it with the browser's own target ids, so they are not addresses here.
+// Whatever is the second one to be opened on that session gets :2 and stays :2.
+func peerKey(sessionID, kind, index string) string {
+	return sessionID + " " + kind + ":" + index
+}
+
+// nextPeerIndex mints the connection number for a new peer.
+//
+// MONOTONIC, NEVER REUSED, for the same reason the old handle counter was: reusing
+// `:1` after a close would make every address a caller remembered point at a
+// different browser, and the mistake would be invisible.
+//
+// ponytail: an in-memory counter beside the registry. It resets when the process
+// restarts, which is fine — so did every peer.
+func nextPeerIndex(sessionID, kind string) string {
+	peerSeqMu.Lock()
+	defer peerSeqMu.Unlock()
+	peerSeq[peerSeqKey(sessionID, kind)]++
+	return strconv.Itoa(peerSeq[peerSeqKey(sessionID, kind)])
+}
+
+func peerSeqKey(sessionID, kind string) string { return sessionID + " " + kind }
 
 // jrpcHandle is one opened channel plus the little state a door needs.
 type jrpcHandle struct {
 	ch   *jrpc.Channel
 	kind string // jrpc | mcp | cdp
+
+	// sessionID is the session this peer tunnels through, and it is part of the
+	// peer's ADDRESS (`<session> <kind>:<n>`). It belongs to the handle rather than
+	// to a directive because the choice was made at `open` time.
+	sessionID string
+	// index is the connection number inside `<session> <kind>:` — the address is
+	// `<sessionID> <kind>:<index>` and nowhere else.
+	index string
+	// dial is the session's dialer, kept so a door can make its own HTTP requests
+	// through the same tunnel the socket uses. `get <peer> protocol` reads the
+	// browser's live signature over it, which is the difference between a URL that
+	// works and one that only works from here.
+	dial jrpc.DialFunc
+	// httpBase is the http:// endpoint the peer was opened through, when it was.
+	// A browser publishes /json/protocol there; a bare ws:// URL has no such
+	// address, and `get <peer> protocol` says so rather than guessing.
+	httpBase string
+
+	// cdp is the browser state: attached targets and their session ids. Nil for
+	// the other two doors, which have no such concept.
+	cdp *cdpState
 
 	// initMu guards init. It is not the channel's mutex: the channel is held for
 	// a whole call, so a handshake under it would let a second caller begin
@@ -99,6 +152,15 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeSessionNotRunning},
 			Body: fmt.Sprintf("session %q is not running, so there is no tunnel to reach %s through", sessionID, rawURL)}
 	}
+	// THE SESSION IS RESOLVED TO ITS ID. `open internal cdp …` names a host, and a host
+	// resolves to that host's one running link; everything downstream (the protocol
+	// fetch, the address itself) names the LINK. Keeping the caller's spelling
+	// would leave the reply naming a host that the registry is not keyed by, so the
+	// address printed there could not be pasted back into the next command.
+	if sess, bad := s.resolveTunnelSession(sessionID); bad == nil {
+		sessionID = sess.ID
+	}
+	var httpBase string
 	// The whitelist gate. A session whose template lists capabilities cannot reach
 	// a door it did not name — and before the capability rows existed it could
 	// reach every one of them, because the session-scoped guard resolves a
@@ -120,6 +182,18 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 			return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConnectionFailed},
 				Body: "discovery: cannot find DevTools websocket endpoint at " + rawURL + ": " + err.Error()}
 		}
+		// THE HTTP ENDPOINT IS KEPT, not just the socket it advertises. The live
+		// protocol document lives at /json/protocol on that endpoint, and it is the
+		// only non-guessing source for a method signature.
+		if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+			httpBase = strings.TrimRight(rawURL, "/")
+		} else {
+			// A ws:// socket still has the http endpoint on the same port, which is
+			// where DevTools publishes /json/protocol. Deriving it is exact (same host,
+			// same port), not a guess — and it keeps `get <peer> protocol` working for
+			// a caller who opened the socket directly.
+			httpBase = httpBaseOf(resolved)
+		}
 		rawURL = resolved
 	}
 	ch, err := jrpc.Open(ctx, rawURL, dial)
@@ -127,8 +201,15 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": CodeConnectionFailed},
 			Body: "transport: " + err.Error()}
 	}
-	handle := fmt.Sprintf("%s%d", op, jrpcHandleSeq.Add(1))
-	h := &jrpcHandle{ch: ch, kind: op}
+	// EVERY OPEN GETS ITS OWN NUMBER. Two browsers on one machine used to be
+	// impossible because the address was `<session> <kind>` and a second open had to
+	// either collide or replace it; the number is that address's missing dimension.
+	index := nextPeerIndex(sessionID, op)
+	handle := peerKey(sessionID, op, index)
+	h := &jrpcHandle{ch: ch, kind: op, sessionID: sessionID, index: index, dial: dial, httpBase: httpBase}
+	if op == "cdp" {
+		h.cdp = newCDPState()
+	}
 	jrpcChannelsMu.Lock()
 	jrpcChannels[handle] = h
 	jrpcChannelsMu.Unlock()
@@ -145,6 +226,15 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 	// that has never read the spec should be able to make the next call correctly from
 	// this reply alone.
 	body := fmt.Sprintf("%s %s (%s, no shell channel consumed)\n", handle, rawURL, ch.Transport())
+	if op == "cdp" {
+		// A BROWSER'S NEXT STEP IS NOT A FRAME. Everything useful needs a
+		// sessionId, and a caller that does not know that writes Page.navigate at the
+		// browser process, reads a frameId, and concludes the browser is broken. So
+		// the open reply says which call to make next, and how to find its argument.
+		body += "\nNext: `ls " + handle + "` lists the tabs. Attach one with `open " + handle +
+			" target <targetId>`, then call through the handle it returns.\n"
+		body += "Events are kept: record the number from `get " + handle + "`, act, then `read " + handle + " --since <n>`.\n"
+	}
 	if op == "mcp" {
 		if discover, ok := s.jrpcDiscoverMCP(ctx, h, handle); ok {
 			body += discover
@@ -353,7 +443,7 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		frame, ok := h.ch.Take(waitCtx)
 		cancel()
 		if ok {
-			return envelope.Slot{Code: 200, Headers: headers, Body: frame}
+			return s.frameReply(ctx, stmt, h, frame)
 		}
 		if h.ch.Transport() == jrpc.HTTP {
 			return envelope.Slot{Code: 204, Headers: headers,
@@ -385,7 +475,14 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 			return envelope.Slot{Code: 202, Headers: headers,
 				Body: "sent; read the answer with `" + op + " recv " + handle + "`"}
 		}
-		return s.jrpcCall(ctx, stmt, h, frame)
+		if err := s.jrpcReady(ctx, h); err != nil {
+			return jrpcError(stmt, err)
+		}
+		reply, err := h.ch.Call(ctx, frame)
+		if err != nil {
+			return jrpcError(stmt, err)
+		}
+		return s.frameReply(ctx, stmt, h, reply)
 	}
 	return badRequest(stmt, "unknown "+op+" subcommand: "+sub)
 }
@@ -405,7 +502,8 @@ func recvContext(ctx context.Context, win termArgs) (context.Context, context.Ca
 	return context.WithTimeout(ctx, time.Duration(wait*float64(time.Second)))
 }
 
-// jrpcCall sends one frame and returns its answer.
+// jrpcCall sends one frame and returns its answer, rendered the way every frame is
+// rendered (escapes decoded, oversized payloads turned into receipts).
 func (s *Server) jrpcCall(ctx context.Context, stmt directive.Statement, h *jrpcHandle, frame map[string]any) envelope.Slot {
 	if err := s.jrpcReady(ctx, h); err != nil {
 		return jrpcError(stmt, err)
@@ -414,7 +512,7 @@ func (s *Server) jrpcCall(ctx context.Context, stmt directive.Statement, h *jrpc
 	if err != nil {
 		return jrpcError(stmt, err)
 	}
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: reply}
+	return s.frameReply(ctx, stmt, h, reply)
 }
 
 // jrpcReady runs the MCP handshake once, before the first frame that is not the

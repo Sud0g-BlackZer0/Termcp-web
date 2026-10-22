@@ -387,21 +387,21 @@ var ops = []Op{
 		Kinds: []string{"forward", "mcp", "cdp", "jrpc"},
 		Flags: []string{"pipe", "pty", "argv", "name", "on-exit", "rows", "cols", "size",
 			"bind-host", "remote-host", "remote-port", "local-port", "local-host",
-			"dynamic", "remote"},
+			"dynamic", "remote", "target"},
 		Valueless: []string{"pipe", "pty", "dynamic", "remote"},
 		RestValue: []string{"argv"},
-		Usage:     "open <session> [--argv <cmd> [--pty]]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>",
+		Usage:     "open <session> [--argv <cmd> [--pty]]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>   |   open <session> cdp:N --target <targetId>",
 		Detail:    openDetail},
 	{Name: "ls", Core: true, Kind: KindFlags, Target: true, TargetOptional: true,
-		Kinds:     []string{"forward", "file", "host", "ext", "alias"},
+		Kinds:     []string{"forward", "file", "host", "ext", "alias", "cdp", "mcp", "jrpc"},
 		Flags:     []string{"all"},
 		Valueless: []string{"all"},
 		Usage:     "ls   |   ls host   |   ls ext   |   ls alias   |   ls <session> [forward|file]",
 		Detail:    lsDetail},
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
-		Kinds:  []string{"file", "host"},
+		Kinds:  []string{"file", "host", "protocol", "cdp", "mcp", "jrpc"},
 		Flags:  []string{"op"},
-		Usage:  "get <session|channel|host-name>   |   get <session> file <path> [--op stat|realpath|urls|…]",
+		Usage:  "get <session|channel|host-name>   |   get <session> file <path> [--op stat|realpath|urls|…]   |   get <session> cdp[:N][@target] [protocol [Domain]]",
 		Detail: getDetail},
 	{Name: "close", Core: true, Kind: KindFlags, Target: true,
 		// mcp/cdp/jrpc/file are DECLARED SO THEY ARE REFUSED BY NAME. Dropping them
@@ -444,10 +444,10 @@ var ops = []Op{
 	// --- bytes in and out of a node ---
 
 	{Name: "read", Core: true, Kind: KindFlags, Target: true,
-		Kinds:     []string{"file"},
-		Flags:     []string{"cursor", "from-line", "tail", "stream", "raw", "grep", "grep-limit", "frame"},
+		Kinds:     []string{"file", "cdp", "mcp", "jrpc"},
+		Flags:     []string{"cursor", "since", "at", "offset", "bytes", "from-line", "tail", "stream", "raw", "grep", "grep-limit", "frame"},
 		Valueless: []string{"raw", "frame"},
-		Usage:     "read <session> <index> [--tail N|--from-line N|--cursor N] [--grep RE]   |   read <session> file <path>   |   read <peer|channel> [--frame]",
+		Usage:     "read <session> <index> [--tail N|--from-line N|--cursor N] [--grep RE]   |   read <session> file <path>   |   read <session> cdp|mcp|jrpc[:N][@target] [--since N] [--grep RE]   |   read <session> cdp:N --at FRAME [--offset BYTES] [--bytes N]",
 		Detail:    readDetail},
 	// NO TargetKind: `write <session> file <path>` names a container and
 	// `write <handle> <frame>` names a channel, so a shape check would refuse one of
@@ -464,8 +464,11 @@ var ops = []Op{
 	// --- a peer: one call, or the manual send/recv pair ---
 
 	{Name: "call", Kind: KindPayload, PayloadSpan: spanVerbatim, Target: true,
-		Usage:  "call <peer|channel> <frame>",
-		Detail: callDetail},
+		Kinds:     []string{"cdp", "mcp", "jrpc"},
+		Flags:     []string{"send"},
+		Valueless: []string{"send"},
+		Usage:     "call <session> cdp|mcp|jrpc[:N][@target] [--send] <frame>   |   call <channel> <frame>",
+		Detail:    callDetail},
 
 	// --- configuration, which outlives any session ---
 
@@ -569,7 +572,31 @@ much reply will I get" while a pattern answers "which lines do I want". Folded
 together, lines_limit would mean either "the first N raw lines, then filter" —
 which finds nothing when the matches come later and reads like "no errors" — or
 "scan everything, then take N matches", which hides a full scan behind something
-that looks like a size cap.`
+that looks like a size cap.
+
+ON A PEER, --since IS THE OTHER HALF. A plain 'read a1f3 cdp:1' takes the next frame
+off the queue, once. 'read a1f3 cdp:1 --since N' reads the FRAME HISTORY — everything with a
+number greater than N — and does not consume it, so asking again gives the same
+answer. That is the only way to use CDP events: an event is never replayed, so a
+reader that was not looking at the moment it fired needs a window to look back
+into.
+
+  get internal cdp:1                 reports Latest: record it before an action
+  read internal cdp:1 --since 42     what arrived after 42, each line prefixed n
+  read internal cdp:1 --since 42 --grep Page\.   the same, filtered first
+
+The reply reports the range it returned and the latest number, so the next call
+resumes exactly where this one stopped.
+
+--at PAGES INSIDE ONE FRAME, which is the other axis. A frame too big to inline is
+answered as a receipt naming its number; --offset starts that frame at a byte and
+--bytes sets the page size (4 KB by default). Offsets are bytes, the reply reports
+Offset and Next-Offset, and a slice never ends in the middle of a character.
+
+  read internal cdp:1 --at 57 --offset 0
+  read internal cdp:1 --at 57 --offset 4096 --bytes 512
+
+--since moves through TIME; --at moves through one payload. Neither consumes.`
 
 // runDetail states what `run` can and cannot know, because the difference is
 // invisible in the reply and the wrong guess sends the caller chasing a silent
@@ -645,6 +672,26 @@ The other children are named by a KIND before the key:
 
   open a1f3 forward --local-port 8080 --remote-host db --remote-port 5432
   open a1f3 mcp http://localhost:8080/mcp
+  open a1f3 cdp http://localhost:9222
+
+EVERY PEER IS NUMBERED, and the number names the CONNECTION:
+
+  open a1f3 cdp http://localhost:9222    answered with a1f3 cdp:1
+  open a1f3 cdp http://localhost:9333    answered with a1f3 cdp:2
+
+Two browsers on one machine are cdp:1 and cdp:2 — that is what the number is for.
+The number is given here and never reused, so an address you wrote down keeps
+meaning what it meant.
+
+A TAB INSIDE A CONNECTION IS NOT NUMBERED. One connection manages the whole browser,
+and the browser already names its tabs, so a page is <peer>@<targetId>:
+
+  open a1f3 cdp:1 --target <targetId>    answered with a1f3 cdp:1@<targetId>
+
+That address carries the CDP sessionId, so every later 'call a1f3 cdp:1@<targetId>'
+reaches that page without the caller pasting an opaque id into the JSON. With one
+connection open the number may be left out; with two it may not, because guessing
+would drive the wrong browser while the reply said it worked.
 
 TO CONNECT TO A HOST, use connect. open only ever acts on a session that exists,
 which is why it cannot be confused with one: the two words name different steps.
@@ -675,25 +722,61 @@ const lsDetail = `List a node of the resource tree.
   ls a1f3               a session's channels, each with its mode
   ls a1f3 forward       its tunnels
   ls a1f3 file /var/log a directory on it
+  ls a1f3 cdp           the browser connections on that session
+  ls a1f3 cdp:1         the tabs inside one, and which are attached
 
 THE NOUN IS PART OF THE ADDRESS, not a separate flag: what hangs off a session is
 addressed <session> <kind> <key>. Omitting the kind means channels, whose key is the
-index — so a1f3:1 and a1f3 1 are the same node.`
+index — so a1f3:1 and a1f3 1 are the same node.
 
-const getDetail = `Describe one node: a session, or one of its channels.
+` + "`ls <peer>` asks the peer, not a cache: a tab list one navigation stale would\nhand out target ids that no longer attach."
+
+const getDetail = `Describe one node: a session, one of its channels, or a peer.
 
   get a1f3              status, endpoint, mode, age
   get a1f3:1            that channel's state
+  get a1f3 cdp:1            the connection: endpoint, frame cursor, attached tabs
+  get a1f3 cdp:1@<id>       one tab: target, url, enabled domains
+  get a1f3 cdp:1 protocol   the browser's OWN command list (the live /json/protocol)
+  get a1f3 cdp:1 protocol Page   one domain's commands and their parameters
 
-For the list of what exists, use ls.`
+For the list of what exists, use ls.
+
+WHY THE PROTOCOL IS ASKED FOR rather than remembered: a hardcoded method table is a
+second truth, and it drifts silently the moment the browser updates — a caller fills
+in parameters that no longer exist and reads the resulting error as their own fault.
+The browser publishes its own signature; this reads it.`
 
 const callDetail = `Send one JSON-RPC frame to a peer opened with
 "open <session> mcp|cdp|jrpc <url>", and wait for the reply that answers it.
 
-  call mcp1 '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  call internal mcp:1 '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  call internal cdp:1 {"method":"Target.getTargets"}
+  call internal cdp:1@7D87AB {"method":"Page.navigate","params":{"url":"about:blank"}}
+
+THE ADDRESS IS THE WHOLE STATE. cdp:1 is which connection; @7D87AB is which tab in
+it. A tab address fills in the sessionId that the attach minted, so a page-level
+method does not have to carry it — and cannot go to the browser process by accident,
+which the browser answers with "wasn't found" instead of a refusal.
 
 THE FRAME IS VERBATIM: it is not shell-quoted, so the JSON reaches the peer exactly
 as written. That is also why a quote in it is not a quoting problem to solve.
+
+AN ERROR FROM THE PEER IS A FAILING REPLY, not a 200 with {"error":…} in the body: a
+caller branches on the status, so a silent-looking success is the worst answer this
+door can give. The message also says what to do about the two common traps (a
+page-level method sent to the browser; a sessionId whose tab closed).
+
+  --send       do not wait. The reply is 202 and the answer arrives on read <peer>.
+               This is the only way to send a notification, which never has an
+               answer to wait for.
+
+A BIG ANSWER IS A RECEIPT. Over 4 KB the reply carries the frame's number, its size
+and its first bytes instead of the payload — a JSON document cut in the middle is
+too big to have been worth the tokens and too broken to use. Page it back:
+
+  read internal cdp:1 --at 57 --offset 4096
+  read internal cdp:1 --at 57 --offset 0 --bytes 512
 
 A peer that answers with a request of its own (sampling, progress) is not answered
 here; those arrive on read <peer>. A reply that never comes times out with the
@@ -992,7 +1075,8 @@ Two different addresses, because the side that listens differs:
                 "0.0.0.0" (or "*") publishes the tunnel to everything that can
                 reach this machine — that is a deliberate act, and the review
                 prompt says so.
-  --local-host  what the TARGET listens on for remote. Default 0.0.0.0.
+  --local-host  what the TARGET listens on for remote. Default 127.0.0.1;
+                "0.0.0.0" publishes it to the target's network.
 
 dynamic has no --bind-host on purpose: the SOCKS5 proxy this server runs performs
 no authentication (same as "ssh -D"), so on any other interface it would be an open
@@ -1687,11 +1771,13 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 	// `open a1f3 forward --local-port 8080` declares no key, while
 	// `read a1f3 file /etc/passwd` declares one.
 	tookKind := false
-	if kind, ok := kindWord(op, rest); ok {
+	if kind, inline, ok := kindWordWithKey(op, rest); ok {
 		out.Kind = kind
 		rest = rest[1:]
 		tookKind = true
-		if len(rest) > 0 && !strings.HasPrefix(rest[0].text, "--") {
+		if inline != "" {
+			out.Key = inline
+		} else if !op.keyIsThePayload() && len(rest) > 0 && !strings.HasPrefix(rest[0].text, "--") {
 			out.Key = rest[0].text
 			rest = rest[1:]
 		}
@@ -1746,10 +1832,12 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 			}
 			// A kind may also follow the target: `open a1f3 forward`,
 			// `read a1f3 file /x`, `rm a1f3 file /x`.
-			if kind, ok := kindWord(op, rest); ok {
+			if kind, inline, ok := kindWordWithKey(op, rest); ok {
 				out.Kind = kind
 				rest = rest[1:]
-				if len(rest) > 0 && !strings.HasPrefix(rest[0].text, "--") {
+				if inline != "" {
+					out.Key = inline
+				} else if !op.keyIsThePayload() && len(rest) > 0 && !strings.HasPrefix(rest[0].text, "--") {
 					out.Key = rest[0].text
 					rest = rest[1:]
 				}
@@ -2018,24 +2106,64 @@ func ChannelTargetProblem(op Op, target string) string {
 // into "the file /etc/passwd of session a1f3" when the caller meant the channel read
 // whose target they mistyped. Requiring the declaration keeps the reading obvious.
 func kindWord(op Op, rest []word) (string, bool) {
+	kind, _, ok := kindWordWithKey(op, rest)
+	return kind, ok
+}
+
+// kindWordWithKey reads a KIND, including the two compact forms that attach a key
+// to it: `<peer>:<index>` names one attached session (the same colon a channel uses
+// to carry its index), and `<peer>@<targetId>` names a one-shot session on a target.
+//
+// THEY ARE ONE WORD BECAUSE THEY ARE ONE NODE. `a1f3:1` is a channel, not a session
+// plus a suffix; `a1f3 cdp:1` is an attached page, not a peer plus a suffix. Keeping
+// the key attached to the kind is what lets the address be copied out of a reply and
+// pasted back into the next command.
+func kindWordWithKey(op Op, rest []word) (kind, key string, ok bool) {
 	if len(op.Kinds) == 0 || len(rest) == 0 {
-		return "", false
+		return "", "", false
 	}
 	w := rest[0].text
 	if isSentinel(w) {
-		return "", false
+		return "", "", false
 	}
 	for _, k := range op.Kinds {
 		if k == w {
-			return w, true
+			return w, "", true
+		}
+		if strings.HasPrefix(w, k+"@") {
+			target := strings.TrimPrefix(w, k+"@")
+			if target == "" {
+				return "", "", false
+			}
+			return k, "@" + target, true
+		}
+		if strings.HasPrefix(w, k+":") {
+			// `<kind>:<index>` names a connection; `<kind>:<index>@<target>` names one
+			// target inside it. Both are ONE word because they are ONE address — the
+			// split happens downstream, where the peer's own state says whether the
+			// target exists.
+			rest2 := strings.TrimPrefix(w, k+":")
+			idx := rest2
+			if at := strings.IndexByte(rest2, '@'); at >= 0 {
+				idx = rest2[:at]
+				if rest2[at+1:] == "" {
+					return "", "", false
+				}
+			}
+			if _, isIndex := channelIndexWord(idx); !isIndex {
+				return "", "", false
+			}
+			return k, rest2, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // channelIndexWord reports whether word is a bare channel index and returns it
 // normalised. Only digits qualify: a channel's key is its position in the session,
 // and accepting anything else would let `run a1f3 file` name a channel called "file".
+func ChannelIndex(word string) (string, bool) { return channelIndexWord(word) }
+
 func channelIndexWord(word string) (string, bool) {
 	w := strings.TrimSpace(word)
 	if w == "" {
@@ -2383,3 +2511,15 @@ answer than the question. Use close <session>:1 to stop one channel.`
 // word list no matter what the directive's payload would have been — so the flag's
 // own rule wins over the declaration.
 func (op Op) payloadSpanMode() spanMode { return op.PayloadSpan }
+
+// keyIsThePayload reports whether a verb's words after the kind ARE its payload.
+//
+// `call a1f3 cdp '{"method":"Page.enable"}'` is a peer address followed by a frame,
+// and the frame is the whole rest of the statement. Reading the first word as a KEY
+// (the rule for `read a1f3 file /etc/passwd`) ate the frame and then answered "needs
+// a JSON-RPC frame" about the frame it had just swallowed. A payload verb therefore
+// takes its key only in the attached spellings — `cdp:1`, `cdp@ABC123` — where the
+// boundary is a colon or an `@`, not a space.
+func (op Op) keyIsThePayload() bool {
+	return op.Kind == KindPayload || op.Kind == KindInterpreted
+}
