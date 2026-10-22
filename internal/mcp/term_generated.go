@@ -568,6 +568,7 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	if slot, bad := numericFlags(args, stmt,
 		[2]string{"offset", "offset"},
 		[2]string{"length", "length"},
+		[2]string{"size", "size"},
 		[2]string{"local-offset", "local_offset"},
 		[2]string{"uid", "uid"},
 		[2]string{"gid", "gid"},
@@ -704,6 +705,16 @@ func (s *Server) directiveHost(ctx context.Context, stmt directive.Statement, wi
 	if slot, bad := numericFlags(args, stmt,
 		[2]string{"jump-port", "jump_port"},
 		[2]string{"dial-timeout-seconds", "dial_timeout_seconds"},
+	); bad {
+		return slot
+	}
+	// A BASTION CARRIES ITS OWN CREDENTIAL. validateDialSpec requires one, and until
+	// these flags existed every jump `create host` could express was refused — the
+	// three jump flags above were reachable only in theory.
+	if slot, bad := stringFlags(args, stmt,
+		[2]string{"jump-password", "jump_password"},
+		[2]string{"jump-private-key", "jump_private_key"},
+		[2]string{"jump-key-passphrase", "jump_key_passphrase"},
 	); bad {
 		return slot
 	}

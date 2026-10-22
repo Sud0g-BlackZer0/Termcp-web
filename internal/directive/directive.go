@@ -453,8 +453,11 @@ var ops = []Op{
 	// `write <handle> <frame>` names a channel, so a shape check would refuse one of
 	// the two legitimate forms. The dispatcher tells them apart by Kind.
 	{Name: "write", Kind: KindFlags, Target: true,
-		Kinds:  []string{"file"},
-		Flags:  []string{"data", "mode", "local-path", "offset", "length", "old-text", "new-text", "op", "uid", "gid", "atime", "mtime"},
+		Kinds: []string{"file"},
+		// --size is the truncate target. It was missing, so `--op truncate` could not be
+		// satisfied by any spelling: the handler requires remote_path and size, and the
+		// flag for size did not exist.
+		Flags:  []string{"data", "mode", "local-path", "offset", "length", "size", "old-text", "new-text", "op", "uid", "gid", "atime", "mtime"},
 		Usage:  "write <session> file <path> [--data TEXT|--local-path FILE] [--mode …] [--op chmod|truncate|…]",
 		Detail: writeDetail},
 
@@ -470,7 +473,8 @@ var ops = []Op{
 		Kinds: []string{"host", "ext", "alias", "file"},
 		Flags: []string{"name", "host", "user", "port", "password", "private-key", "key-passphrase",
 			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
-			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port",
+			"default-shell", "default-mode", "default-approval",
+			"jump-host", "jump-user", "jump-port", "jump-password", "jump-private-key", "jump-key-passphrase",
 			"source", "kind", "target", "command", "args", "url", "headers", "allow", "paths",
 			"notes", "enabled", "forwards", "directive", "link-path", "mode", "op"},
 		Valueless: []string{"trust-unknown-host", "default-approval", "enabled"},
@@ -481,7 +485,8 @@ var ops = []Op{
 		Kinds: []string{"host", "ext", "alias"},
 		Flags: []string{"name", "host", "user", "port", "password", "private-key", "key-passphrase",
 			"trust-unknown-host", "known-hosts", "dial-timeout-seconds", "proxy", "description",
-			"default-shell", "default-mode", "default-approval", "jump-host", "jump-user", "jump-port",
+			"default-shell", "default-mode", "default-approval",
+			"jump-host", "jump-user", "jump-port", "jump-password", "jump-private-key", "jump-key-passphrase",
 			"kind", "target", "command", "args", "url", "headers", "allow", "paths", "notes", "enabled",
 			"forwards", "directive"},
 		Valueless: []string{"trust-unknown-host", "default-approval", "enabled"},
