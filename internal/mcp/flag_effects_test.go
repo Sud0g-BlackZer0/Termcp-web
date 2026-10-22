@@ -85,6 +85,10 @@ func TestFlagsThatOnlyMatterServerSide(t *testing.T) {
 			`notify "held" --for 30`,
 			`notify "sticky" --sticky`,
 			`notify "titled" --title T --level info`,
+			// --on routes the notification to one session rather than the whole
+			// machine; it maps onto session_id, and a wrong hand-off would deliver it
+			// everywhere — which looks like success from the caller's side.
+			`notify "routed" --on ` + firstSessionID(t, s),
 		} {
 			got := termText(t, s, map[string]any{"cmd": cmd})
 			if !strings.HasPrefix(got, "TERM/1 2") {
@@ -108,4 +112,12 @@ func waitForContent(t *testing.T, s *Server, handle, want string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("%q never appeared on %s", want, handle)
+}
+
+// firstSessionID opens a session and returns its id, for flags that address one.
+func firstSessionID(t *testing.T, s *Server) string {
+	t.Helper()
+	h := openPipe(t, s, "sleep 30")
+	t.Cleanup(func() { termText(t, s, map[string]any{"cmd": "close " + h}) })
+	return strings.SplitN(h, ":", 2)[0]
 }
