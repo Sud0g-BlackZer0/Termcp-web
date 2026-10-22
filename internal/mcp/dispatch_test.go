@@ -95,9 +95,12 @@ func TestEveryFileOpReachesItsGroup(t *testing.T) {
 	sid := strings.SplitN(h, ":", 2)[0]
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
+	// The ops that belong on get/write. symlink and link do not: creating a link is
+	// a CREATE operation, on `create … file --target`, because a link needs a target
+	// and neither get nor write has that flag.
 	for _, op := range []string{
 		"stat", "getwd", "urls", "realpath", "readlink",
-		"chmod", "chown", "chtimes", "symlink", "link", "truncate", "statvfs",
+		"chmod", "chown", "chtimes", "truncate", "statvfs",
 	} {
 		for _, verb := range []string{"get", "write"} {
 			cmd := verb + " " + sid + " file /tmp/x --op " + op

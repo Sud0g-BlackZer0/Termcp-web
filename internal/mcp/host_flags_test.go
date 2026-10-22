@@ -62,6 +62,23 @@ func TestEveryHostFlagReachesTheStoredConfig(t *testing.T) {
 			}
 			eq(t, "jump.port", e.Jump.Port, 2200)
 		}},
+		// The bastion's own credential: it must land on the JUMP spec, not on the entry,
+		// or the bastion is dialled with the target's secret.
+		{"jump-private-key", "/keys/jump_id", func(t *testing.T, e *sshconfig.Entry) {
+			if e.Jump == nil {
+				t.Fatalf("jump was dropped")
+			}
+			eq(t, "jump.private_key", e.Jump.PrivateKey, "/keys/jump_id")
+			if e.PrivateKey != "" {
+				t.Errorf("the bastion's key leaked onto the entry: %q", e.PrivateKey)
+			}
+		}},
+		{"jump-key-passphrase", "jpp", func(t *testing.T, e *sshconfig.Entry) {
+			if e.Jump == nil {
+				t.Fatalf("jump was dropped")
+			}
+			eq(t, "jump.key_passphrase", e.Jump.KeyPassphrase, "jpp")
+		}},
 		{"trust-unknown-host", "", func(t *testing.T, e *sshconfig.Entry) {
 			if e.TrustUnknownHost == nil || !*e.TrustUnknownHost {
 				t.Fatalf("trust_unknown_host was not stored as true")

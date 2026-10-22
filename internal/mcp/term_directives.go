@@ -90,7 +90,7 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 			action, ok := fileGroupForOp(op)
 			if !ok {
 				return []envelope.Slot{badRequest(stmt, "get --op does not know "+quoteOrDash(op)+
-					". It takes stat, realpath, readlink, getwd, urls, or one of: chmod, chown, chtimes, symlink, link, truncate, statvfs.")}
+					". It takes stat, realpath, readlink, getwd, urls, or one of: chmod, chown, chtimes, truncate, statvfs.")}
 			}
 			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
 				"action": action, "op": op, "remote-path": stmt.Key,
@@ -277,6 +277,17 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 			action := "mkdir"
 			flags := map[string]string{"action": action, "remote-path": stmt.Key}
 			if target, ok := stmt.Flag("target"); ok {
+				// A HARD LINK IS THE SAME SENTENCE with --op link: the key is the new
+				// name, --target is what it already exists as. Without this branch a hard
+				// link had no spelling at all — `write --op link` wanted existing_path and
+				// new_path, and neither is a flag of write.
+				if op, _ := stmt.Flag("op"); op == "link" {
+					flags["action"] = "link"
+					flags["op"] = "link"
+					flags["new-path"] = stmt.Key
+					flags["existing-path"] = target
+					return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, flags), win)}
+				}
 				flags["action"] = "link"
 				flags["op"] = "symlink"
 				flags["link-path"] = stmt.Key
@@ -1296,7 +1307,12 @@ func fileGroupForOp(op string) (string, bool) {
 		return op, true
 	case "chmod", "chown", "chtimes":
 		return "perm", true
-	case "symlink", "readlink", "link":
+	case "readlink":
+		// ONLY readlink. `symlink` and `link` used to be listed here, which meant
+		// `get --op symlink` (a read verb, pretending) and `write --op symlink` (refused
+		// for want of --target, a flag write does not have). Both are CREATE operations
+		// and both live on `create … file`, where the node's key is the link and --target
+		// is what it points at.
 		return "link", true
 	case "truncate", "realpath", "statvfs":
 		return "fs", true
