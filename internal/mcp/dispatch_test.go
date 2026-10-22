@@ -278,3 +278,43 @@ func TestEveryForwardDirectionIsReachable(t *testing.T) {
 		}
 	}
 }
+
+// TestForwardIsAddressedTheSameWayEverywhere pins one spelling per object.
+//
+// The tree says `close <session> forward <id>` — the id is the node, so it is the key.
+// The dispatcher passed `--action close` and dropped the key, so the handler asked for
+// `--forward-id` and the documented form was refused with "forward_id required". The
+// same object was addressed positionally when opening and by flag when closing.
+func TestForwardIsAddressedTheSameWayEverywhere(t *testing.T) {
+	s := newTestServer(t)
+	s.forwardMgr = forward.NewForwardManager()
+	s.sessMgr.AddOnDeadHook(s.forwardMgr.CloseBySession)
+	h := openPipe(t, s, "sleep 30")
+	sid := strings.SplitN(h, ":", 2)[0]
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
+
+	out := termText(t, s, map[string]any{"cmd": "open " + sid + " forward --local-port 0 --remote-host 127.0.0.1 --remote-port 22"})
+	id := ""
+	for _, line := range strings.Split(out, "\n") {
+		if v, ok := strings.CutPrefix(line, "forward_id:"); ok {
+			id = strings.TrimSpace(v)
+		}
+	}
+	if id == "" {
+		t.Fatalf("no forward_id in the open reply:\n%s", out)
+	}
+
+	// The id from that reply, closed the way the usage line spells it.
+	if got := termText(t, s, map[string]any{"cmd": "close " + sid + " forward " + id}); strings.HasPrefix(got, "TERM/1 4") {
+		t.Fatalf("close <session> forward <id> was refused:\n%s", got)
+	}
+	if list := termText(t, s, map[string]any{"cmd": "ls " + sid + " forward"}); strings.Contains(list, id) {
+		t.Errorf("the forward %s is still listed after close:\n%s", id, list)
+	}
+
+	// A key that would be ignored is refused rather than dropped: `ls` lists a
+	// collection and has nothing to scope it with.
+	if got := termText(t, s, map[string]any{"cmd": "ls " + sid + " forward " + id}); !strings.HasPrefix(got, "TERM/1 4") {
+		t.Errorf("ls with a forward id was accepted:\n%s", got)
+	}
+}

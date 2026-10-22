@@ -168,9 +168,16 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 	case "close":
 		switch stmt.Kind {
 		case "forward":
-			return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{
-				"action": "close",
-			}), win)}
+			// THE ID IS THE NODE, so it arrives as the key rather than as a flag: the tree
+			// says `close <session> forward <id>`, and asking for `--forward-id` here made
+			// the same object addressable two ways — a positional key when opening it,
+			// a flag when closing it. An explicit flag still wins, so a caller who wrote
+			// it out is not punished.
+			flags := map[string]string{"action": "close"}
+			if stmt.Key != "" {
+				flags["forward-id"] = stmt.Key
+			}
+			return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, flags), win)}
 		case "":
 			if isPeerHandle(stmt.Target) {
 				return s.peerChannel(ctx, stmt, win, "close", nil)
@@ -1197,6 +1204,14 @@ func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win 
 	case "alias":
 		return []envelope.Slot{s.directiveAlias(ctx, stmt, win)}
 	case "forward":
+		// A KEY HERE WOULD BE SILENTLY DROPPED. The handler lists every forward on the
+		// session, so `ls <session> forward fw-1` would answer a full listing and the
+		// caller would believe the key had scoped it. Saying so is cheaper than letting
+		// them read a list that looks filtered and is not.
+		if stmt.Key != "" {
+			return []envelope.Slot{badRequest(stmt, "`ls` lists the whole collection; it does not take a "+
+				"forward id. Use `ls "+stmt.Target+" forward` for all of them.")}
+		}
 		return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}
 	case "file":
 		// THERE IS NO DIRECTORY LISTING, and this says so instead of guessing.
