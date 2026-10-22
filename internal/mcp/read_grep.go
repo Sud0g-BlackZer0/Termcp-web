@@ -76,6 +76,14 @@ func (s *Server) readGrep(ctx context.Context, stmt directive.Statement, win ter
 	if boolFlag(stmt, "raw") {
 		args["strip_ansi"] = false
 	}
+	// THE SAME ENCODING APPLIES TO A SEARCH, and it has to: `--grep 以下` against a
+	// GBK transcript compared a UTF-8 pattern with GBK bytes, scanned 282 real lines,
+	// matched none, and answered 200 — indistinguishable from "that string is not
+	// there" (issue #149). The decode happens in the reader, so the pattern and the
+	// text it is matched against are both characters.
+	if v, ok := stmt.Flag("encoding"); ok {
+		args["charset"] = v
+	}
 	// A GREP DOES NOT CONSUME THE TRANSCRIPT: it uses a positional read (from_line 1),
 	// which is stateless and never touches the caller's live cursor. An ordinary read
 	// is a cursor and moves it; a search is a look, and moving the cursor on a look

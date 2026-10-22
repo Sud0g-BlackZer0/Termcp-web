@@ -451,7 +451,7 @@ var ops = []Op{
 
 	{Name: "read", Core: true, Kind: KindFlags, Target: true,
 		Kinds:     []string{"file", "cdp", "mcp", "jrpc"},
-		Flags:     []string{"cursor", "since", "at", "offset", "bytes", "from-line", "tail", "stream", "raw", "grep", "grep-limit", "frame"},
+		Flags:     []string{"cursor", "since", "at", "offset", "bytes", "from-line", "tail", "stream", "raw", "grep", "grep-limit", "frame", "encoding"},
 		Valueless: []string{"raw", "frame"},
 		Usage:     "read <session> <index> [--tail N|--from-line N|--cursor N] [--grep RE]   |   read <session> file <path>   |   read <session> cdp|mcp|jrpc[:N][@target] [--since N] [--grep RE]   |   read <session> cdp:N --at FRAME [--offset BYTES] [--bytes N]",
 		Detail:    readDetail},
@@ -572,6 +572,17 @@ so context is one more call away (from-line 37 tail 10). grep-limit caps the
 matches (default 200) and the reply reports the true total when it truncates.
 --tail and lines_limit then apply to the MATCHES, so tail 5 means the last
 five matching lines.
+
+--encoding NAMES THE SESSION'S CHARSET WHEN IT IS NOT UTF-8, and on a terminal
+that is not a corner case: a zh-CN Windows console writes GBK, so every path and
+every diagnostic arrives as bytes that are not UTF-8. Without the flag the read
+refuses the window (a JSON reply would replace those bytes with U+FFFD and shift
+every offset after them) and names the charset the bytes confirm by round trip.
+With it, the bytes are decoded before anything else looks at them, so --grep
+matches characters rather than byte sequences and a JSON-RPC frame from an
+extension that prints GBK is readable at all. Content-Range still counts the
+bytes in the buffer, so paging by --cursor keeps working: gbk, gb18030, cp936,
+big5, shift_jis, euc-kr, windows-1252.
 
 This is a directive and not a tool parameter on purpose: lines_limit answers "how
 much reply will I get" while a pattern answers "which lines do I want". Folded

@@ -553,6 +553,10 @@ func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
 		// scanTailWindow read as "no line limit" and answered with the ENTIRE
 		// buffer. The smallest possible request produced the largest possible
 		// answer.
+		// THE SESSION'S ENCODING, when the caller knows it. A terminal is not a
+		// UTF-8 device: a zh-CN Windows console writes GBK, and without this the
+		// reply was a refusal the caller could not act on (issue #149).
+		Charset:   getString(args, "charset", ""),
 		TailLines: intPtrFromArgs(args, "tail_lines"),
 		FromLine:  int64(getFloat64(args, "from_line", 0)),
 		Stream:    getString(args, "stream", ""),

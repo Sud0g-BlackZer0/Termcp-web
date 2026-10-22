@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/open-mcp-ai/termcp/internal/ansi"
+	"github.com/open-mcp-ai/termcp/internal/encoding"
 )
 
 // Params is a transcript read request: which bytes to return, how to render
@@ -54,11 +55,35 @@ type Params struct {
 	// there; refusing its window would take the terminal down over output it can
 	// display perfectly well.
 	RequireUTF8 bool
+	// Charset is the encoding the session's bytes are in, for output that is not
+	// UTF-8 at all. Empty means UTF-8.
+	//
+	// A TERMINAL IS NOT A UTF-8 DEVICE: on a Chinese Windows the console code page is
+	// 936, so a shell writes GBK, and refusing that window left the caller with no
+	// way to read its own session (issue #149). Decoding is the answer to that, not
+	// an escape hatch: the bytes are the encoding the caller said they are, so
+	// `--grep` matches characters rather than byte sequences and a JSON-RPC frame
+	// from a GBK extension can be read at all.
+	//
+	// It is per READ rather than per SESSION because the two can disagree — a
+	// profile's shell writes GBK while a tool it launches writes UTF-8 — and because
+	// a caller who knows the encoding should not have to change a profile to say so.
+	Charset string
 }
 
 // render turns this read's bytes into its output string, enforcing the
 // byte-fidelity contract only where the caller asked for it (see RequireUTF8).
 func (p Params) render(raw []byte) (string, error) {
+	if p.Charset != "" {
+		// DECODE FIRST, THEN RENDER, so everything downstream — the UTF-8 refusal,
+		// ANSI stripping, the caller's `--grep` — sees characters. The escape rule is
+		// the same either way; only the meaning of a byte changes.
+		decoded, err := encoding.Decode(p.Charset, raw)
+		if err != nil {
+			return "", errf(ErrInvalid, "%s", err.Error())
+		}
+		raw = decoded
+	}
 	if p.RequireUTF8 {
 		return Render(raw, p.StripAnsi)
 	}
@@ -270,6 +295,14 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		// rendered form and `raw` is what it was rendered from. Checking the RAW
 		// bytes is what makes the refusal honest: a stripped string could pass
 		// utf8.Valid while the stream it came from was binary.
+		if p.Charset != "" {
+			decoded, derr := encoding.Decode(p.Charset, raw)
+			if derr != nil {
+				return Window{}, errf(ErrInvalid, "%s", derr.Error())
+			}
+			raw = decoded
+			out = clean(raw, p.StripAnsi)
+		}
 		if p.RequireUTF8 {
 			if err := RenderCheck(raw); err != nil {
 				return Window{}, err
@@ -312,10 +345,20 @@ func clean(raw []byte, stripAnsi bool) string {
 // window boundaries stay byte-exact.
 func renderInvalidUTF8(raw []byte) error {
 	i := invalidUTF8Index(raw)
+	// NAME THE CHARSET WHEN THE BYTES CONFIRM IT. On a Chinese Windows the console
+	// code page is 936, so this refusal was the normal case rather than an edge one —
+	// and it named two remedies that do not exist on a channel (`mode=hex`,
+	// `mode=file` are file reads), leaving a caller with output it could not read at
+	// all. The round trip in Sniff is what makes "these bytes are GBK" a fact rather
+	// than a guess, and the flag that follows it is one this build answers.
+	hint := "pass --encoding <charset> if the session writes something other than UTF-8, or read a narrower window"
+	if name := encoding.Sniff(raw); name != "" {
+		hint = "these bytes decode as " + name + " and round-trip byte-for-byte; if this session writes " +
+			name + ", pass --encoding " + name
+	}
 	return errf(ErrInvalid, "the window contains bytes that are not valid UTF-8 "+
 		"(first at byte %d of %d); a JSON reply would replace them with U+FFFD and silently "+
-		"shift every offset after them. Read this range byte-wise instead "+
-		"(mode=hex or mode=file) or ask for a narrower window", i, len(raw))
+		"shift every offset after them. %s", i, len(raw), hint)
 }
 
 // Render applies clean and enforces the byte-fidelity contract above.

@@ -775,6 +775,12 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 	if boolFlag(stmt, "raw") {
 		args["strip_ansi"] = false
 	}
+	// THE SESSION'S ENCODING, when the caller knows it. A terminal is not a UTF-8
+	// device: a zh-CN Windows console writes GBK, so without this the reply was a
+	// refusal the caller could not act on (issue #149).
+	if v, ok := stmt.Flag("encoding"); ok {
+		args["charset"] = v
+	}
 	return s.readSlot(ctx, stmt, win, args)
 }
 
