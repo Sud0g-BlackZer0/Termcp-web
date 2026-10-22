@@ -75,6 +75,14 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 	case "reader":
 		return []envelope.Slot{s.directiveReader(ctx, stmt, win)}
 	case "get":
+		if stmt.Kind == "host" {
+			// `get host <name>` reads one entry back. Without it a caller could create,
+			// edit and delete a host but never see what it holds, so a partial edit had
+			// to be done blind.
+			return []envelope.Slot{s.directiveHost(ctx, withFlags(stmt, map[string]string{
+				"action": "get", "name": stmt.Key,
+			}), win)}
+		}
 		if stmt.Kind == "file" {
 			// --op names a SUB-ACTION; the sfTP layer groups those under an action
 			// (perm, link, fs) and dispatches again inside the group. The group is
@@ -1209,6 +1217,13 @@ func (s *Server) openPeer(ctx context.Context, stmt directive.Statement, win ter
 func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
 	switch stmt.Kind {
 	case "host":
+		// A NAME HERE WOULD BE SILENTLY DROPPED: the handler lists every entry, so
+		// `ls host prod` answered the whole table and the caller believed it had been
+		// filtered. One entry is what `get host` is for.
+		if stmt.Key != "" {
+			return []envelope.Slot{badRequest(stmt, "`ls` lists every host; for one entry use `get host "+
+				stmt.Key+"`.")}
+		}
 		return []envelope.Slot{s.directiveHost(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}
 	case "ext":
 		return []envelope.Slot{s.directiveExtension(ctx, withFlags(stmt, map[string]string{"action": "list"}), win)}

@@ -663,9 +663,26 @@ func fileToolForAction(action string) (tool, capID string, ok bool) {
 // directiveHost maps `host` onto the stored connection targets.
 func (s *Server) directiveHost(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
 	action, rest := resolveAction(stmt, "list")
+	if action == "get" {
+		// Reading one entry needs no capability: it is the same information as the
+		// listing, with the secrets redacted.
+		name := strings.TrimSpace(stmt.Key)
+		if name == "" && len(rest) > 0 {
+			name = rest[0]
+		}
+		if name == "" {
+			return badRequest(stmt, "get host needs a name: `get host <name>`")
+		}
+		res, fail := s.callTool(ctx, "ssh_config", map[string]any{"action": "get", "name": name})
+		if fail != nil {
+			return s.slotFromFailure(ctx, stmt, fail)
+		}
+		doc, _ := toolResultMap(res)
+		return generatedSlot(stmt, win, compactDocument(doc))
+	}
 	capID, ok := profileCapability(action)
 	if !ok {
-		return badRequest(stmt, "host needs --action list|create|edit|copy|delete, got "+quoteOrDash(action))
+		return badRequest(stmt, "host needs --action list|get|create|edit|copy|delete, got "+quoteOrDash(action))
 	}
 	if slot, refused := s.refuseAction(ctx, stmt, capID); refused {
 		return slot

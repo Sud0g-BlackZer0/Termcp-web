@@ -399,9 +399,9 @@ var ops = []Op{
 		Usage:     "ls   |   ls host   |   ls ext   |   ls alias   |   ls <session> [forward|file]",
 		Detail:    lsDetail},
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
-		Kinds:  []string{"file"},
+		Kinds:  []string{"file", "host"},
 		Flags:  []string{"op"},
-		Usage:  "get <session|channel>   |   get <session> file <path> [--op stat|realpath|urls|…]",
+		Usage:  "get <session|channel|host-name>   |   get <session> file <path> [--op stat|realpath|urls|…]",
 		Detail: getDetail},
 	{Name: "close", Core: true, Kind: KindFlags, Target: true,
 		// mcp/cdp/jrpc/file are DECLARED SO THEY ARE REFUSED BY NAME. Dropping them
