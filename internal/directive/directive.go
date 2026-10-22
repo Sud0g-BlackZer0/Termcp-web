@@ -631,11 +631,19 @@ shell text through the args argument instead:
   cmd: "run h:1 $1; run h:1 $2; ps"   args: ["make build", "make test"]
 
 A positional value that IS the whole payload reaches the terminal VERBATIM, so
-semicolons, loops, heredocs and quotes are the shell's to read. One that sits
-beside other words (run h:1 echo $1, run h:1 $1 && echo done) is substituted as
-ONE QUOTED WORD, because there the caller named a word rather than the command
-line. When a command needs a prefix or a suffix, put the whole line in one
-argument: args: ["cd /app && make test"].
+semicolons, loops, heredocs and quotes are the shell's to read. "The whole
+payload" includes the forms where the line simply ENDS after it — a trailing
+&, ; or && is the separator that closes this directive, not another word of it,
+so all of these hand the terminal a command line:
+
+  run h:1 $1 &                       backgrounded
+  run h:1 $1 ; ls host               this directive, then another
+  run h:1 $1 && run h:1 $2           two directives with a condition between
+
+One that sits BESIDE other words is substituted as ONE QUOTED WORD, because
+there the caller named a word rather than the command line: run h:1 echo $1,
+run h:1 $1 | wc -l, run h:1 $1 > /tmp/out. When a command needs a prefix or a
+suffix, put the whole line in one argument: args: ["cd /app && make test"].
 
 $0 is refused (args is 1-based), and ${N} is the unambiguous spelling at 10 or
 more. Named values are a different channel: vars substitutes $NAME as one quoted
@@ -1510,7 +1518,14 @@ func payloadSpans(src string) []span {
 		if stmt == nil || stmt.Cmd == nil {
 			continue
 		}
-		out = append(out, statementRawSpans(src, stmt)...)
+		// ONE SPAN PER DIRECTIVE, NOT PER SHELL STATEMENT. `a && b` is one shell
+		// statement holding two directives, so walking file.Stmts alone left the
+		// SECOND operand with no span at all — and a reference outside every span
+		// takes the data rule (one quoted word), which is why `run h:1 $1 && run h:1
+		// $2` quoted `$2` even after the first operand was fixed (issue #141).
+		for _, part := range flattenCond(stmt) {
+			out = append(out, statementRawSpans(src, part.stmt)...)
+		}
 	}
 	return out
 }
@@ -1621,9 +1636,58 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 	}
 	return append(out, span{
 		start: int(rest[i].Pos().Offset()),
-		end:   bodyEnd,
+		end:   payloadEndFor(src, stmt, bodyEnd),
 		mode:  op.payloadSpanMode(),
 	})
+}
+
+// payloadEndFor is where a statement's payload region stops.
+//
+// THE SHELL AST AND THE DIRECTIVE GRAMMAR DISAGREE ABOUT `&&`, and the payload
+// region has to follow the directive grammar. `run h:1 $1 && run h:1 $2` is ONE
+// shell statement (a BinaryCmd) but TWO directives, so the payload span computed
+// from the shell AST covered `$1 && run h:1 $2` — which made `$1` "a word inside a
+// line the caller wrote" and quoted it into a single shell word. The terminal then
+// received `'echo A'` and answered "command not found: echo A", while the reply said
+// 200 (issues #141, #155).
+//
+// So the region stops at the first top-level `&&`/`||`, which is exactly where the
+// directive split happens. A trailing space is harmless: admits() asks what the rest
+// of the span HOLDS, not how long it is.
+func payloadEndFor(src string, stmt *syntax.Stmt, bodyEnd int) int {
+	if op := firstCondOperator(stmt.Cmd); op >= 0 && op < bodyEnd {
+		return op
+	}
+	return bodyEnd
+}
+
+// firstCondOperator is the offset of the earliest top-level `&&` or `||` in cmd, or
+// -1 when there is none.
+//
+// It walks the LEFT SPINE because that is how the shell parser nests a chain:
+// `a && b && c` is BinaryCmd{X: BinaryCmd{X: a, Y: b}, Y: c}, so the outermost
+// operator is the LAST one in the line and the first is the deepest.
+func firstCondOperator(cmd syntax.Command) int {
+	b, ok := cmd.(*syntax.BinaryCmd)
+	if !ok {
+		return -1
+	}
+	// `&&` AND `||` ONLY — those are the operators the directive grammar also treats
+	// as statement boundaries, so they are the only ones where the payload region of
+	// one directive ends. A `|` is still inside a payload: `run h:1 $1 | wc -l` is one
+	// directive whose payload is a pipeline, and the reference sits beside other words
+	// there, which is the case the quoting rule is for.
+	switch b.Op {
+	case syntax.AndStmt, syntax.OrStmt:
+	default:
+		return -1
+	}
+	if b.X != nil {
+		if inner := firstCondOperator(b.X.Cmd); inner >= 0 {
+			return inner
+		}
+	}
+	return int(b.OpPos.Offset())
 }
 
 // mustLiteralWord is literalWord for the span pass, which is allowed to give up.

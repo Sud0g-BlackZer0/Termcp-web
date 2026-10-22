@@ -101,9 +101,15 @@ func TestNamedValueIsTheDataChannel(t *testing.T) {
 
 // TestPositionalOutsideWholePayloadIsQuoted pins where the raw channel stops.
 //
-// `run h:1 echo $1` and `run h:1 $1 && echo done` both put the reference beside other
-// words, so the caller is naming a WORD in a command line, not the command line. Raw
-// splicing there would let args=["make test"] turn one command into two.
+// `run h:1 echo $1` puts the reference beside other words, so the caller is naming a
+// WORD in a command line, not the command line; raw splicing there would let
+// args=["make test"] turn one command into two.
+//
+// `run h:1 $1 && notify done` is the OTHER case and used to be lumped in with it
+// (issues #141, #155). The `&&` is a directive boundary, so `$1` IS the whole payload
+// of its own statement: nothing follows it inside that directive. Quoting it there
+// made the terminal run `'make test'` as one program name — the value arrived, the
+// reply said 200, and the command had silently stopped being a command line.
 func TestPositionalOutsideWholePayloadIsQuoted(t *testing.T) {
 	cases := []struct {
 		name string
@@ -113,10 +119,11 @@ func TestPositionalOutsideWholePayloadIsQuoted(t *testing.T) {
 	}{
 		{"as an argument", `run h:1 echo $1`, "a; b", "echo 'a; b'"},
 		{"inside double quotes", `run h:1 echo "$1"`, "a; b", `echo "a; b"`},
-		// `&&` no longer sits inside the payload: it connects two directives, so the
-		// reference before it is still "a word in a line the caller wrote" and is
-		// quoted. The operator itself moves to the NEXT statement's Cond.
-		{"beside an operator", `run h:1 $1 && notify done`, "make test", "'make test'"},
+		// A CONDITIONAL IS A DIRECTIVE BOUNDARY, so the reference before it is the
+		// whole payload of its statement — not a word beside an operator. This is the
+		// form a caller writes constantly (`make build && make test` as one arg), and
+		// quoting it is what turned a command line into a program name.
+		{"before a conditional", `run h:1 $1 && notify done`, "make test", "make test"},
 		{"as a flag value", `write s file /tmp/x --data $1`, "l1\nl2", ""},
 	}
 	for _, tc := range cases {
@@ -320,17 +327,26 @@ func TestRestValueFlagTakesPerWordRaw(t *testing.T) {
 }
 
 // TestPerWordRawDoesNotLoosenRun pins that the argv rule did not leak into the
-// payload rule: a positional beside an operator is still one quoted word.
+// payload rule, while keeping the one case where a positional IS the payload.
 //
-// The operator is a directive boundary now, so what this asserts is narrower and
-// more important than it used to be: the value stays a WORD, and the `&&` that
-// follows it starts a new statement rather than being glued onto the payload.
+// `$1` alone before a `&&` is the whole payload of the first directive, so it goes
+// in raw (issues #141, #155). What must NOT happen is the argv rule — where every
+// whole word may be a reference — leaking into a command line: `echo $1` still
+// quotes, because there the caller named a word.
 func TestPerWordRawDoesNotLoosenRun(t *testing.T) {
 	f, err := ParseWithSubst(`run h:1 $1 && notify done`, Subst{Pos: []string{"make test"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := f.Statements[0].Payload, "'make test'"; got != want {
+	if got, want := f.Statements[0].Payload, "make test"; got != want {
+		t.Errorf("payload = %q, want %q", got, want)
+	}
+	// The narrowing that matters: a reference BESIDE other words is still quoted.
+	beside, err := ParseWithSubst(`run h:1 echo $1`, Subst{Pos: []string{"make test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := beside.Statements[0].Payload, "echo 'make test'"; got != want {
 		t.Errorf("payload = %q, want %q", got, want)
 	}
 	if len(f.Statements) != 2 || f.Statements[1].Cond != "&&" {
