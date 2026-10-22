@@ -1,10 +1,6 @@
 package directive
 
 import (
-	"os"
-	"path/filepath"
-	"regexp"
-	"strings"
 	"testing"
 )
 
@@ -52,54 +48,24 @@ func TestNoSpecDriftBetweenDirectivesAndSkill(t *testing.T) {
 		t.Errorf("Ops() has %d directives, want %d: %v", len(declared), len(want), declared)
 	}
 
-	// Read SKILL.md if present (it lives in a sibling repo in dev).
-	skillPath := filepath.Join("..", "..", "..", "termcp-skills", "SKILL.md")
-	data, err := os.ReadFile(skillPath)
-	if err != nil {
-		t.Logf("sibling SKILL.md not found at %s (skipping external doc check): %v", skillPath, err)
-		return
-	}
-	content := string(data)
-
-	// Directives taught in bold backticks: `run <handle> ...`, `file <session> ...`
-	re := regexp.MustCompile("`([a-z]+)[ >`]")
-	matches := re.FindAllStringSubmatch(content, -1)
-
-	// Known non-directive words that appear in backticks in the doc.
-	ignoredWords := map[string]bool{
-		"term": true, "cmd": true, "handle": true, "session": true, "index": true,
-		"text": true, "hex": true, "file": true, "enter": true, "tab": true,
-		"esc": true, "up": true, "down": true, "left": true, "right": true,
-		"ctrl": true, "backspace": true, "delete": true, "home": true, "end": true,
-		"download_url": true, "upload_url": true, "bytes": true, "post": true,
-		"on_bytes_overflow": true, "lines_limit": true, "bytes_limit": true,
-		"timeout": true, "sh": true, "bash": true,
-	}
-
-	for _, m := range matches {
-		word := m[1]
-		if ignoredWords[word] {
-			continue
-		}
-		// If it looks like a directive name, it MUST be declared.
-		if _, ok := declared[word]; !ok {
-			// Specific known false positives can be filtered, but `watch` must FAIL.
-			if word == "watch" {
-				t.Errorf("SKILL.md teaches `watch`, but watch was deleted from the directive table")
-			}
-		}
-	}
-
-	// Deleted directives must NOT appear anywhere in SKILL.md.
-	deletedDirectives := []string{
-		"watch",
-		"shell_output",
-		"shell_input",
-	}
-	for _, del := range deletedDirectives {
-		// A whole word occurrence in backticks: `watch` or `watch `
-		if strings.Contains(content, "`"+del+"`") || strings.Contains(content, "`"+del+" ") {
-			t.Errorf("SKILL.md teaches deleted directive %q", del)
-		}
-	}
+	// THE DOC DRIFT CHECK THAT USED TO LIVE HERE IS GONE, ON PURPOSE.
+	//
+	// It read ../../../termcp-skills/SKILL.md — a file in ANOTHER REPOSITORY — and
+	// failed if that file taught a directive this one had deleted. Two things were
+	// wrong with it, and only one is about paths:
+	//
+	//  1. A test in this repo must not depend on what happens to be checked out next
+	//     to it. The result was environment-dependent by construction: skipped in CI
+	//     (the sibling is not there), red on a developer machine whose sibling was
+	//     behind. A failure that says "your other clone is stale" is not a fact about
+	//     this code, and a suite that reports it is a suite people learn to ignore.
+	//
+	//  2. Its deleted-directives list was factually wrong. It named shell_input, which
+	//     was never deleted: it is the tool `input`, `run` and the mcp door all call,
+	//     and it is still a capability scope. So the check could only ever fail for a
+	//     correct document.
+	//
+	// What remains is what belongs here: every directive is documented, and the verb
+	// set is pinned by name. Document drift against an external skill belongs in that
+	// skill's own repository, where it can be checked against the version it targets.
 }
