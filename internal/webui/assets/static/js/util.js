@@ -695,6 +695,21 @@ function bringShellWindowToFront(win) {
     return;
   }
 
+  /* A WINDOW IS CHECKED FOR BEING OFF-SCREEN WHEN IT GAINS FOCUS.
+   *
+   * The clamp exists, but until now it only ran on drag release, so anything else
+   * that moved the container out from under a window left it there: shrink the
+   * browser and a window placed at 1400px sits entirely past the right edge at
+   * 900px, with no header left to grab. Clicking its tab is the moment the reader
+   * asks for it, so that is the moment to bring it back — every activation path
+   * already funnels through here (tab bar, session tile, extension card, restore,
+   * duplicate, drag start), which is why the check belongs at this point and not
+   * in a resize listener that would move windows the reader never touched.
+   *
+   * Full-screen and tiled windows are excluded by the returns above: their
+   * geometry is the stylesheet's, and an inline left/top would override it. */
+  if (typeof clampShellWindowIntoContainer === 'function') clampShellWindowIntoContainer(win);
+
   var band = shellZBand();
   if (!window._shellZSeq || window._shellZSeq < band.low || window._shellZSeq >= band.high) {
     /* Renumber from the bottom of the band, in the order the windows currently

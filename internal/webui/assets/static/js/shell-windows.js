@@ -1242,7 +1242,18 @@ function clampShellWindowIntoContainer(win) {
   var box = host.getBoundingClientRect();
   var areaW = host.clientWidth || box.width;
   var areaH = host.clientHeight || box.height;
+  /* A container with no area cannot say where "inside" is. Measured mid-resize it
+     can report 0, and every clamp below would then resolve to the container's own
+     origin — moving the window for a reason that does not exist. */
+  if (!areaW || !areaH) return;
   var r = win.getBoundingClientRect();
+  /* NO LAYOUT BOX, NOTHING TO CLAMP. A hidden, minimized, or not-yet-placed window
+     measures 0x0 at 0,0, and clamping that rect would set left/top to the
+     container's top-left corner: the window would come back from the tab bar at
+     the corner instead of where the reader left it. This is reachable now that the
+     clamp also runs on focus (see bringShellWindowToFront), which is a path a
+     hidden window can take. */
+  if (!r.width || !r.height) return;
   /* The leading edge is the container's own top, or the header's lower edge when
      that is further down; the trailing edge still counts from the container. */
   var floor = Math.max(box.top, appHeaderBottom());
