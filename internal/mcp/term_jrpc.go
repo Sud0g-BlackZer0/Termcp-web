@@ -455,15 +455,6 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 					"nothing to wait for; a peer that pushes on its own needs a socket (cdp open ws://…)."}
 		}
 		return envelope.Slot{Code: 204, Headers: headers, Body: "no frame within the window"}
-	case "tools":
-		// MCP only: it is the one door whose peer has a tool list. On the others
-		// the subcommand is a lie, and a lie that returns an error frame is worse
-		// than a sentence.
-		if h.kind != "mcp" {
-			return badRequest(stmt, "`"+op+" tools` is MCP's tool list; use `"+op+` call `+handle+` '{"method":"…"}'`+"` instead")
-		}
-		frame := map[string]any{"jsonrpc": "2.0", "method": "tools/list"}
-		return s.jrpcCall(ctx, stmt, h, frame)
 	case "call", "send":
 		frame, bad := parseJRPCFrame(stmt, rest[1:])
 		if bad != nil {
@@ -488,11 +479,15 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		}
 		return s.frameReply(ctx, stmt, h, reply)
 	}
-	return badRequest(stmt, "unknown "+op+" subcommand: "+sub)
+	// NO FALLBACK: the subcommand is not the caller's word here. The verbs that reach
+	// this function (call, write --send, read --frame, close) each name the one
+	// subcommand they mean, so an unrecognised one is a bug in this file rather than
+	// something a caller typed, and answering it with a sentence would hide that.
+	return envelope.Slot{Code: 500, Headers: map[string]string{
+		"Path": stmt.Path, "Error-Code": CodeOperationFailed,
+	}, Body: "internal: no handler for " + op + " " + sub}
 }
 
-// recvContext bounds the wait for a pushed frame by the call's timeout, so recv
-// obeys the same window parameter as every other directive.
 // recvContext bounds the wait for a pushed frame by the call's timeout, so recv
 // obeys the same window parameter as every other directive, and hands back the
 // cancel for the caller to release once the wait is over.
@@ -504,19 +499,6 @@ func recvContext(ctx context.Context, win termArgs) (context.Context, context.Ca
 		return context.WithDeadline(ctx, time.Now())
 	}
 	return context.WithTimeout(ctx, time.Duration(wait*float64(time.Second)))
-}
-
-// jrpcCall sends one frame and returns its answer, rendered the way every frame is
-// rendered (escapes decoded, oversized payloads turned into receipts).
-func (s *Server) jrpcCall(ctx context.Context, stmt directive.Statement, h *jrpcHandle, frame map[string]any) envelope.Slot {
-	if err := s.jrpcReady(ctx, h); err != nil {
-		return jrpcError(stmt, err)
-	}
-	reply, err := h.ch.Call(ctx, frame)
-	if err != nil {
-		return jrpcError(stmt, err)
-	}
-	return s.frameReply(ctx, stmt, h, reply)
 }
 
 // jrpcReady runs the MCP handshake once, before the first frame that is not the
