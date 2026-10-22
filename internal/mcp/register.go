@@ -30,6 +30,12 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 	if sessMgr != nil && forwardMgr != nil {
 		sessMgr.AddOnDeadHook(forwardMgr.CloseBySession)
 	}
+	// A peer (mcp/cdp/jrpc) tunnels through the session's SSH channel, so a DEAD
+	// session leaves it a socket to nowhere that still holds its frame ring. Same
+	// cascade as forwards, for the same reason.
+	if sessMgr != nil {
+		sessMgr.AddOnDeadHook(closePeersBySession)
+	}
 	s := &Server{
 		sessMgr:     sessMgr,
 		msgMgr:      msgMgr,

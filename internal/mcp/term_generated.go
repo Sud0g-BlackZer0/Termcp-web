@@ -256,7 +256,8 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 	// reads like "the terminate broke" rather than "there is nothing by that name".
 	// Every other close path answers 404 for an unknown target (rm, fwd close,
 	// profile delete); this one has to agree.
-	if _, bad := s.requireSession(stmt.Target); bad != nil {
+	sess, bad := s.requireSession(stmt.Target)
+	if bad != nil {
 		return s.slotFromFailure(ctx, stmt, failureFromResult(bad))
 	}
 	if boolFlag(stmt, "force") {
@@ -273,6 +274,14 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 	// this function exists to stop telling.
 	if _, fail := s.callTool(ctx, "session_terminate", args); fail != nil {
 		return s.slotFromFailure(ctx, stmt, fail)
+	}
+	// A SESSION'S PEERS GO WITH IT, for the same reason its channels' cursors do: the
+	// transport they talk through is this session's SSH channel, so a peer that outlives
+	// it is a socket to nowhere that still holds its frame ring. Doing it HERE rather
+	// than only on the DEAD hook is deliberate — a graceful close is not a dead
+	// transition, and this function already releases what it releases by name.
+	if sess != nil {
+		closePeersBySession(sess.Info().ID)
 	}
 	return noContent(stmt)
 }

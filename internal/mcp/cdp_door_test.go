@@ -100,3 +100,30 @@ func TestFrameBelongsToReadsTheSessionTag(t *testing.T) {
 		}
 	}
 }
+
+// TestCdpOpenReplyTeachesTheFlagThatWorks pins the one instruction the open reply gives.
+//
+// It said `open <handle> target <targetId>` — no dashes — so a caller following the
+// hint verbatim had `target` parsed as the URL and got a discovery error about "1".
+// The hint was wrong in the same reply that explains why the next call needs a target,
+// which is the worst place for it to be wrong.
+func TestCdpOpenReplyTeachesTheFlagThatWorks(t *testing.T) {
+	src := readPackageSource(t)
+
+	// The attach step must be taught with its dashes; without them the parser reads the
+	// word as the URL to open.
+	if !strings.Contains(src, "--target <targetId>") {
+		t.Errorf("no reply teaches `--target <targetId>`; the attach step is unlearnable from a reply")
+	}
+	// The bare spelling is what shipped. Match it only where it follows a space and a
+	// backtick-less context, so `--target <targetId>` does not trip it.
+	if strings.Contains(src, " target <targetId>") && !strings.Contains(src, "--target <targetId>") {
+		t.Errorf("a reply teaches `target <targetId>` without the dashes, which the parser reads as a URL")
+	}
+	for _, line := range strings.Split(src, "\n") {
+		idx := strings.Index(line, " target <targetId>")
+		if idx > 0 && line[idx-1] != '-' && line[idx-2] != '-' {
+			t.Errorf("a reply teaches the bare `target <targetId>`:\n%s", strings.TrimSpace(line))
+		}
+	}
+}

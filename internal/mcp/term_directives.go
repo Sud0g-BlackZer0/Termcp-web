@@ -1412,6 +1412,40 @@ func pageAddress(h *jrpcHandle, target string) string {
 	return peerAddress(h.sessionID, h.kind, h.index) + "@" + target
 }
 
+// closePeersBySession releases every peer that tunnels through sessionID.
+//
+// A PEER'S TRANSPORT IS THE SESSION'S SSH CHANNEL, so when the session goes dead the
+// peer is a socket to nowhere: no frame can ever arrive again, but the handle stays
+// addressable and keeps its frame ring — up to 2048 frames or 8 MiB each — for the
+// life of the process. Forwards already cascade this way (forwardMgr.CloseBySession);
+// peers did not, and the two views disagreed: `ls cdp` hid the dead peer while
+// `read <handle>` still answered from it.
+//
+// Closing outside the lock matters: ch.Close() talks to the transport, and a dead
+// transport is exactly the case that can block.
+func closePeersBySession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	jrpcChannelsMu.Lock()
+	var doomed []*jrpcHandle
+	for key, h := range jrpcChannels {
+		if h.sessionID == sessionID {
+			doomed = append(doomed, h)
+			delete(jrpcChannels, key)
+		}
+	}
+	jrpcChannelsMu.Unlock()
+	for _, h := range doomed {
+		// A handle without a channel is one that failed before it was usable. This runs
+		// on the session-death path, where a nil dereference would take the process down
+		// with the session it was cleaning up after.
+		if h.ch != nil {
+			_ = h.ch.Close()
+		}
+	}
+}
+
 // closePeer ends a peer and forgets it.
 func (s *Server) closePeer(stmt directive.Statement, h *jrpcHandle) envelope.Slot {
 	jrpcChannelsMu.Lock()

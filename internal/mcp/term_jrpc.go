@@ -231,8 +231,12 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 		// sessionId, and a caller that does not know that writes Page.navigate at the
 		// browser process, reads a frameId, and concludes the browser is broken. So
 		// the open reply says which call to make next, and how to find its argument.
+		// The flag is `--target`. Without the dashes this line reads as a positional
+		// sub-command, which the parser tries as a URL and rejects with a discovery
+		// error about "1" — the one instruction this reply gives was wrong, and it was
+		// wrong in the same reply that explains why the next call matters.
 		body += "\nNext: `ls " + handle + "` lists the tabs. Attach one with `open " + handle +
-			" target <targetId>`, then call through the handle it returns.\n"
+			" --target <targetId>`, then call through the handle it returns.\n"
 		body += "Events are kept: record the number from `get " + handle + "`, act, then `read " + handle + " --since <n>`.\n"
 	}
 	if op == "mcp" {
