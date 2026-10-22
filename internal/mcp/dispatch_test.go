@@ -345,3 +345,34 @@ func freePort(t *testing.T) int {
 	}
 	return port
 }
+
+// TestRepliesDoNotNameADeletedDirective pins that the advice in a reply is advice that
+// can be followed.
+//
+// Twice now a user-facing message kept naming a directive this branch deleted:
+// `mcp tools <handle>` after a failed MCP handshake, and `mcp recv <handle>` after a
+// frame was sent to a stdio peer. Neither breaks a test — the reply is well formed and
+// the handle is right — and both send the caller to "unknown directive", which reads
+// like the capability is missing rather than like the sentence is stale.
+//
+// The check is on the words a caller would type, not on comments: every directive name
+// the reply suggests must still resolve.
+func TestRepliesDoNotNameADeletedDirective(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "cat")
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
+
+	replies := map[string]string{
+		// A frame sent to a stdio peer: the reply says how to read the answer.
+		"call": termText(t, s, map[string]any{"cmd": `call ` + h + ` {"jsonrpc":"2.0","id":1,"method":"ping"}`}),
+		// A peer that cannot be reached: the reply explains what failed.
+		"open mcp": termText(t, s, map[string]any{"cmd": "open " + strings.SplitN(h, ":", 2)[0] + " mcp http://127.0.0.1:9/mcp"}),
+	}
+	for what, body := range replies {
+		for _, deleted := range []string{"mcp recv", "mcp send", "mcp tools", "mcp call", "mcp close"} {
+			if strings.Contains(body, deleted) {
+				t.Errorf("%s: the reply tells the caller to run %q, which no longer exists:\n%s", what, deleted, body)
+			}
+		}
+	}
+}

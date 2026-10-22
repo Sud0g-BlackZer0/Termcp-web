@@ -65,7 +65,12 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 		if _, fail := s.callTool(ctx, "shell_key", argsOf("shell_id", handle, "key", "enter")); fail != nil {
 			return s.slotFromFailure(ctx, stmt, fail)
 		}
-		return envelope.Slot{Code: 202, Headers: headers, Body: "sent; read the reply with `mcp recv " + handle + "`"}
+		// THE HINT NAMES THE VERB THAT EXISTS. `mcp recv` was a directive of its own until
+		// the surface became verbs over a tree; the reply kept telling callers to run it,
+		// so the one instruction this message gives would have answered "unknown
+		// directive". Frames are read with `--frame`, because a plain `read` of a channel
+		// is bytes — which is what a command's output usually is.
+		return envelope.Slot{Code: 202, Headers: headers, Body: "sent; read the reply with `read " + handle + " --frame`"}
 	case "recv":
 		return s.mcpRecvFrame(ctx, stmt, handle)
 	case "close":
