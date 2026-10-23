@@ -128,6 +128,12 @@ var I18N_CATALOG = {
     'common.download': 'Download',
     'common.upload': 'Upload',
     'common.loading': 'Loading...',
+    /* Upload progress lives on the button itself (#157): a transfer that shows
+       nothing is indistinguishable from a dead one. */
+    'file.upload.progress': 'Uploading {pct}%',
+    'file.upload.network': 'the connection failed',
+    'file.upload.aborted': 'the transfer was cancelled',
+    'toast.upload.failed': 'Upload failed: {msg}',
     'common.copyUrl': 'Copy URL',
 
     /* --- leaving the page --- */
@@ -591,6 +597,10 @@ var I18N_CATALOG = {
     'common.download': '下载',
     'common.upload': '上传',
     'common.loading': '加载中…',
+    'file.upload.progress': '上传中 {pct}%',
+    'file.upload.network': '连接失败',
+    'file.upload.aborted': '传输已取消',
+    'toast.upload.failed': '上传失败：{msg}',
     'common.copyUrl': '复制 URL',
 
     /* --- leaving the page --- */
@@ -1054,6 +1064,10 @@ var I18N_CATALOG = {
     'common.download': '下載',
     'common.upload': '上傳',
     'common.loading': '載入中…',
+    'file.upload.progress': '上傳中 {pct}%',
+    'file.upload.network': '連線失敗',
+    'file.upload.aborted': '傳輸已取消',
+    'toast.upload.failed': '上傳失敗：{msg}',
     'common.copyUrl': '複製 URL',
 
     /* --- leaving the page --- */

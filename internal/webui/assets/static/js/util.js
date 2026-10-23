@@ -181,6 +181,22 @@ function splitCommandLine(line) {
   return out;
 }
 
+/**
+ * The message a failed upload should show.
+ *
+ * The upload endpoint answers errors as JSON ({"error":"..."}), and a proxy or a
+ * dead connection answers with something else entirely — HTML, an empty body, or
+ * nothing at all. Parsing is attempted, never assumed: a toast that says
+ * "undefined" is worse than one that says "500".
+ */
+function uploadErrorText(xhr) {
+  try {
+    var doc = JSON.parse(xhr.responseText || '');
+    if (doc && doc.error) return String(doc.error);
+  } catch (e) { /* not JSON; fall through to the status */ }
+  return String(xhr.status) + (xhr.statusText ? ' ' + xhr.statusText : '');
+}
+
 function showCopyToast(msg) {
   msg = msg || t('toast.copied');
   var el = document.getElementById('ui-copy-toast');

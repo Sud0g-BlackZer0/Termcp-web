@@ -358,15 +358,66 @@ function _initShellWindowUI(win, connLabel, sessionId) {
   });
   if (filePathInput) filePathInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') shellFileBrowse(); });
   if (win.querySelector('.shell-file-upload-btn') && fileUploadInput) {
-    win.querySelector('.shell-file-upload-btn').addEventListener('click', function() { fileUploadInput.click(); });
+    var uploadBtn = win.querySelector('.shell-file-upload-btn');
+    /* THE ORIGINAL ICON IS KEPT, NOT RECONSTRUCTED. While a transfer runs the button
+       shows the percentage instead, and the way back has to be byte-identical to what
+       the template shipped: rebuilding an inline SVG here would drift from
+       terminal-templates.js the first time that markup changed. */
+    var uploadIcon = uploadBtn.innerHTML;
+    var uploadTitle = uploadBtn.getAttribute('title');
+
+    /* A VISIBLE TRANSFER STATE, because the alternative is what #157 reported: a
+       button that looks identical whether the upload is running, finished or dead.
+       The button is also disabled for the duration — a second click used to fire a
+       second POST at the same path, and two writers to one SFTP file is not a
+       progress indicator problem. */
+    function uploadState(pct) {
+      if (pct === null) {
+        uploadBtn.innerHTML = uploadIcon;
+        uploadBtn.disabled = false;
+        uploadBtn.style.cursor = 'pointer';
+        uploadBtn.setAttribute('title', uploadTitle);
+        return;
+      }
+      uploadBtn.disabled = true;
+      uploadBtn.style.cursor = 'progress';
+      uploadBtn.textContent = pct + '%';
+      uploadBtn.setAttribute('title', t('file.upload.progress', { pct: pct }));
+    }
+
+    uploadBtn.addEventListener('click', function() { fileUploadInput.click(); });
     fileUploadInput.addEventListener('change', function() {
       var file = this.files && this.files[0];
       if (!file) return;
+      /* CLEARED BEFORE THE SEND: picking the same file twice in a row fires no
+         change event unless the input is emptied, which reads as "the button
+         stopped working". */
+      this.value = '';
       var path = (filePathInput.value.trim().replace(/\/+$/, '') || '') + '/' + file.name;
-      fetch(apiPath('/api/sessions/') + encodeURIComponent(sessionId) + '/files/upload?path=' + encodeURIComponent(path), {method:'POST',body:file})
-        .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-        .then(function() { shellFileBrowse(); })
-        .catch(function(e) { console.error(e); });
+      var url = apiPath('/api/sessions/') + encodeURIComponent(sessionId) + '/files/upload?path=' + encodeURIComponent(path);
+
+      /* XHR, NOT fetch, and only for the progress events: `xhr.upload.onprogress`
+         is the one API that reports how many bytes have actually left the browser.
+         fetch's request-body stream would need duplex half-close, which is not
+         available in every browser this UI runs in. */
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable && e.total > 0) uploadState(Math.round(e.loaded / e.total * 100));
+        else uploadState(0);
+      };
+      xhr.onload = function() {
+        uploadState(null);
+        if (xhr.status >= 200 && xhr.status < 300) { shellFileBrowse(); return; }
+        /* A FAILED UPLOAD IS THE CASE THAT MUST NOT BE SILENT: the file list simply
+           not refreshing is indistinguishable from a slow transfer, and the caller
+           has no way to learn that the bytes never landed. */
+        showCopyToast(t('toast.upload.failed', { msg: uploadErrorText(xhr) }));
+      };
+      xhr.onerror = function() { uploadState(null); showCopyToast(t('toast.upload.failed', { msg: t('file.upload.network') })); };
+      xhr.onabort = function() { uploadState(null); showCopyToast(t('toast.upload.failed', { msg: t('file.upload.aborted') })); };
+      uploadState(0);
+      xhr.send(file);
     });
   }
 
