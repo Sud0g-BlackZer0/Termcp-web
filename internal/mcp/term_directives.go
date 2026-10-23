@@ -526,6 +526,31 @@ func noContent(stmt directive.Statement) envelope.Slot {
 	return envelope.Slot{Code: 204, Headers: map[string]string{"Path": stmt.Path}}
 }
 
+// closedSlot answers a close with the object it closed, in a header.
+//
+// A CLOSE IS THE LAST THING A CALLER DOES WITH AN OBJECT, AND IT WAS THE ONLY REPLY
+// THAT SAID NOTHING. `close <session>` answered 204 with an empty body, so the caller
+// could not tell "closed the session I named" from "closed something, somewhere" — the
+// reported reaction was to run `ls` and see what was missing, a call spent confirming
+// instead of advancing, on the step where a wrong answer is most expensive.
+//
+// The code stays 204: there is no content to return, and the REST entrance drops a body
+// on 204, so a sentence there would reach MCP only. A header is carried by both.
+//
+// The NAME rides along when the object has one, because that is how the caller thinks
+// of it: they wrote `--name explore` and the reply should say "explore", not only the
+// uuid they copied out of a receipt three calls ago.
+func closedSlot(stmt directive.Statement, address, name string) envelope.Slot {
+	closed := address
+	if strings.TrimSpace(name) != "" {
+		closed += " (" + name + ")"
+	}
+	return envelope.Slot{Code: 204, Headers: map[string]string{
+		"Path":   stmt.Path,
+		"Closed": closed,
+	}}
+}
+
 // badRequest returns a 400 slot for an invalid argument or missing parameter.
 func badRequest(stmt directive.Statement, body string) envelope.Slot {
 	return envelope.Slot{

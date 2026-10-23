@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`close` 会说自己关掉了什么**。它以前是整套接口里唯一什么都不说的回复：204 + 空正文，于是「关掉了我点名的那个会话」和「关掉了某处的某个东西」看起来完全一样——狗粮 agent 的反应是再跑一次 `ls` 看少了谁，一次调用花在确认而不是推进上，而且发生在对一个对象做的最后一件事。状态码仍是 204（本来就没有内容可回，且 REST 入口会吞掉 204 的 body），确认改用 `Closed` 头，两个入口都带得上，并且按调用方认识它的方式命名：`<id>（名字）`——他写的是 `--name explore`，回复不该只回一串三次调用前抄下来的 uuid。
+
 - **`$1` 写进文件路径时不再泄漏成占位符**。`write <session> file $1 --local-path go.mod` 会把文件写到字面名为 `__termcp_0__` 的路径，并回 202「accepted」、回执里就写着这个名字。没人拒绝它——路径本来就允许是任何东西，调用方是去它指定的位置找不到文件、再 `find /` 才发现的。替换表的展开漏了 `Statement.Key` 一个字段；**每个带子资源 key 的动词都有同一个洞**（file/forward/host/ext/alias/task/peer 地址），所以修在共享函数一行里，而不是每个调用点各加一个守卫。回归测试按字段遍历 Statement 而不是列出「该填的字段」——这个 bug 的形态就是「清单里少了一项」，照同一份清单写的测试会一起漏掉。
 
   - `ls host` 的本地条目现在连 shell 一起报（`local windows powershell.exe`），不再只给 OS：第二个狗粮 agent 因此把 `ls -la` 打进了 PowerShell，而 PATH 里的 `uname` 回 `MINGW64_NT` 还替它确认了错的猜测。本地会话用哪个 shell 只有服务端知道（pwsh/powershell/cmd 取决于 PATH）。

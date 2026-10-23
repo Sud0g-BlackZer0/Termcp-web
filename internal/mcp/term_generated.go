@@ -301,6 +301,15 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 		if _, bad := s.requireShell(stmt.Target); bad != nil {
 			return s.slotFromFailure(ctx, stmt, failureFromResult(bad))
 		}
+		// The channel's own name, when the caller gave it one with --name: a bare `:1`
+		// says which slot closed and nothing about what was in it. Read BEFORE the
+		// archive, because a shell that has just been archived is exactly the thing
+		// this handle may no longer resolve — and a close must not turn its own
+		// confirmation into a 404.
+		name := ""
+		if sh, bad := s.requireShell(stmt.Target); bad == nil && sh != nil {
+			name = sh.Info().Name
+		}
 		// ARCHIVE, NOT ERASE. shell_close deletes the shell's metadata, which leaves
 		// the transcript on disk with nothing that addresses it: the caller reads 404
 		// afterwards and cannot tell a closed channel from one that never existed.
@@ -313,7 +322,7 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 		// the channel: handles are minted monotonically, so nothing ever reclaims the
 		// entry and a long-lived instance grows one per channel it ever opened.
 		s.dropRecvCursor(stmt.Target)
-		return noContent(stmt)
+		return closedSlot(stmt, stmt.Target, name)
 	}
 
 	// A bare session id, or a locator naming one: terminate the container.
@@ -349,8 +358,9 @@ func (s *Server) directiveClose(ctx context.Context, stmt directive.Statement, w
 	// transition, and this function already releases what it releases by name.
 	if sess != nil {
 		closePeersBySession(sess.Info().ID)
+		return closedSlot(stmt, sess.Info().ID, sess.Info().Name)
 	}
-	return noContent(stmt)
+	return closedSlot(stmt, stmt.Target, "")
 }
 
 // directiveRemove deletes a session and its logs.
