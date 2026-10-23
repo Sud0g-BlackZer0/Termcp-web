@@ -134,7 +134,7 @@ func TestTermHelp(t *testing.T) {
 	if _, rest, ok := strings.Cut(single, "\n\n"); ok {
 		body = rest // skip the envelope: status line and headers
 	}
-	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <session> <index> <line>") {
+	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <channel> <line>") {
 		t.Errorf("the body does not open with the usage template:\n%s", single)
 	}
 }

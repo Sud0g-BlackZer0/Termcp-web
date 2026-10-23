@@ -67,7 +67,7 @@ func (s *Server) handleFileRead(ctx context.Context, request mcpgo.CallToolReque
 			"bytes_total": getFloat64(args, "length", 0),
 			"remote_path": remotePath,
 			"local_path":  localPath,
-			"next":        "get task " + t.ID() + "   (add --timeout N to wait for it)",
+			"next":        "get task " + t.ID() + "   (give the call a `timeout` and it waits)",
 		}), nil
 	}
 
@@ -149,7 +149,7 @@ func (s *Server) handleFileWrite(ctx context.Context, request mcpgo.CallToolRequ
 		"bytes_total": getFloat64(args, "length", 0),
 		"remote_path": remotePath,
 		"local_path":  localPath,
-		"next":        "get task " + t.ID() + "   (add --timeout N to wait for it)",
+		"next":        "get task " + t.ID() + "   (give the call a `timeout` and it waits)",
 	}), nil
 }
 

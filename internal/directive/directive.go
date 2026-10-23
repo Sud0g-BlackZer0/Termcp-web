@@ -432,17 +432,17 @@ var ops = []Op{
 	// --- inside a channel ---
 
 	{Name: "run", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChain,
-		Usage:  "run <session> <index> <line>",
+		Usage:  "run <channel> <line>   |   run <session> <index> <line>",
 		Detail: runDetail},
 	{Name: "input", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChain,
-		Usage:  "input <session> <index> <text>",
+		Usage:  "input <channel> <text>   |   input <session> <index> <text>",
 		Detail: inputDetail},
 	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat"}, TargetKind: TargetChain,
-		Usage: "key <session> <index> <key> [--repeat N]"},
+		Usage: "key <channel> <key> [--repeat N]"},
 	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2, TargetKind: TargetChain,
-		Usage: "resize <session> <index> <rows> <cols>"},
+		Usage: "resize <channel> <rows> <cols>"},
 	{Name: "span", Kind: KindFlags, Target: true, TargetKind: TargetChain,
-		Usage:  "span <session> <index>",
+		Usage:  "span <channel>",
 		Detail: spanDetail},
 	{Name: "reader", Kind: KindFlags, Target: true, Flags: []string{"drop"}, TargetKind: TargetChain,
 		Usage: "reader <session> <index>   |   reader <session> <index> --drop <id>"},
@@ -797,10 +797,10 @@ in parameters that no longer exist and reads the resulting error as their own fa
 The browser publishes its own signature; this reads it.
 
 get task <id> TAKES NO SESSION: a transfer belongs to the process, not to a session
-handle, and the caller may have no handle left by the time it asks. The window is the
-wait — the reply comes back the moment the transfer ends, and reports progress when
-the window expires instead of failing. A receipt stays answerable for ten minutes
-after the transfer ends.`
+handle, and the caller may have no handle left by the time it asks. The wait is the
+CALL's timeout argument — there is no --timeout flag — and the reply comes back
+the moment the transfer ends, or reports progress when that window expires instead of
+failing. A receipt stays answerable for ten minutes after the transfer ends.`
 
 const callDetail = `Send one JSON-RPC frame to a peer opened with
 "open <session> mcp|cdp|jrpc <url>", and wait for the reply that answers it.
@@ -857,7 +857,7 @@ no error anywhere. So the call returns in milliseconds:
   Status:   running
   Progress: 0 bytes/30.7 MB (0%)
 
-  get task task_9f2c11ab --timeout 30
+  get task task_9f2c11ab
 
 get task <id> returns the moment the transfer finishes, and answers with its
 progress when the window expires instead of failing. ls task lists them,

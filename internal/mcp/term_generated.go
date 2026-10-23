@@ -701,7 +701,7 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 		v, err := s.tasks.Get(taskID)
 		body := ""
 		if err == nil {
-			body = renderTask(v) + "\n`get task " + taskID + "` waits for it; add `--timeout N` for a longer window."
+			body = renderTask(v) + "\n`get task " + taskID + "` waits for it (the wait is the call's `timeout`)."
 		} else {
 			body = "started " + taskID + "\n`get task " + taskID + "` waits for it."
 		}

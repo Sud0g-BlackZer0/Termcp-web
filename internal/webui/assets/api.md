@@ -1787,11 +1787,11 @@ send. The alternative was eight endpoints whose output cursor, stream filter and
 window semantics are all one directive's job here.
 
 ```
-Request:  { "cmd": "ps", "bytes_limit": 0 }
+Request:  { "cmd": "ls", "bytes_limit": 0 }
 
 Response 200:
 { "protocol": "TERM/1", "code": 200, "reason": "OK",
-  "Path": "ps", "body": "(nothing is running)\n" }
+  "Path": "ls", "body": "(nothing is running)\n" }
 ```
 
 <!-- BEGIN termdoc: args -->
@@ -1819,9 +1819,9 @@ back, this declines a duplicate of the body that did come back. It exists becaus
 the two projections (rendered text and JSON) carry the same bytes, which is a
 rounding error on a listing and most of the reply on a large read — exactly where
 the windows were meant to protect the caller from paying for output it did not ask
-for. A caller moving a big payload turns it on; one reading `ps` need not.
+for. A caller moving a big payload turns it on; one reading `ls` need not.
 
-**Statements.** `;` separates statements and each gets its own slot: `help; ps`
+**Statements.** `;` separates statements and each gets its own slot: `help; ls`
 answers twice. `&&` and `|` stay inside one statement (that is one command).
 
 **Status codes and slots.** The status code answers for the REQUEST. A command
@@ -1869,7 +1869,7 @@ X-Termcp-Namespace: alice
 
 | Behaviour | Not declared | Declared `alice` |
 |-----------|--------------|------------------|
-| `ps` | every non-infrastructure session | only sessions `alice` opened |
+| `ls` | every non-infrastructure session | only sessions `alice` opened |
 | `pipe` / `pty` (new session) | an ordinary session | the session is tagged `ns:alice`, persisted in its manifest |
 | Operating by handle | any session (including an extension's, when the handle is in hand) | only `ns:alice`, otherwise `forbidden` |
 | Extension / infrastructure sessions | reachable with a handle | refused |

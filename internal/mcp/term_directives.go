@@ -268,6 +268,28 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 			}
 			return []envelope.Slot{s.closePeer(stmt, h)}
 		case "":
+			// AN EXPLICIT --forward-id NAMES A FORWARD, and it must not be swallowed by
+			// the container close (dogfood finding on #159). The parser accepts the flag
+			// — it is declared on this verb — and the dispatcher then ignored it, so
+			// `close <session> --forward-id fw-…` answered 204 and TERMINATED THE WHOLE
+			// SESSION: the caller asked to stop one tunnel and silently lost the
+			// connection. `--grace` is the mirror image: a session deadline that must not
+			// be ignored either.
+			//
+			// This is not reading intent out of a flag (the mistake `close <channel>
+			// --force` was fixed for): no other object a close can name has a forward
+			// id, so the flag picks the node rather than modifying it.
+			if fid, ok := stmt.Flag("forward-id"); ok && fid != "" {
+				if stmt.FlagState("grace") != directive.FlagAbsent {
+					return []envelope.Slot{badRequest(stmt, "`--grace` is a session deadline; "+fid+
+						" is a forward, and closing a tunnel has nothing to wait for.\n"+
+						"Close the tunnel and the connection separately: `close "+stmt.Target+" --forward-id "+fid+
+						"`, then `close "+stmt.Target+" --grace N` if that is also wanted.")}
+				}
+				return []envelope.Slot{s.directiveForward(ctx, withFlags(stmt, map[string]string{
+					"action": "close", "forward-id": fid,
+				}), win)}
+			}
 			if isPeerHandle(stmt.Target) {
 				return s.peerChannel(ctx, stmt, win, "close", nil)
 			}
@@ -785,8 +807,20 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 		return s.readGrep(ctx, stmt, win)
 	}
 	args := argsOf("shell_id", stmt.Target)
+	// --offset IS THE SAME BYTE POSITION AS --cursor, and on a channel read it used to
+	// be accepted and IGNORED (dogfood finding on #159): the flag is declared for the
+	// peer `--at` path, so the parser took it and this function never looked. A caller
+	// who wrote `read <channel> --offset 0` therefore got the default cursor read — on
+	// a closed channel, an empty one — and nothing said the flag had not been used.
+	//
+	// Asking twice is refused rather than silently resolved: both name where the read
+	// starts, and a caller who wrote both is not describing a position.
+	if stmt.FlagState("cursor") != directive.FlagAbsent && stmt.FlagState("offset") != directive.FlagAbsent {
+		return badRequest(stmt, "`--cursor` and `--offset` name the same byte position; pass one of them.")
+	}
 	if slot, bad := numericFlags(args, stmt,
 		[2]string{"cursor", "offset"},
+		[2]string{"offset", "offset"},
 		[2]string{"from-line", "from_line"},
 		[2]string{"tail", "tail_lines"},
 	); bad {
@@ -1655,7 +1689,7 @@ func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win 
 		// `ls host`.
 		if stmt.Key != "" {
 			return []envelope.Slot{badRequest(stmt, "`ls task` lists every transfer; for one of them use `get task "+
-				stmt.Key+" --timeout N`.")}
+				stmt.Key+"` (pass a `timeout` on the call and it waits).")}
 		}
 		return []envelope.Slot{s.directiveLsTask(stmt)}
 	case "host":
@@ -1979,7 +2013,7 @@ func namePeerTimeout(ctx context.Context, slot envelope.Slot) envelope.Slot {
 		slot.Code = 504
 		slot.Headers["Error-Code"] = "peer_timeout"
 		slot.Body = "the peer did not answer within the window. `call` waited its full budget; " +
-			"raise `--timeout N` if this method needs longer, or use `--send` for fire-and-forget."
+			"give the call a larger `timeout` if this method needs longer, or use `--send` for fire-and-forget."
 	}
 	return slot
 }
