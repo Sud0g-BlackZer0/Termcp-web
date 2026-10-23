@@ -11,6 +11,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/capability"
 	"github.com/open-mcp-ai/termcp/internal/clock"
+	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshclient"
@@ -141,7 +142,16 @@ func profileShellExists(ent *sshconfig.Entry) error {
 	if line == "" {
 		return nil
 	}
-	prog := strings.Fields(line)[0]
+	// THE PROGRAM NAME COMES FROM THE GRAMMAR, not from splitting on whitespace: a shell
+	// path is a shell WORD, and `"C:\Program Files\pwsh.exe" -NoLogo` is one word followed
+	// by an argument. Splitting it by hand read the path as `"C:\Program` and reported a
+	// profile as broken when the only thing wrong was how this function read it.
+	prog, _, err := directive.SplitArgv(line)
+	if err != nil || prog == "" {
+		// An unparseable shell line is the profile's problem, and it is reported where the
+		// profile is used rather than guessed at here.
+		return nil
+	}
 	if _, err := exec.LookPath(prog); err != nil {
 		return fmt.Errorf("default_shell %q is not runnable on this host, so every session from this profile would die on arrival: %w", prog, err)
 	}
