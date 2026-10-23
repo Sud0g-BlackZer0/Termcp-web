@@ -40,6 +40,8 @@
 
 - **Web UI 的列不再靠震荡到达正确高度（#153）**。中列扩展板此前根本没有上限，侧列的 `calc(100dvh - …)` 又减的是同一个布局里的元素发布的测量值（`--dock-h`），既是环又用错了常数：80 个扩展时文档高出视口 794px、滚动条出现、底部会话坞被顶出屏幕。整条链路改成 flex：`body` 的高度由 `min-height` 改为 `height`（否则没有负空间可压缩），`.dock` 与 `.workspace-frame` 用 `flex: 1 1 auto` + `min-height: 0`，网格行改 `minmax(0, 1fr)`，各列 `max-height: 100%`。用 `overflow: clip` 而不是 `hidden`——后者会变成滚动容器，把列内 `position: sticky` 的 scrollport 换掉。测试驱动真实浏览器在 1400×900 下采样 24 次，既要求文档不溢出，也要求高度在采样之间完全不变（靠震荡到达正确数字同样算失败）。
 
+- **profile 的 `default_shell` 按 shell 行来读**。这一行是「程序 + 参数」，所以程序名是一个 shell 词，而「这个 shell 存在吗」的检查是按空白切分的：`default_shell = "\"C:\Program Files\pwsh\pwsh.exe\" -NoLogo"` 被读成程序 `"C:\Program`，于是**一个能用的 profile 被报成坏条目**——而 `C:\Program Files` 正是 Windows 上 pwsh 的默认安装位置。现在名字由 `directive.SplitArgv` 给出（解析器：一个词、引号解开、参数在后）；解析不了的行走原路，不猜。
+
 ## v0.2.8-rc.4 — 2026-10-22
 
 - **`get host <name>` 读回一个 host，口令只报有无不改值**。此前 host 能建、能改、能列、能删，就是读不回来：`ls host` 只有名字，改一个字段时无法知道其余字段当前是什么，于是「部分修改」只能靠猜，而猜错就是覆盖。现在 `get host <name>` 返回条目内容，密码与密钥口令替换为 `has_password` / `has_passphrase`——把口令放进回复等于写进 transcript 和日志，而调用方真正要问的是「有没有设置」。读取不是变更，所以不受 `--mcp-manage-ssh-configs` 限制：列表本来就开放，只藏字段不藏名字没有意义。`ls host <name>` 也不再静默丢掉名字返回全表，而是明说要读单个条目该用哪个动词。
