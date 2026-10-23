@@ -1573,7 +1573,7 @@ func analyzeSource(src string) ([]span, []ref) {
 			// expands nothing in the body, which the grammar mirrors by emitting no
 			// ParamExp nodes; an unquoted delimiter DOES emit them, and the span tells
 			// the replacer to insert them bare as text rather than quoted as a word.
-			if n.Hdoc != nil && !wordIsQuoted(src, n.Word) {
+			if n.Hdoc != nil && !wordIsQuoted(n.Word) {
 				spans = append(spans, span{start: int(n.Hdoc.Pos().Offset()), end: int(n.Hdoc.End().Offset()), mode: spanVerbatim})
 			}
 		}
@@ -1617,22 +1617,33 @@ func refOfParam(src string, p *syntax.ParamExp) (ref, bool) {
 	}, true
 }
 
-// wordIsQuoted reports whether a word was written with quoting in it.
+// wordIsQuoted asks the AST whether the delimiter word was quoted.
 //
-// THE SHELL'S OWN TEST FOR A HEREDOC DELIMITER, and the source text is the right place to
-// ask: what makes `<<'EOF'` literal is that the delimiter WORD contained quoting, and that
-// is a property of the bytes rather than of any node — a backslash counts, and so does a
-// quote of either kind.
-func wordIsQuoted(src string, w *syntax.Word) bool {
+// THE GRAMMAR'S OWN MODEL, NOT A STRING SCAN. In a heredoc, what makes the body
+// literal is that any part of the delimiter was quoted — a single quote, a double
+// quote, or an escaped character (`<<\EOF`). The AST tells these three apart by
+// node type and literal contents:
+//   - SglQuoted or DblQuoted means the caller used quotes;
+//   - a Lit holding a backslash means a character was escaped;
+//   - anything else (an ordinary unescaped Lit) is an unquoted delimiter.
+//
+// Asking the AST nodes rather than scanning the source slice keeps the quoting
+// model where it belongs: in the parser that already classified each part.
+func wordIsQuoted(w *syntax.Word) bool {
 	if w == nil {
 		return false
 	}
-	start, end := int(w.Pos().Offset()), int(w.End().Offset())
-	if start < 0 || end > len(src) || start > end {
-		return false
+	for _, p := range w.Parts {
+		switch part := p.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+			return true
+		case *syntax.Lit:
+			if strings.Contains(part.Value, "\\") {
+				return true
+			}
+		}
 	}
-	// The set is: single quote, double quote, backslash.
-	return strings.ContainsAny(src[start:end], `'"\`)
+	return false
 }
 
 // insideRange reports whether [start,end) sits inside any of these ranges.
