@@ -1,6 +1,8 @@
 package directive
 
 import (
+	crand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -180,7 +182,8 @@ type occ struct {
 // would let it end the statement, open a quote, or start a subshell: the parser
 // would then read the caller's DATA as termcp GRAMMAR, which is exactly the
 // confusion this channel exists to remove. So a raw hole is first written as one
-// ordinary shell word (`__termcp_0__`), the parse happens against a line whose
+// ordinary shell word (a random one, see sentinelPrefix), the parse happens against
+// a line whose
 // shape the caller's data cannot change, and only then is the hole filled.
 //
 // The data channel needs no sentinel: a value quoted as a single shell word is
@@ -465,14 +468,47 @@ func isSpaceByte(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
-// sentinelPrefix picks a word that appears nowhere in src, so a raw hole can never
-// be confused with bytes the caller wrote.
+// sentinelMarker is the one fixed part of a hole's name: enough to RECOGNIZE a hole
+// that leaked (see isSentinel), not enough to forge one.
+//
+// The rest is random per call. A fixed prefix made the token predictable, and a
+// predictable token is a value a caller can type: `write h file __termcp_0__` was a
+// legal path, so "this is a hole" and "this is what the caller wrote" were the same
+// string. Random bytes per call make the two distinguishable by construction.
+const sentinelMarker = "__termcp_"
+
+// sentinelPrefix mints the word that stands in for a raw hole in one call's cmd.
+//
+// IT IS RANDOM PER CALL, and it has to be a single ordinary shell word: the parse runs
+// against a line the caller's data cannot change the shape of, so the hole has to look
+// like a word the grammar reads and nothing else.
+//
+// The collision check is kept even though 72 random bits make a collision unreachable:
+// `expand` finds holes by scanning for this prefix, so "the prefix does not appear in
+// src" is the invariant it relies on, and an invariant worth stating is worth
+// enforcing.
 func sentinelPrefix(src string) string {
-	p := "__termcp_"
-	for strings.Contains(src, p) {
-		p = "_" + p
+	var raw [9]byte
+	if _, err := crand.Read(raw[:]); err == nil {
+		return uniquePrefix(src, sentinelMarker+hex.EncodeToString(raw[:])+"_")
 	}
-	return p
+	// A deterministic fallback for the case where the system entropy source fails:
+	// extend the marker until it appears nowhere in the source. Worse than random, still
+	// correct — a hole that cannot collide is the property that matters.
+	return uniquePrefix(src, sentinelMarker)
+}
+
+// uniquePrefix extends seed until src does not contain it.
+//
+// SEPARATE FROM THE RANDOM PART because this is the invariant `expand` relies on — it
+// finds holes by scanning for the prefix — and it is the half that can be tested
+// directly: no amount of randomness makes a colliding prefix safe, and no test can force
+// a random one to collide.
+func uniquePrefix(src, seed string) string {
+	for strings.Contains(src, seed) {
+		seed = "_" + seed
+	}
+	return seed
 }
 
 // sentinelTable is the raw holes of ONE call, by index.
@@ -499,8 +535,8 @@ func (t *sentinelTable) add(value string, dq bool) int {
 //
 // A value inserted here is NEVER rescanned: the walk is single-pass and a
 // substituted value is written straight to the output. A caller whose argument
-// happens to contain `__termcp_0__` therefore gets its own bytes back rather than
-// having them read as another hole.
+// happens to contain a token of the same shape therefore gets its own bytes back
+// rather than having them read as another hole.
 func (t *sentinelTable) expand(s string) string {
 	if t == nil || !strings.Contains(s, t.prefix) {
 		return s
@@ -546,7 +582,7 @@ func (t *sentinelTable) expand(s string) string {
 // THE KEY WAS MISSING, AND A LEAKED SENTINEL IS A WRONG ADDRESS, NOT A BAD ONE.
 //
 // `write <session> file $1 --local-path go.mod` wrote the file to the literal path
-// `__termcp_0__` — the sentinel the substitution table mints for a hole — and
+// of the sentinel the substitution table mints for a hole, and
 // answered 202 "accepted" with that name in the receipt. Nothing refused it, because
 // a path is allowed to be anything; the caller found out by looking for the file
 // where they asked and not finding it. Every verb that takes a sub-resource key had

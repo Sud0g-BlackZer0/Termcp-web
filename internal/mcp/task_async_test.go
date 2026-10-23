@@ -143,7 +143,7 @@ func TestTaskVerbsRefuseWhatTheyCannotAnswer(t *testing.T) {
 // The parser's own test proves the hole is filled; this proves the filled value is
 // what the file verb acts on. They are different claims: a value expanded into a field
 // nobody reads is still a file in the wrong place, and the reported symptom was
-// exactly that — a 202 "accepted" receipt naming `__termcp_0__`, and the caller
+// exactly that — a 202 "accepted" receipt naming a substitution hole, and the caller
 // finding out by looking for the file where they had asked.
 func TestAnUploadLandsWhereTheArgumentSaid(t *testing.T) {
 	s := newTestServer(t)

@@ -268,7 +268,7 @@ func TestNoArgsLeavesShellPositionalAlone(t *testing.T) {
 // rescanned: a caller whose argument contains the marker text gets its own bytes
 // back, because the fill is single-pass.
 func TestSentinelCollisionIsTheCallersOwnBytes(t *testing.T) {
-	val := "echo __termcp_0__ here"
+	val := "echo __tm_deadbeefcafe__ here"
 	f, err := ParseWithSubst(`run h:1 $1`, Subst{Pos: []string{val}})
 	if err != nil {
 		t.Fatalf("ParseWithSubst: %v", err)

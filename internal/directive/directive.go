@@ -1866,8 +1866,14 @@ func shellDoubleQuoteBody(v string) string {
 }
 
 // isSentinel reports whether a value is still a raw hole waiting to be filled.
+//
+// It matches the MARKER, not the whole token: the rest of a hole's name is random per
+// call (sentinelPrefix), so no reader can know the exact string in advance. A hole that
+// reaches a reader is a bug either way, and the marker is what makes one recognizable —
+// which is also why a leaked hole is now an obvious impossibility rather than a legal-
+// looking path.
 func isSentinel(v string) bool {
-	return strings.Contains(v, "__termcp_")
+	return strings.Contains(v, sentinelMarker)
 }
 
 // checkTargetKindAfterSubst re-runs the target-kind rule on a statement whose
@@ -2043,8 +2049,8 @@ func parseStatement(src string, stmt *syntax.Stmt) (Statement, bool, error) {
 			// THE KIND CHECK RUNS AGAIN AFTER SUBSTITUTION, not only here.
 			//
 			// A target that came from `args` is a sentinel at parse time
-			// (`__termcp_0__`), and this check reads the value: `read $1` was refused
-			// with `read needs a CHANNEL, not "__termcp_0__"`, which is true of the
+			// (`__tm…`), and this check reads the value: `read $1` was refused
+			// with `read needs a CHANNEL, not "__tm…"`, which is true of the
 			// placeholder and false of the handle the caller passed. A literal target
 			// is refused here — before anything runs — and a substituted one is
 			// checked again once it is filled in.

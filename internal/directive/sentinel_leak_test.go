@@ -1,18 +1,17 @@
 package directive
 
 import (
-	"strings"
 	"testing"
 )
 
 // TestEveryStatementFieldIsExpanded pins the one property the substitution table
 // owes a caller: after parsing, NO field of a Statement can still hold a hole.
 //
-// A sentinel (`__termcp_0__`) is the placeholder the table mints for a value it has
+// A sentinel is the placeholder the table mints for a value it has
 // not inserted yet. One that survives parsing is not a cosmetic bug — it is a WRONG
 // ADDRESS that nothing refuses, because every one of these fields accepts arbitrary
 // text: `write h file $1 --local-path go.mod` wrote the file to a path literally named
-// `__termcp_0__`, answered 202 "accepted", and the caller found out by looking where
+// such a name, answered 202 "accepted", and the caller found out by looking where
 // they had asked and finding nothing.
 //
 // The fields are listed here as a SET rather than one test per field, because the bug
@@ -53,7 +52,7 @@ func TestEveryStatementFieldIsExpanded(t *testing.T) {
 func leakedSentinels(st Statement) []string {
 	var bad []string
 	check := func(field, v string) {
-		if strings.Contains(v, "__termcp_") {
+		if isSentinel(v) {
 			bad = append(bad, field+"="+v)
 		}
 	}
