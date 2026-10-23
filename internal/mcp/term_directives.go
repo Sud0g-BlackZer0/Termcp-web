@@ -811,7 +811,7 @@ func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, wi
 	if wait := s.completionWait(stmt.Target); wait {
 		s.awaitExit(ctx, stmt.Target, win)
 	} else if s.ptyRunning(stmt.Target) {
-		s.awaitWindow(ctx, win)
+		s.awaitWindow(ctx, stmt.Target, win, start)
 	}
 	return s.readSlot(ctx, stmt, win, args)
 }
@@ -828,19 +828,77 @@ func (s *Server) ptyRunning(handle string) bool {
 	return info.Mode == api.ModePTY && info.Status == api.SessionRunning
 }
 
-// awaitWindow waits out the caller's time window. A pty has no completion
-// signal, so the window is sampled rather than ended early; timeout=0 means a
-// snapshot, not a wait.
-func (s *Server) awaitWindow(ctx context.Context, win termArgs) {
+// ptyQuiet is how long a pty's stream must stand still before a wait calls the
+// command done.
+//
+// MEASURED, NOT GUESSED. One `echo` on a PowerShell with an oh-my-posh profile
+// arrives as five chunks spread over 1.1s: the echo of the typed line at 120ms,
+// a first repaint at 510ms, the command's own output at 940ms. The gaps between
+// chunks reach 430ms, so a shorter grace ends the wait on the echo alone and the
+// reply looks like a command that printed nothing. 500ms covers the widest gap
+// this shell showed and still ends a fast command in about a quarter of the 2s
+// window a caller typically passes.
+const ptyQuiet = 500 * time.Millisecond
+
+// ptyPoll is how often the wait asks the stream how long it is. The wait is a
+// poll rather than a subscribe because the length is already tracked per channel
+// and asking for it is cheaper than registering a second reader that would then
+// swallow bytes meant for `read`.
+const ptyPoll = 20 * time.Millisecond
+
+// awaitWindow waits out a pty command, bounded by the caller's time window.
+//
+// A PTY HAS NO COMPLETION SIGNAL, so the wait used to be a blind sleep of the
+// whole window: `run` on a 20s window took 20s on a command that finished in one,
+// and the reply said nothing about how long the command itself took. The window
+// is the caller's budget, not the command's duration, so the wait now watches the
+// stream: it ends when the stream has stood still for ptyQuiet, and only falls
+// back to the window when there is nothing to watch (a command that has printed
+// nothing yet has no other signal). timeout=0 stays a snapshot, not a wait.
+//
+// The cost of the trade: a command that thinks silently for longer than ptyQuiet
+// after printing comes back with what it printed so far, and the caller reads on.
+// That is the same contract a terminal has — you cannot tell "done" from "quiet"
+// either — and it is the one direction the old blind sleep got wrong.
+func (s *Server) awaitWindow(ctx context.Context, handle string, win termArgs, start int64) {
 	limit := time.Duration(win.TimeoutSeconds * float64(time.Second))
 	if limit <= 0 {
 		return
 	}
-	timer := time.NewTimer(limit)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-timer.C:
+	deadline := time.Now().Add(limit)
+	last := start
+	var still time.Time
+	ticker := time.NewTicker(ptyPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		now, ok := s.outputSizeFor(handle)
+		if !ok {
+			// The channel went away under the wait; the read that follows reports it
+			// in the caller's own vocabulary instead of "nothing arrived".
+			return
+		}
+		switch {
+		case now != last:
+			last, still = now, time.Time{}
+		case now <= start:
+			// Nothing has been said yet. Silence before the first byte is not
+			// completion, it is a command that has not started talking; only the
+			// window can end this wait.
+		default:
+			if still.IsZero() {
+				still = time.Now()
+			} else if time.Since(still) >= ptyQuiet {
+				return
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
 	}
 }
 

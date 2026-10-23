@@ -553,10 +553,20 @@ func parseJRPCFrame(stmt directive.Statement, rest []string) (map[string]any, *e
 	}
 	var frame map[string]any
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
-		return nil, ptrSlot(badRequest(stmt, "the frame is not JSON: "+err.Error()))
+		return nil, ptrSlot(badRequest(stmt, "the frame is not JSON: "+err.Error()+"\n"+frameSpelling))
 	}
 	return frame, nil
 }
+
+// frameSpelling is the one sentence that turns "invalid character" into a fix.
+//
+// A JSON body is full of double quotes, so the instinct is to wrap it in double
+// quotes and escape the ones inside — which is what a shell would need and this
+// layer does not do: quoting here groups the line into one word and is then
+// removed, one layer, with the bytes inside left alone. The escaped spelling
+// therefore arrives at the parser as backslashes and is refused for it.
+const frameSpelling = "A frame is passed bare or in single quotes — quoting here only groups the line, " +
+	"it does not escape: `call <peer> '{\"method\":\"tools/list\"}'`."
 
 // jrpcError renders a transport failure as a reply, never as a success shape.
 func jrpcError(stmt directive.Statement, err error) envelope.Slot {

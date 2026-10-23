@@ -68,7 +68,10 @@ type termArgs struct {
 	// paid for on every call. See envelope.Reply.StructuredContent.
 	StructuredContent bool
 
-	// AllowEscapes permits unquoted control bytes and raw escape sequences in cmd.
+	// AllowEscapes permits raw control bytes and raw escape sequences in cmd and in the
+	// args/vars values. Quoting in cmd does not make a control byte safe — the terminal
+	// sees the byte before any shell parses quotes — so this switch, not a pair of
+	// quotes, is how a caller says the byte is meant.
 	//
 	// OFF by default, because a raw carriage return in a payload does not print a
 	// character — the terminal treats it as "submit this line", so one call can run
@@ -246,7 +249,8 @@ func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) term
 				Headers: map[string]string{
 					"Error-Code": "raw_control_byte",
 				},
-				Body: fmt.Sprintf("%s contains an unquoted %s, which the terminal acts on instead of printing.\n"+
+				Body: fmt.Sprintf("%s contains a raw %s, which the terminal acts on instead of printing.\n"+
+					"Quoting does not help — the line editor sees the byte before any shell parses quotes.\n"+
 					"Either pass the data through the `vars` argument (it is substituted as a quoted value, so it never becomes syntax:\n"+
 					"  vars: {\"NAME\": \"<value>\"}, cmd: \"run <handle> echo $NAME\"),\n"+
 					"or set allow_escapes: true if you really mean to send byte 0x%02x.", where, name, b),

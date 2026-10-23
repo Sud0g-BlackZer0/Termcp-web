@@ -626,13 +626,16 @@ Offset and Next-Offset, and a slice never ends in the middle of a character.
 //     observed. `run` returns as soon as that happens.
 //   - A pty is a terminal. Whatever runs inside it is the shell's child, not
 //     ours, and a terminal does not report "the command inside me finished".
-//     There is nothing to wait for, so `run` on a pty SAMPLES: it reads what
-//     arrived within `timeout` seconds and returns.
+//     There is no signal to wait for, so `run` on a pty waits for the OUTPUT to
+//     stop: half a second without a new byte ends the wait. Only a command that
+//     has printed nothing yet has no output to watch, and that wait runs to the
+//     caller's window.
 //
 // That is why an empty reply on a pty is not evidence the command produced
 // nothing — it is evidence nothing arrived within the window. Raising `timeout`
-// is the answer, not repeating `read`: `read` is a consuming cursor, so the
-// bytes the sample already took are gone from it.
+// is the answer for a command that thinks before it prints; a reply that stopped
+// mid-output is followed by `read`, which repeats the sample and continues from
+// there.
 const runDetail = `SENDING SEVERAL SHELL COMMANDS. The payload is ONE line, and a semicolon in cmd
 separates DIRECTIVES, not shell commands: run h:1 pwd; whoami is two termcp
 statements, and the second one is an unknown directive called whoami. Pass the
@@ -667,12 +670,16 @@ word of DATA, which is right for a flag value and wrong for a command line.
 
 COMPLETION. A pipe channel reports its process exiting, so run returns as soon as
 it does. A pty does not: whatever runs inside it is the shell's child, and a
-terminal has no "the command finished" signal. run on a pty therefore SAMPLES —
-it returns what arrived within timeout seconds (default 2) and stops.
+terminal has no "the command finished" signal. run on a pty therefore waits for
+the stream to go STILL — half a second without a new byte ends the wait — and
+falls back to timeout seconds (default 2) only while the command has printed
+nothing at all, where there is nothing else to watch.
 
-So an empty pty reply is not proof the command printed nothing; it means nothing
-arrived inside the window. Raise timeout, and do not reach for read: read is a
-consuming cursor, so the bytes the sample already took are no longer there.
+A reply that ends mid-output is not a lost command: the bytes are still in the
+stream. read has its own cursor and does not continue after the sample — it
+repeats what the sample already showed and then follows the stream, which is what
+makes "raise timeout" and "read again" two different answers. An empty reply
+means nothing arrived inside the window at all.
 
 For a program whose output you need in full, prefer pipe (--argv) on the same
 entry — its exit IS observable, so a read after it returns the whole output.`
@@ -1057,9 +1064,13 @@ THE FRAME GOES ON call, NOT ON write. write is a file's content and takes flags
 (--data, --mode, --offset); a frame is a verbatim payload where quotes must survive.
 One verb cannot carry both, because the parser has one payload rule per directive.
 
-QUOTE THE FRAME. The line is split on whitespace before the handler sees it, so an
-unquoted frame arrives as fragments and is refused as "the frame is not JSON" — with
-a character error that points at the quoting rather than at the frame.
+THE FRAME IS THE REST OF THE LINE. Spaces in a JSON body are fine — the payload is
+sliced, not split — and the caller's quoting is optional: it groups the line into one
+word and is then removed, one layer, with the bytes inside left alone. So a frame is
+best written BARE, and if it needs quoting, SINGLE quotes are the safe pair. Inside
+double quotes a backslash is still just a byte: the escaped spelling a shell would
+want is not unescaped here, and a frame written that way is refused as "the frame is
+not JSON" with a line telling the caller which spelling works.
 
 A SHELL RUNNING A SERVER IS THE SAME KIND OF PEER, addressed by its channel. Start
 it with --argv (a pipe), then talk to it the same way. The difference is only where
@@ -1268,47 +1279,28 @@ func Lookup(name string) (Op, bool) {
 	return op, ok
 }
 
-// DetectRawControl scans a command line for raw, unquoted control bytes that the
-// terminal would act on (submit, interrupt, suspend, EOF) rather than print.
+// DetectRawControl scans a command line for raw control bytes that the terminal
+// would act on (submit, interrupt, suspend, EOF) rather than print.
 //
-// IT EXCLUDES QUOTED SECTIONS: a single-quoted `'a\rb'` or double-quoted `"a\rb"`
-// is the caller's data, which the parser preserves byte for byte. What is dangerous
-// is an UNQUOTED control byte — `run h:1 echo a\rNoSuch` — which the shell parses
-// as regular words while the terminal treats the \r as "press enter", executing two
-// commands for one call while answering 200.
+// IT DOES NOT EXCLUDE QUOTED SECTIONS, and that is the correction: this used to skip
+// anything inside `'…'` or `"…"` on the theory that a quoted byte is the caller's
+// data. It is the caller's data to the SHELL — but the byte reaches the TERMINAL
+// first, and the line editor does not parse quotes. Measured: `run h:1 echo 'a␍b'`
+// with a quoted carriage return left PowerShell at its continuation prompt `>>`,
+// ran something the caller never asked for, and answered 200. A quoted control byte
+// is exactly as dangerous as an unquoted one, so there is no quoting rule to apply
+// here — only "a raw control byte in the line is refused unless the caller says
+// otherwise".
 //
-// The bytes checked are the C0 control set (< 0x20), excluding the two safe
-// whitespace characters: space (0x20) and TAB (0x09). Everything else — CR (0x0d),
-// Ctrl-C (0x03), Ctrl-D (0x04), Ctrl-Z (0x1a), ESC (0x1b), NUL (0x00) — is a
-// terminal action when unquoted.
+// The bytes checked are the C0 control set (< 0x20), excluding the two that are
+// whitespace to every layer: TAB (0x09) and newline (0x0a), the latter being this
+// protocol's own statement separator. Everything else — CR (0x0d), Ctrl-C (0x03),
+// Ctrl-D (0x04), Ctrl-Z (0x1a), ESC (0x1b), NUL (0x00) — is a terminal action.
 func DetectRawControl(src string) (byte, string, bool) {
-	inSingle := false
-	inDouble := false
-	escaped := false
-
 	for i := 0; i < len(src); i++ {
 		b := src[i]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if b == '\\' && !inSingle {
-			escaped = true
-			continue
-		}
-		if b == '\'' && !inDouble {
-			inSingle = !inSingle
-			continue
-		}
-		if b == '"' && !inSingle {
-			inDouble = !inDouble
-			continue
-		}
-		// Outside single quotes: an unquoted control byte is a terminal action.
-		if !inSingle && !inDouble {
-			if b < 0x20 && b != '\t' && b != '\n' {
-				return b, controlByteName(b), true
-			}
+		if b < 0x20 && b != '\t' && b != '\n' {
+			return b, controlByteName(b), true
 		}
 	}
 	return 0, "", false

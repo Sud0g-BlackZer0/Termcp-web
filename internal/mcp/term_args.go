@@ -102,7 +102,7 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "timeout",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Max seconds to wait. A pipe returns when its process exits; a pty waits the whole window. 0 = don't wait. Default: %d.", defaultTimeoutSeconds),
+		Desc:    fmt.Sprintf("Max seconds to wait. A pipe returns when its process exits; a pty when its output goes still. 0 = don't wait. Default: %d.", defaultTimeoutSeconds),
 		DocNote: fmt.Sprintf("Seconds to wait (default %d; a pipe returns as soon as its process exits)", defaultTimeoutSeconds),
 		Def:     defaultTimeoutSeconds,
 		DefText: strconv.Itoa(defaultTimeoutSeconds),

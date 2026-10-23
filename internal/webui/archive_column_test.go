@@ -282,13 +282,13 @@ func TestTheArchiveExportsAFolderPerSession(t *testing.T) {
 	}
 	// A folder per session, named from the session, holding a record and its shells.
 	for _, want := range []string{
-		"/session.txt",           // the session's own record
-		"/shell-",                // one file per channel
-		"/shells",                // the list that says how many there are
-		"fetchAllShellOutput(",   // where a shell's complete bytes come from
-		"fetchAllSessionLines(",  // the fallback for records with no live shells
-		"zipStore(",              // packed, not concatenated
-		"safeZipSegment(",        // names are user-controlled
+		"/session.txt",          // the session's own record
+		"/shell-",               // one file per channel
+		"/shells",               // the list that says how many there are
+		"fetchAllShellOutput(",  // where a shell's complete bytes come from
+		"fetchAllSessionLines(", // the fallback for records with no live shells
+		"zipStore(",             // packed, not concatenated
+		"safeZipSegment(",       // names are user-controlled
 	} {
 		if !strings.Contains(fn, want) {
 			t.Errorf("the export is missing %s: a session must be a folder with its shells in it", want)
@@ -988,7 +988,7 @@ func TestCollapsingOneColumnLeavesTheOtherAlone(t *testing.T) {
 //
 // Leading the run makes the row say the sentence in the order the reader needs:
 //
-//     [✓] ......... 3 [⤓] [🗑]
+//	[✓] ......... 3 [⤓] [🗑]
 //
 // which also puts the destructive key in the corner where it belongs, furthest
 // from the invert check it must never be confused with.
@@ -1068,8 +1068,8 @@ func TestTheArchiveIsOneColumnOfRows(t *testing.T) {
 // interpolable: CSS drops a transition between an intrinsic keyword and a length.
 // Measured at 1440x900, sampling every frame across the .24s window:
 //
-//   px -> px             15 distinct widths   (56 -> 67 -> 89 -> ... -> 260)
-//   fit-content -> px    2  distinct widths   (260, then 56: one frame, a snap)
+//	px -> px             15 distinct widths   (56 -> 67 -> 89 -> ... -> 260)
+//	fit-content -> px    2  distinct widths   (260, then 56: one frame, a snap)
 //
 // The archive opens and closes by class toggle, so BOTH states have to be plain
 // lengths or the animation is silently lost — which is exactly how "the collapse
@@ -1148,12 +1148,12 @@ func TestTheArchiveExportIsComplete(t *testing.T) {
 	// Page from where the last window ended, using the SERVER's `end` (an absolute
 	// offset), not a locally computed length: the server may clamp or re-align.
 	for _, want := range []string{
-		"&start=",          // paging by absolute offset
-		"j.end",            // the server's end offset is the next start
-		"j.total",          // and total is what says when to stop
-		"start = end",      // advance from what was served
-		"end >= total",     // normal exit
-		"end <= start",     // no-progress guard, or a clamped window spins forever
+		"&start=",      // paging by absolute offset
+		"j.end",        // the server's end offset is the next start
+		"j.total",      // and total is what says when to stop
+		"start = end",  // advance from what was served
+		"end >= total", // normal exit
+		"end <= start", // no-progress guard, or a clamped window spins forever
 	} {
 		if !strings.Contains(fn, want) {
 			t.Errorf("fetchAllShellOutput is missing %q: paging must advance on the server's own offsets "+

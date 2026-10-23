@@ -54,7 +54,7 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 			// `cdp send 'not json'` already answered 400; the two used to disagree about
 			// what "sent" means.
 			if !json.Valid([]byte(payload)) {
-				return badRequest(stmt, "the frame is not JSON")
+				return badRequest(stmt, "the frame is not JSON\n"+frameSpelling)
 			}
 			frame = payload
 		}

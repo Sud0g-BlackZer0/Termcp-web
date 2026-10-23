@@ -997,6 +997,20 @@ func (s *Server) refuseAction(ctx context.Context, stmt directive.Statement, cap
 // unquoteWord strips one layer of matching shell quotes, so `'{"a":1}'` and
 // `"{\"a\":1}"` both hand the same text to the JSON parser. An unquoted word is
 // returned unchanged.
+// unquoteWord removes one layer of the caller's own quoting.
+//
+// That is ALL it does, and the restraint is the point. It is tempting to unescape
+// while it is here — inside double quotes a shell would read `\"` as `"` — but
+// unescaping is EXPANSION, and this layer is forbidden from evaluating. The parser
+// agrees: its Lit.Value for a double-quoted part is the raw bytes, backslashes
+// included, because turning them back into the bytes they stand for is the
+// interpreter's job (mvdan.cc/sh/v3/expand), which would also expand the `$` in a
+// perfectly ordinary JSON body like `{"$schema":"..."}`.
+//
+// So a backslash is a byte here, exactly as it is everywhere else in a payload, and
+// a caller whose frame needs quotes writes it the way the JSON grammar wants it.
+// Single quotes have no escapes, which is the shell's rule as well and is why the
+// single-quoted spelling is the safe one to recommend.
 func unquoteWord(s string) string {
 	if len(s) >= 2 {
 		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {

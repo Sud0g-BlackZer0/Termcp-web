@@ -102,9 +102,15 @@ func TestParseWithoutSubstLeavesVariablesAlone(t *testing.T) {
 	}
 }
 
-// TestDetectRawControl covers the gate's classification: unquoted control bytes are
-// terminal actions, quoted ones are the caller's data, and TAB/newline are ordinary
-// whitespace.
+// TestDetectRawControl covers the gate's classification: every raw control byte is a
+// terminal action, TAB and newline are ordinary whitespace, and QUOTING CHANGES
+// NOTHING.
+//
+// The last part is the correction. The gate used to skip quoted sections on the
+// theory that a quoted byte is the caller's data — true for the shell, false for the
+// terminal, which parses no quotes and acts on the byte regardless. Measured with a
+// real pty: a carriage return inside single quotes submitted the line early, left
+// PowerShell at its `>>` continuation prompt, and the reply was 200.
 func TestDetectRawControl(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -117,8 +123,9 @@ func TestDetectRawControl(t *testing.T) {
 		{"bare Ctrl-Z", "run h:1 echo a\x1ab", true},
 		{"bare NUL", "run h:1 echo a\x00b", true},
 		{"bare ESC", "run h:1 echo a\x1bb", true},
-		{"single-quoted CR is data", "run h:1 echo 'a\rb'", false},
-		{"double-quoted CR is data", "run h:1 echo \"a\rb\"", false},
+		{"single-quoted CR is still an action", "run h:1 echo 'a\rb'", true},
+		{"double-quoted CR is still an action", "run h:1 echo \"a\rb\"", true},
+		{"escaped-looking CR is still an action", "run h:1 echo a\\\rb", true},
 		{"TAB is ordinary whitespace", "run h:1 echo a\tb", false},
 		{"newline separates statements, not a gate concern", "run h:1 echo a\nrun h:1 echo b", false},
 		{"plain command", "run h:1 ls -la", false},

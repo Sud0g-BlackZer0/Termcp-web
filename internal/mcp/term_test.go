@@ -1424,6 +1424,43 @@ func TestMCPCallAcceptsEveryQuotingOfTheFrame(t *testing.T) {
 			t.Errorf("%s-quoted frame was refused:\n%s", name, out)
 		}
 	}
+
+	// THE ESCAPED SPELLING IS REFUSED, and the refusal has to say why. It is the
+	// one a shell-minded caller reaches for (a shell would read the backslash as an
+	// escape); here quoting only groups the line and the bytes inside are left
+	// alone, so the frame arrives at the parser full of backslashes. Refusing it
+	// with a bare "invalid character" sends the caller to look at their JSON, which
+	// is correct — the spelling is what is wrong.
+	escaped := `"` + strings.ReplaceAll(frame, `"`, `\"`) + `"`
+	out := termText(t, s, map[string]any{"cmd": "call " + h + " " + escaped})
+	if !strings.Contains(out, "not JSON") {
+		t.Fatalf("an escaped frame must be refused, not sent:\n%s", out)
+	}
+	if !strings.Contains(out, "single quotes") {
+		t.Errorf("the refusal does not teach the spelling that works:\n%s", out)
+	}
+}
+
+// TestUnquoteWordRemovesOneLayerAndNothingElse pins the restraint.
+//
+// The temptation is to unescape while the quotes are being peeled — inside double
+// quotes a shell would read a backslash-quote as a quote — but unescaping is
+// expansion, and this layer does not evaluate. A `$` in a JSON body would be the
+// first casualty, and the second would be every caller who meant a literal
+// backslash.
+func TestUnquoteWordRemovesOneLayerAndNothingElse(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`{"a":1}`, `{"a":1}`},
+		{`'{"a":1}'`, `{"a":1}`},
+		{`"{\"a\":1}"`, `{\"a\":1}`},
+		{`"C:\Program Files"`, `C:\Program Files`},
+		{`""`, ``},
+		{`"`, `"`},
+	} {
+		if got := unquoteWord(tc.in); got != tc.want {
+			t.Errorf("unquoteWord(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
 }
 
 // TestFilePermChmodActuallyChangesTheMode is the regression test for a silently
@@ -1618,23 +1655,25 @@ func TestABatchIsNotPartlyExecuted(t *testing.T) {
 
 // TestRunDetailStatesWhatAPtyCannotKnow pins the thing the reply cannot say.
 //
-// On a pty, `run` samples a window and returns; there is no completion signal to
-// report, so an empty reply is indistinguishable from a silent command. That is
-// invisible in the wire format, which makes `help run` the only place a caller
-// can find it — and a caller that guesses wrong reaches for `read`, which is a
-// consuming cursor and therefore the one thing that cannot help.
+// On a pty, `run` waits for the stream to go still and returns; there is no
+// completion signal to report, so a reply that stops mid-output is indistinguishable
+// from a finished command. That is invisible in the wire format, which makes
+// `help run` the only place a caller can find it — along with the two things that
+// do help: raising `timeout` for a command that has not spoken yet, and `read` for
+// the bytes that arrive after the wait ended.
 func TestRunDetailStatesWhatAPtyCannotKnow(t *testing.T) {
 	s := newTestServer(t)
 	body := termText(t, s, map[string]any{"cmd": "help run"})
 
-	for _, want := range []string{"pty", "SAMPLES", "timeout", "pipe"} {
+	for _, want := range []string{"pty", "STILL", "timeout", "pipe"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("`help run` does not mention %q:\n%s", want, body)
 		}
 	}
-	// The advice that actually rescues the caller: read cannot recover the bytes.
-	if !strings.Contains(body, "consuming cursor") {
-		t.Errorf("`help run` does not warn that read is a consuming cursor:\n%s", body)
+	// The advice that actually rescues the caller: the bytes are still there, and
+	// read repeats the sample rather than continuing after it.
+	if !strings.Contains(body, "its own cursor") {
+		t.Errorf("`help run` does not say where the rest of the output is:\n%s", body)
 	}
 }
 

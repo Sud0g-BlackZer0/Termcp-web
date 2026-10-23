@@ -62,22 +62,35 @@ func TestAllowEscapesTruePermitsControlBytes(t *testing.T) {
 	}
 }
 
-// TestQuotedControlBytesArePermittedByDefault: single-quoted or double-quoted control
-// bytes are data, not unquoted syntax, so they are not rejected.
-func TestQuotedControlBytesArePermittedByDefault(t *testing.T) {
+// TestQuotedControlBytesAreRefusedToo is the correction to a gate that trusted
+// quoting.
+//
+// It used to permit a control byte inside `'…'` or `"…"` on the theory that the
+// shell would treat it as data. The shell would — but the byte reaches the TERMINAL
+// first, and the line editor parses no quotes. Measured with a real pty: a quoted
+// carriage return submitted the line early and left PowerShell at its `>>`
+// continuation prompt, with the reply still 200. A gate that only looks at quoting
+// is a gate that opens exactly where the danger is.
+func TestQuotedControlBytesAreRefusedToo(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
 
 	for _, cmd := range []string{
 		"run " + h + " echo 'a\rb'",
-		"run " + h + ` echo "a\rb"`,
-		"run " + h + " echo a\tb", // TAB is normal whitespace, not a dangerous control byte
+		"run " + h + " echo \"a\rb\"",
 	} {
 		got := termText(t, s, map[string]any{"cmd": cmd})
-		if strings.Contains(got, "raw_control_byte") {
-			t.Errorf("quoted/safe control byte was wrongly rejected:\n%s", got)
+		if !strings.Contains(got, "raw_control_byte") {
+			t.Errorf("a quoted control byte reached the terminal:\n%s", got)
 		}
+	}
+
+	// TAB is not a control byte the terminal acts on, quoted or not, and the gate
+	// must stay quiet about it or every indented command line would be refused.
+	got := termText(t, s, map[string]any{"cmd": "run " + h + " echo a\tb"})
+	if strings.Contains(got, "raw_control_byte") {
+		t.Errorf("TAB is ordinary whitespace and must not be refused:\n%s", got)
 	}
 }
 

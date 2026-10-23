@@ -68,7 +68,7 @@ const (
 	// target produced `info 's:1'`, a Path echo nobody wrote; quoting a value inside a
 	// frame produced `{"e":"'2+3'"}`, a JSON string carrying shell quotes, and under
 	// shell rules a reference inside the frame's own single quotes was not expanded at
-	// all — while the frame directives' help says to quote the frame.
+	// all — while the frame directives' help used to tell callers to quote the frame.
 	spanVerbatim
 
 	// spanArithmetic is the inside of `$(( ))` / `(( ))`, where a QUOTED WORD IS
