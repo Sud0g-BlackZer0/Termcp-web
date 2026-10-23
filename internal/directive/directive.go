@@ -399,15 +399,15 @@ var ops = []Op{
 		Usage:     "open <session> [--argv <cmd> [--pty]]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>   |   open <session> cdp:N --target <targetId>",
 		Detail:    openDetail},
 	{Name: "ls", Core: true, Kind: KindFlags, Target: true, TargetOptional: true,
-		Kinds:     []string{"forward", "file", "host", "ext", "alias", "cdp", "mcp", "jrpc"},
+		Kinds:     []string{"forward", "file", "host", "ext", "alias", "cdp", "mcp", "jrpc", "task"},
 		Flags:     []string{"all"},
 		Valueless: []string{"all"},
-		Usage:     "ls   |   ls host   |   ls ext   |   ls alias   |   ls <session> [forward|file]",
+		Usage:     "ls   |   ls host   |   ls ext   |   ls alias   |   ls task   |   ls <session> [forward|file]",
 		Detail:    lsDetail},
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
-		Kinds:  []string{"file", "host", "ext", "protocol", "cdp", "mcp", "jrpc"},
+		Kinds:  []string{"file", "host", "ext", "protocol", "cdp", "mcp", "jrpc", "task"},
 		Flags:  []string{"op"},
-		Usage:  "get <session|channel|host-name>   |   get host <name>   |   get ext <name>   |   get <session> file <path> [--op stat|realpath|urls|…]   |   get <session> cdp[:N][@target] [protocol [Domain]]",
+		Usage:  "get <session|channel|host-name>   |   get host <name>   |   get ext <name>   |   get task <id>   |   get <session> file <path> [--op stat|realpath|urls|…]   |   get <session> cdp[:N][@target] [protocol [Domain]]",
 		Detail: getDetail},
 	{Name: "close", Core: true, Kind: KindFlags, Target: true,
 		// mcp/cdp/jrpc/file are DECLARED SO THEY ARE REFUSED BY NAME. Dropping them
@@ -415,7 +415,7 @@ var ops = []Op{
 		// becomes a stray positional argument and the statement still reaches the
 		// container. A declared kind is recognised, and the dispatcher's default branch
 		// then answers with what to write instead.
-		Kinds: []string{"forward", "mcp", "cdp", "jrpc", "file"},
+		Kinds: []string{"forward", "mcp", "cdp", "jrpc", "file", "task"},
 		Flags: []string{"grace", "forward-id"},
 		RetiredFlags: map[string]string{
 			"force": "--force is gone. `close` stops and keeps the record, `rm` erases it.",
@@ -776,13 +776,20 @@ const getDetail = `Describe one node: a session, one of its channels, or a peer.
   get a1f3 cdp:1@<id>       one tab: target, url, enabled domains
   get a1f3 cdp:1 protocol   the browser's OWN command list (the live /json/protocol)
   get a1f3 cdp:1 protocol Page   one domain's commands and their parameters
+  get task task_9f2c11ab    one background transfer, waiting up to the window
 
 For the list of what exists, use ls.
 
 WHY THE PROTOCOL IS ASKED FOR rather than remembered: a hardcoded method table is a
 second truth, and it drifts silently the moment the browser updates — a caller fills
 in parameters that no longer exist and reads the resulting error as their own fault.
-The browser publishes its own signature; this reads it.`
+The browser publishes its own signature; this reads it.
+
+get task <id> TAKES NO SESSION: a transfer belongs to the process, not to a session
+handle, and the caller may have no handle left by the time it asks. The window is the
+wait — the reply comes back the moment the transfer ends, and reports progress when
+the window expires instead of failing. A receipt stays answerable for ten minutes
+after the transfer ends.`
 
 const callDetail = `Send one JSON-RPC frame to a peer opened with
 "open <session> mcp|cdp|jrpc <url>", and wait for the reply that answers it.
@@ -827,7 +834,27 @@ const writeDetail = `Write a file on a session.
 
 --data decodes by --mode (text by default, so \n is a newline). For binary use hex:
 or --local-path. The write is a plain overwrite, not an append: use --offset only
-when you mean to patch bytes in place.`
+when you mean to patch bytes in place.
+
+--local-path IS A TRANSFER AND ANSWERS 202 WITH A RECEIPT. Moving a file over SFTP
+takes as long as the link takes, and a caller behind a tool-call watchdog would
+otherwise be killed partway through — leaving a truncated file on the far side with
+no error anywhere. So the call returns in milliseconds:
+
+  TERM/1 202 Accepted
+  Task: task_9f2c11ab
+  Status:   running
+  Progress: 0 bytes/30.7 MB (0%)
+
+  get task task_9f2c11ab --timeout 30
+
+get task <id> returns the moment the transfer finishes, and answers with its
+progress when the window expires instead of failing. ls task lists them,
+close task <id> cancels one.
+
+THE TARGET NEVER HOLDS A PARTIAL FILE. A whole-file write streams to a temporary
+sibling and is renamed over the target only on a clean exit, so an interrupted or
+failed transfer leaves the old file (or no file) where the new one goes.`
 
 const createDetail = `Create saved configuration. It outlives every session and needs no connection.
 

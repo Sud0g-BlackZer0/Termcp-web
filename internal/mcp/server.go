@@ -14,6 +14,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/message"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
+	"github.com/open-mcp-ai/termcp/internal/task"
 )
 
 // Server wraps the MCP SSE server, streamable HTTP handler, and tool handlers.
@@ -43,6 +44,12 @@ type Server struct {
 	// It is fed by mcp-go's session hooks, which is the only place a client
 	// attaching or detaching is observable.
 	connections *connRegistry
+
+	// tasks tracks the asynchronous file transfers this process started (#158).
+	// Transfers are always async: a caller behind a tool-call watchdog that fires
+	// at 30s cannot synchronously move a 30 MB binary, and an interrupted transfer
+	// used to leave a truncated file with no error anywhere.
+	tasks *task.Manager
 	// connListener is called when that set changes, so the Web UI can refresh
 	// without polling. Set by main to the same broadcast the session list uses.
 	connListener func()

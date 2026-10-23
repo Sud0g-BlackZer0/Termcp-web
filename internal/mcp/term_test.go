@@ -63,6 +63,20 @@ func headerValue(t *testing.T, text, key string) (string, bool) {
 	return "", false
 }
 
+// headerValueOr is headerValue without a test handle, for helpers that need a
+// header inside an expression.
+func headerValueOr(text, key, def string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if line == "" {
+			break
+		}
+		if v, ok := strings.CutPrefix(line, key+": "); ok {
+			return v
+		}
+	}
+	return def
+}
+
 // handleFrom reads the Handle header, which is how a caller learns a new channel.
 func handleFrom(t *testing.T, text string) string {
 	t.Helper()

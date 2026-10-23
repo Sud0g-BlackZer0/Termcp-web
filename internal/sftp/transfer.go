@@ -1,6 +1,7 @@
 package sftp
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -253,7 +254,39 @@ func (s *Client) writeInline(remotePath string, offset *int64, data string, mode
 	return int64(n), nil
 }
 
+// ProgressFunc receives incremental byte counts during a transfer.
+type ProgressFunc func(n int64)
+
+// progressReader wraps r and reports bytes read to onProgress.
+type progressReader struct {
+	r          io.Reader
+	onProgress ProgressFunc
+}
+
+func (p progressReader) Read(buf []byte) (int, error) {
+	n, err := p.r.Read(buf)
+	if n > 0 && p.onProgress != nil {
+		p.onProgress(int64(n))
+	}
+	return n, err
+}
+
 func (s *Client) writeFromLocal(remotePath string, offset *int64, localPath string, localOffset, length int64) (int64, error) {
+	return s.WriteFromLocalProgress(context.Background(), remotePath, offset, localPath, localOffset, length, nil)
+}
+
+// WriteFromLocalProgress streams a local file to remotePath, reporting progress.
+//
+// ATOMIC ON A FULL REWRITE. When offset == nil the caller is replacing the file,
+// and a sync copy that gets interrupted (host watchdog, link reset) leaves a
+// half-written file on the far side — which docker or a service then fails to run
+// (#158). So a whole-file write streams to a temporary sibling (`.termcp-part-…`)
+// and renames it over the target only on a clean exit. An aborted transfer deletes
+// the part file: no half-written binaries are ever left behind.
+//
+// An explicit offset patches the target in place, because a patch cannot be
+// assembled in a sibling without copying the rest of the file first.
+func (s *Client) WriteFromLocalProgress(ctx context.Context, remotePath string, offset *int64, localPath string, localOffset, length int64, onProgress ProgressFunc) (int64, error) {
 	localFile, err := os.Open(localPath)
 	if err != nil {
 		return 0, fmt.Errorf("open local file: %w", err)
@@ -271,12 +304,26 @@ func (s *Client) writeFromLocal(remotePath string, offset *int64, localPath stri
 		return 0, fmt.Errorf("seek local: %w", err)
 	}
 
+	// Choose the target: a temporary sibling for a full rewrite, the real path for a patch.
+	isWholeRewrite := offset == nil
+	writePath := remotePath
+	if isWholeRewrite {
+		writePath = siblingOf(remotePath, ".termcp-part-"+randomSuffix())
+	}
+
 	flag, off := writeOpenFlags(offset)
-	remoteFile, err := s.client.OpenFile(remotePath, flag)
+	remoteFile, err := s.client.OpenFile(writePath, flag)
 	if err != nil {
 		return 0, fmt.Errorf("open remote file: %w", err)
 	}
-	defer remoteFile.Close()
+	// A failed or cancelled write must not leave the part file behind.
+	success := false
+	defer func() {
+		_ = remoteFile.Close()
+		if isWholeRewrite && !success {
+			_ = s.RemoveFile(writePath)
+		}
+	}()
 
 	if off > 0 {
 		if _, err := remoteFile.Seek(off, io.SeekStart); err != nil {
@@ -284,11 +331,57 @@ func (s *Client) writeFromLocal(remotePath string, offset *int64, localPath stri
 		}
 	}
 
-	n, err := io.CopyN(remoteFile, localFile, length)
-	if err != nil {
-		return 0, fmt.Errorf("copy: %w", err)
+	var reader io.Reader = io.LimitReader(localFile, length)
+	if onProgress != nil {
+		reader = progressReader{r: reader, onProgress: onProgress}
 	}
-	return n, nil
+
+	// Copy in chunks so ctx.Done() is observed during the transfer: io.CopyN
+	// would otherwise block until EOF even after context cancellation.
+	buf := make([]byte, 32<<10)
+	var written int64
+	for written < length {
+		if err := ctx.Err(); err != nil {
+			return written, err
+		}
+		toRead := int64(len(buf))
+		if remain := length - written; remain < toRead {
+			toRead = remain
+		}
+		nr, rerr := reader.Read(buf[:toRead])
+		if nr > 0 {
+			nw, werr := remoteFile.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if werr != nil {
+				return written, fmt.Errorf("write remote: %w", werr)
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return written, fmt.Errorf("read local: %w", rerr)
+		}
+	}
+
+	if isWholeRewrite {
+		// Close before renaming: Windows rejects a rename while a handle is open.
+		if err := remoteFile.Close(); err != nil {
+			return written, fmt.Errorf("close temporary file: %w", err)
+		}
+		if err := s.RenameFile(writePath, remotePath); err != nil {
+			// Cross-platform replace fallback (Windows rejects overwrite).
+			_ = s.RemoveFile(remotePath)
+			if err := s.RenameFile(writePath, remotePath); err != nil {
+				return written, fmt.Errorf("rename temporary file over %s: %w", remotePath, err)
+			}
+		}
+	}
+
+	success = true
+	return written, nil
 }
 
 // writeOpenFlags decides how a write opens its target.
@@ -522,4 +615,84 @@ func siblingOf(remotePath, suffix string) string {
 		return sep + "." + base + suffix
 	}
 	return dir + sep + "." + base + suffix
+}
+
+// ReadToLocalProgress streams remotePath into a local file, reporting progress.
+//
+// THE LOCAL SIDE IS THE ONE THAT MUST NOT BE LEFT HALF-WRITTEN, for the same reason
+// a remote target must not: whoever consumes the download — a build, a checksum, an
+// installer — reads the name it asked for. So the bytes go to `<local>.part` and the
+// rename happens on a clean exit; an interrupted download deletes the part file.
+func (s *Client) ReadToLocalProgress(ctx context.Context, remotePath, localPath string, offset, length int64, onProgress ProgressFunc) (int64, error) {
+	f, err := s.client.Open(remotePath)
+	if err != nil {
+		return 0, fmt.Errorf("open remote file: %w", err)
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat remote file: %w", err)
+	}
+	if fi.IsDir() {
+		return 0, fmt.Errorf("%s: %w; `get <session> file <path> --op stat` lists it, and the shell can list it too", remotePath, ErrIsDirectory)
+	}
+	totalSize := fi.Size()
+	offset, length = normalizeReadRange(totalSize, offset, length, 0)
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("seek: %w", err)
+	}
+
+	partPath := localPath + ".termcp-part"
+	localFile, err := os.Create(partPath)
+	if err != nil {
+		return 0, fmt.Errorf("create local file: %w", err)
+	}
+	success := false
+	defer func() {
+		_ = localFile.Close()
+		if !success {
+			_ = os.Remove(partPath)
+		}
+	}()
+
+	var reader io.Reader = io.LimitReader(f, length)
+	if onProgress != nil {
+		reader = progressReader{r: reader, onProgress: onProgress}
+	}
+
+	// Chunked so ctx.Done() is observed: io.CopyN would run to EOF regardless.
+	buf := make([]byte, 32<<10)
+	var written int64
+	for written < length {
+		if err := ctx.Err(); err != nil {
+			return written, err
+		}
+		toRead := int64(len(buf))
+		if remain := length - written; remain < toRead {
+			toRead = remain
+		}
+		nr, rerr := reader.Read(buf[:toRead])
+		if nr > 0 {
+			nw, werr := localFile.Write(buf[:nr])
+			written += int64(nw)
+			if werr != nil {
+				return written, fmt.Errorf("write local: %w", werr)
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return written, fmt.Errorf("read remote: %w", rerr)
+		}
+	}
+	if err := localFile.Close(); err != nil {
+		return written, fmt.Errorf("close local file: %w", err)
+	}
+	if err := os.Rename(partPath, localPath); err != nil {
+		return written, fmt.Errorf("rename into place: %w", err)
+	}
+	success = true
+	return written, nil
 }

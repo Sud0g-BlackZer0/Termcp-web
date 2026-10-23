@@ -144,9 +144,13 @@ type Channel struct {
 	shut atomic.Bool
 
 	// readErr carries why the socket stopped; done is closed by Close, releasing
-	// blocked readers and senders.
+	// blocked readers and senders; dead is closed by the read loop when the socket
+	// stops delivering, so a waiter learns the difference between "nothing yet" and
+	// "nothing ever again" without waiting out its whole window.
 	readErr chan error
 	done    chan struct{}
+	dead    chan struct{}
+	deadOne sync.Once
 
 	// evCond is signalled when ev gains a frame. The dispatcher appends; readers
 	// wait on it. A condition variable rather than a channel because a reader
@@ -246,6 +250,7 @@ func Open(ctx context.Context, rawURL string, dial DialFunc) (*Channel, error) {
 		}
 		c.conn = conn
 		c.readErr = make(chan error, 1)
+		c.dead = make(chan struct{})
 		go c.readLoop()
 	case "http", "https":
 		c.transport = HTTP
@@ -292,6 +297,11 @@ func (c *Channel) readLoop() {
 			case c.readErr <- err:
 			default: // a reason was already recorded
 			}
+			// The socket is gone: a waiter learns it here instead of waiting out its
+			// whole window for an answer that can no longer arrive. (Closing on the
+			// channel rather than broadcasting, because a broadcast only wakes a parked
+			// reader once — a later call would park again and time out.)
+			c.deadOne.Do(func() { close(c.dead) })
 			// A reader parked on the backlog has to learn that nothing more is
 			// coming, or it waits out its whole window for a frame that cannot arrive.
 			c.evCond.Broadcast()
@@ -412,6 +422,11 @@ func (c *Channel) awaitAnswer(ctx context.Context, want any) (string, error) {
 	select {
 	case rec := <-ch:
 		return rec.Data, nil
+	case <-c.dead:
+		// The socket stopped: an answer can no longer arrive, and this is NOT a
+		// timeout — the caller has to be able to tell "the peer went away" from "the
+		// peer is thinking".
+		return "", c.readFailure()
 	case <-c.done:
 		return "", ErrClosed
 	case <-ctx.Done():
@@ -561,7 +576,7 @@ func (c *Channel) TakeFramed(ctx context.Context) (Framed, bool) {
 	c.evMu.Lock()
 	defer c.evMu.Unlock()
 	for len(c.ev) == 0 {
-		if c.shut.Load() || ctx.Err() != nil {
+		if c.shut.Load() || ctx.Err() != nil || c.socketGone() {
 			return Framed{}, false
 		}
 		// A helper goroutine releases the condition when ctx or done closes, so a
@@ -581,7 +596,7 @@ func (c *Channel) TakeFramed(ctx context.Context) (Framed, bool) {
 		if len(c.ev) > 0 {
 			break
 		}
-		if c.shut.Load() || ctx.Err() != nil {
+		if c.shut.Load() || ctx.Err() != nil || c.socketGone() {
 			return Framed{}, false
 		}
 	}
@@ -616,7 +631,7 @@ func (c *Channel) Next(ctx context.Context) (string, bool) {
 				return f.Data, true
 			}
 		}
-		if c.shut.Load() || ctx.Err() != nil {
+		if c.shut.Load() || ctx.Err() != nil || c.socketGone() {
 			return "", false
 		}
 		stop := make(chan struct{})
@@ -648,6 +663,20 @@ func (c *Channel) popEvent() (Framed, bool) {
 		}
 	}
 	return Framed{}, false
+}
+
+// socketGone reports that the read loop has stopped, so no further frame can
+// arrive on this channel.
+func (c *Channel) socketGone() bool {
+	if c.dead == nil {
+		return false
+	}
+	select {
+	case <-c.dead:
+		return true
+	default:
+		return false
+	}
 }
 
 // pop takes the oldest buffered frame.

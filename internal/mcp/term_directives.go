@@ -17,6 +17,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
+	"github.com/open-mcp-ai/termcp/internal/task"
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
 
@@ -76,6 +77,12 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 	case "reader":
 		return []envelope.Slot{s.directiveReader(ctx, stmt, win)}
 	case "get":
+		if stmt.Kind == "task" {
+			// A RECEIPT IS READ WITHOUT A SESSION behind it: the transfer it describes
+			// outlived the call that started it, and the caller may have no session
+			// handle at all by now. `get task <id>` therefore takes no target.
+			return []envelope.Slot{s.directiveGetTask(ctx, stmt, win)}
+		}
 		if stmt.Kind == "host" {
 			// `get host <name>` reads one entry back. Without it a caller could create,
 			// edit and delete a host but never see what it holds, so a partial edit had
@@ -223,6 +230,8 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 	// closing the primary channel): a qualifier read as decoration.
 	case "close":
 		switch stmt.Kind {
+		case "task":
+			return []envelope.Slot{s.directiveCloseTask(ctx, stmt)}
 		case "forward":
 			// THE ID IS THE NODE, so it arrives as the key rather than as a flag: the tree
 			// says `close <session> forward <id>`, and asking for `--forward-id` here made
@@ -1581,6 +1590,17 @@ func (s *Server) peerChannel(ctx context.Context, stmt directive.Statement, win 
 		h = found
 	}
 
+	// THE WINDOW IS THIS SIDE'S OWN DEADLINE (#158). Without it the only bound on a
+	// peer call is the caller's context, which belongs to a host watchdog this daemon
+	// cannot see — so a peer that never answers hangs until the host kills the turn,
+	// and what the caller reads is a watchdog abort rather than "the peer is not
+	// answering". A waiter gets the caller's window, or 15s when none was asked for.
+	callCtx, stopCall := ctx, context.CancelFunc(func() {})
+	if sub == "call" || sub == "recv" {
+		callCtx, stopCall = context.WithTimeout(ctx, peerCallWindow(win))
+		defer stopCall()
+	}
+
 	// A BROWSER SESSION IS NOT A CHANNEL: the frame is written by the caller, and the
 	// one thing this layer adds is the sessionId. Everything else (the method table,
 	// the parameters) stays the caller's, which is why there is no CDP command enum
@@ -1591,14 +1611,14 @@ func (s *Server) peerChannel(ctx context.Context, stmt directive.Statement, win 
 			return []envelope.Slot{*bad}
 		}
 		if sub == "send" || boolFlag(stmt, "send") {
-			return []envelope.Slot{s.cdpSend(ctx, stmt, h, index, f)}
+			return []envelope.Slot{s.cdpSend(callCtx, stmt, h, index, f)}
 		}
-		return []envelope.Slot{s.cdpCall(ctx, stmt, h, index, f)}
+		return []envelope.Slot{namePeerTimeout(callCtx, s.cdpCall(callCtx, stmt, h, index, f))}
 	}
 	addr := peerKey(h.sessionID, h.kind, h.index)
 	out := stmt
 	out.Op = h.kind
-	return []envelope.Slot{s.jrpcChannel(ctx, out, win, h.kind, sub, []string{addr, frame})}
+	return []envelope.Slot{namePeerTimeout(callCtx, s.jrpcChannel(callCtx, out, win, h.kind, sub, []string{addr, frame}))}
 }
 
 // openPeer opens a peer through a session and returns the handle.
@@ -1615,6 +1635,15 @@ func (s *Server) openPeer(ctx context.Context, stmt directive.Statement, win ter
 // it goes, and this translates it into the action the collection's handler expects.
 func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
 	switch stmt.Kind {
+	case "task":
+		// TASKS ARE NOT A SESSION'S COLLECTION. A transfer belongs to the process, not
+		// to a session handle, so `ls task` takes no target — the same shape as
+		// `ls host`.
+		if stmt.Key != "" {
+			return []envelope.Slot{badRequest(stmt, "`ls task` lists every transfer; for one of them use `get task "+
+				stmt.Key+" --timeout N`.")}
+		}
+		return []envelope.Slot{s.directiveLsTask(stmt)}
 	case "host":
 		// A NAME HERE WOULD BE SILENTLY DROPPED: the handler lists every entry, so
 		// `ls host prod` answered the whole table and the caller believed it had been
@@ -1814,4 +1843,129 @@ func (s *Server) listPeers(stmt directive.Statement) envelope.Slot {
 		b.WriteString("\n")
 	}
 	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: b.String()}
+}
+
+// --- task: the receipt side of an asynchronous transfer (#158) ---
+
+// directiveGetTask answers `get task <id>`, waiting out the caller's window.
+//
+// THE WINDOW IS THE WAIT, exactly as it is for a pty read: the reply comes back the
+// instant the transfer finishes, and one that does not finish inside the window
+// answers with its progress rather than an error. That is the whole point of a
+// receipt — the caller decides how long to wait, not a watchdog it cannot see.
+func (s *Server) directiveGetTask(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
+	id := strings.TrimSpace(stmt.Key)
+	if id == "" {
+		id = strings.TrimSpace(stmt.Target)
+	}
+	if id == "" {
+		return badRequest(stmt, "get task needs the id from the receipt: get task task_abc123")
+	}
+	timeout := time.Duration(win.TimeoutSeconds * float64(time.Second))
+	v, err := s.tasks.Await(ctx, id, timeout)
+	if err != nil {
+		return notFoundSlot(stmt, CodeInvalidArgument, err.Error()+
+			"\nA receipt is answerable for ten minutes after the transfer ends; `ls task` lists the live ones.")
+	}
+	code := 200
+	if v.Status == task.Failed {
+		code = 500
+	}
+	return envelope.Slot{Code: code, Headers: map[string]string{
+		"Path": stmt.Path, "Task": v.ID, "Status": string(v.Status),
+	}, Body: renderTask(v)}
+}
+
+// directiveLsTask answers `ls task`: every transfer this process knows about.
+func (s *Server) directiveLsTask(stmt directive.Statement) envelope.Slot {
+	list := s.tasks.List()
+	if len(list) == 0 {
+		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path},
+			Body: "no transfers. A `write <session> file <path> --local-path <file>` starts one and answers with a task id."}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d task(s):\n", len(list))
+	for _, v := range list {
+		fmt.Fprintf(&b, "  %-16s %-9s %-9s %s\n", v.ID, v.Kind, v.Status, taskProgress(v))
+	}
+	b.WriteString("\n`get task <id>` waits for one; `close task <id>` cancels it.")
+	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: b.String()}
+}
+
+// directiveCloseTask answers `close task <id>`: cancel the transfer, do not delete
+// the receipt.
+func (s *Server) directiveCloseTask(ctx context.Context, stmt directive.Statement) envelope.Slot {
+	id := strings.TrimSpace(stmt.Key)
+	if id == "" {
+		id = strings.TrimSpace(stmt.Target)
+	}
+	if id == "" {
+		return badRequest(stmt, "close task needs the id: close task task_abc123")
+	}
+	stopped, err := s.tasks.Cancel(id)
+	if err != nil {
+		return notFoundSlot(stmt, CodeInvalidArgument, err.Error()+"\n`ls task` lists the live ones.")
+	}
+	v, gerr := s.tasks.Get(id)
+	if gerr != nil {
+		return notFoundSlot(stmt, CodeInvalidArgument, gerr.Error())
+	}
+	if !stopped {
+		// Already finished: the caller asked to stop something that is not running, and
+		// the honest answer names the state it is in instead of pretending to cancel.
+		return envelope.Slot{Code: 409, Headers: map[string]string{"Path": stmt.Path, "Task": id},
+			Body: "nothing to cancel: " + id + " is already " + string(v.Status) + "\n" + renderTask(v)}
+	}
+	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path, "Task": id, "Status": "cancelled"},
+		Body: "cancelled " + id + "; the partial file was removed at both ends\n" + renderTask(v)}
+}
+
+// renderTask is the one shape every task reply uses.
+func renderTask(v task.View) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Task:     %s\n", v.ID)
+	fmt.Fprintf(&b, "Kind:     %s\n", v.Kind)
+	fmt.Fprintf(&b, "Status:   %s\n", v.Status)
+	fmt.Fprintf(&b, "Progress: %s\n", taskProgress(v))
+	if rate := v.Rate(); rate > 0 {
+		fmt.Fprintf(&b, "Rate:     %s/s\n", humanBytes(rate))
+	}
+	fmt.Fprintf(&b, "Path:     %s -> %s\n", v.LocalPath, v.Path)
+	if v.Error != "" {
+		fmt.Fprintf(&b, "Error:    %s\n", v.Error)
+	}
+	return b.String()
+}
+
+// taskProgress renders "done/total (pct)" without inventing a total.
+func taskProgress(v task.View) string {
+	if v.BytesTotal <= 0 {
+		return humanBytes(v.BytesDone) + " (total unknown)"
+	}
+	return fmt.Sprintf("%s/%s (%d%%)", humanBytes(v.BytesDone), humanBytes(v.BytesTotal), v.Percent())
+}
+
+// peerCallWindow chooses the deadline for a peer call.
+//
+// Defaults to 15s: short enough that a 30s host watchdog never kills the call
+// from outside, long enough for any ordinary peer operation (a CDP evaluate, an
+// MCP tool list).
+const defaultPeerWindow = 15 * time.Second
+
+func peerCallWindow(win termArgs) time.Duration {
+	if win.TimeoutSeconds > 0 {
+		return time.Duration(win.TimeoutSeconds * float64(time.Second))
+	}
+	return defaultPeerWindow
+}
+
+// namePeerTimeout turns a deadline expiry into a 504 that names the peer.
+func namePeerTimeout(ctx context.Context, slot envelope.Slot) envelope.Slot {
+	if ctx.Err() == context.DeadlineExceeded && (slot.Code == 500 || slot.Code == 0) {
+		slot.Code = 504
+		slot.Headers["Error-Code"] = "peer_timeout"
+		slot.Body = "the peer did not answer within the window. `call` waited its full budget; " +
+			"raise `--timeout N` if this method needs longer, or use `--send` for fire-and-forget."
+	}
+	return slot
 }

@@ -694,6 +694,25 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 		text := toolResultText(res)
 		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: text}
 	}
+	if taskID := getString(doc, "task_id", ""); taskID != "" {
+		// A TRANSFER IS A RECEIPT (202 Accepted). The transfer has started in the
+		// background; the reply names the task id and tells the caller how to wait
+		// for it. A watchdog of 30s can now move a 30 MB binary without being killed.
+		v, err := s.tasks.Get(taskID)
+		body := ""
+		if err == nil {
+			body = renderTask(v) + "\n`get task " + taskID + "` waits for it; add `--timeout N` for a longer window."
+		} else {
+			body = "started " + taskID + "\n`get task " + taskID + "` waits for it."
+		}
+		return envelope.Slot{
+			Code: 202,
+			Headers: map[string]string{
+				"Path": stmt.Path, "Task": taskID, "Status": "running",
+			},
+			Body: body,
+		}
+	}
 	return generatedSlot(stmt, win, compactDocument(doc))
 }
 
