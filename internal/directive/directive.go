@@ -1375,8 +1375,13 @@ func ParseWithSubst(src string, sub Subst) (*File, error) {
 	// boundary is what decides — so the first pass is run against the caller's own
 	// text only to find those regions, and its failures are not reported: the real
 	// parse below is the one that answers.
-	raw := payloadSpans(src)
-	refs := parserRefs(src)
+	//
+	// ONE WALK FOR BOTH. The spans (which regions are shell syntax, arithmetic, or
+	// here-doc) and the refs (where the `$N` parameter expansions sit and whether an
+	// enclosing double-quote owns them) are collected in a single walk over one AST.
+	// Running two parses over the same source text only introduced the possibility of
+	// them seeing different things.
+	raw, refs := analyzeSource(src)
 	substituted, sentinels, err := substitute(src, sub, raw, refs)
 	if err != nil {
 		return nil, &Error{Msg: "cannot parse cmd: " + err.Error()}
@@ -1524,31 +1529,69 @@ func trailingPayloadOp(stmts []Statement) string {
 // The parser is right about shell, so in a shell region that is the end of it — a quoted
 // reference is the shell's literal. In a region no shell reads (a frame, `--data`, a name)
 // the bytes are the truth instead, and `resolve` reads them there.
-func parserRefs(src string) []ref {
+// analyzeSource runs the first AST pass over the caller's raw text.
+//
+// It answers two questions at once from ONE parsed tree:
+//   - which byte ranges hold shell syntax, arithmetic expressions, or here-docs (spans);
+//   - which parameter expansions exist and whether a double-quote encloses them (refs).
+//
+// Doing both in one walk guarantees they share the exact same view of the line:
+// an arithmetic node cannot be in one tree and its `$1` in another. A source that
+// does not parse yields nil for both; the real parse in ParseWithSubst then reports
+// the syntax error where it belongs.
+func analyzeSource(src string) ([]span, []ref) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(src), "")
 	if err != nil {
-		// The source does not parse, so there is nothing to report here: the real parse
-		// below reports the problem, and a reference in a line that does not parse is not
-		// the interesting fact about it.
-		return nil
+		return nil, nil
 	}
-	var dq [][2]int
-	var out []ref
+	var (
+		dq    [][2]int
+		refs  []ref
+		spans []span
+	)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch n := node.(type) {
 		case *syntax.DblQuoted:
-			// Pre-order, so an enclosing quote is recorded before the nodes inside it.
+			// Pre-order: enclosing quote is recorded before nodes inside it.
 			dq = append(dq, [2]int{int(n.Pos().Offset()), int(n.End().Offset())})
 		case *syntax.ParamExp:
 			if r, ok := refOfParam(src, n); ok {
 				r.dq = insideRange(dq, r.start, r.end)
-				out = append(out, r)
+				refs = append(refs, r)
+			}
+		case *syntax.ArithmExp:
+			// ARITHMETIC CONTEXT COMES FROM THE PARSER. `$(( ))` is an expression, not a
+			// word list, so the quoting that makes a value data would make the
+			// expression invalid — and the node type is the only thing that knows the
+			// difference between a `$1` in an operand and a `$1` in a command line.
+			spans = append(spans, span{start: int(n.Pos().Offset()), end: int(n.End().Offset()), mode: spanArithmetic})
+		case *syntax.Redirect:
+			// A HERE-DOCUMENT BODY IS ITS OWN NODE.
+			//
+			// `Redirect.Hdoc` is the body the parser already read — lines between the
+			// `<<EOF` line and the terminator. A quoted delimiter means the shell
+			// expands nothing in the body, which the grammar mirrors by emitting no
+			// ParamExp nodes; an unquoted delimiter DOES emit them, and the span tells
+			// the replacer to insert them bare as text rather than quoted as a word.
+			if n.Hdoc != nil && !wordIsQuoted(src, n.Word) {
+				spans = append(spans, span{start: int(n.Hdoc.Pos().Offset()), end: int(n.Hdoc.End().Offset()), mode: spanVerbatim})
 			}
 		}
 		return true
 	})
-	sort.Slice(out, func(i, j int) bool { return out[i].start < out[j].start })
-	return out
+	for _, stmt := range file.Stmts {
+		if stmt == nil || stmt.Cmd == nil {
+			continue
+		}
+		// ONE SPAN PER DIRECTIVE, NOT PER SHELL STATEMENT. `a && b` is one shell
+		// statement holding two directives, so walking file.Stmts alone would leave
+		// the second operand without a span.
+		for _, part := range flattenCond(stmt) {
+			spans = append(spans, statementRawSpans(src, part.stmt)...)
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].start < refs[j].start })
+	return spans, refs
 }
 
 // refOfParam reads one expansion, or declines it.
@@ -1600,71 +1643,6 @@ func insideRange(ranges [][2]int, start, end int) bool {
 		}
 	}
 	return false
-}
-
-// payloadSpans reports the byte ranges of src that hold a directive PAYLOAD, which
-// is the only region where a caller's value is shell syntax rather than data.
-//
-// It is a best-effort pass: a source that does not parse yields no spans, and the
-// caller's real parse then reports the problem. What it must not do is guess — a
-// statement whose directive is unknown has no payload boundary, so it contributes
-// nothing and the `$N` inside it stays in the data channel.
-func payloadSpans(src string) []span {
-	file, err := syntax.NewParser().Parse(strings.NewReader(src), "")
-	if err != nil {
-		return nil
-	}
-	var out []span
-	// ARITHMETIC CONTEXT COMES FROM THE PARSER TOO. `$(( ))` is an expression, not a
-	// word list, so the quoting that makes a value data would make the expression
-	// invalid — and the node type is the only thing that knows the difference between
-	// a `$1` in an operand and a `$1` in a command line.
-	syntax.Walk(file, func(node syntax.Node) bool {
-		switch n := node.(type) {
-		case *syntax.ArithmExp:
-			out = append(out, span{start: int(n.Pos().Offset()), end: int(n.End().Offset()), mode: spanArithmetic})
-		case *syntax.Redirect:
-			// A HERE-DOCUMENT BODY IS ITS OWN NODE, and it is not a word list.
-			//
-			// `Redirect.Hdoc` is the body the parser already read — the lines between
-			// the `<<EOF` line and the terminator — so its bounds are a fact, not a
-			// scan for the terminator. Without this span a reference in a body took the
-			// data rule and arrived quoted:
-			//
-			//	run h:1 cat <<EOF / $1 / EOF   args ["echo C"]
-			//		body got  'echo C'   -> the file said `'echo C'`, quotes included
-			//
-			// Verbatim, not quoted, because a body is neither word-split nor globbed:
-			// the value is text that goes into the body as written. (An unquoted
-			// delimiter still expands `$name` in the body afterwards; that is the
-			// shell's rule and the caller's choice of delimiter.)
-			// A QUOTED DELIMITER MEANS THE SHELL EXPANDS NOTHING IN THE BODY, and the
-			// grammar says so by reporting no nodes inside it. That is the same rule as
-			// everywhere else in this pass — what the grammar did not report, the caller
-			// kept from being parsed — so no span is emitted, and a `$1` there stays the
-			// text the caller wrote. With an unquoted delimiter the parser DOES report the
-			// references, and the span is only here to say how the value goes in: bare, as
-			// text, because a body is neither word-split nor quoted.
-			if n.Hdoc != nil && !wordIsQuoted(src, n.Word) {
-				out = append(out, span{start: int(n.Hdoc.Pos().Offset()), end: int(n.Hdoc.End().Offset()), mode: spanVerbatim})
-			}
-		}
-		return true
-	})
-	for _, stmt := range file.Stmts {
-		if stmt == nil || stmt.Cmd == nil {
-			continue
-		}
-		// ONE SPAN PER DIRECTIVE, NOT PER SHELL STATEMENT. `a && b` is one shell
-		// statement holding two directives, so walking file.Stmts alone left the
-		// SECOND operand with no span at all — and a reference outside every span
-		// takes the data rule (one quoted word), which is why `run h:1 $1 && run h:1
-		// $2` quoted `$2` even after the first operand was fixed (issue #141).
-		for _, part := range flattenCond(stmt) {
-			out = append(out, statementRawSpans(src, part.stmt)...)
-		}
-	}
-	return out
 }
 
 // statementRawSpans reports the ranges of a statement whose values are SHELL
