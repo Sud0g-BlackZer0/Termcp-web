@@ -1582,6 +1582,24 @@ func refOfParam(src string, p *syntax.ParamExp) (ref, bool) {
 	}, true
 }
 
+// wordIsQuoted reports whether a word was written with quoting in it.
+//
+// THE SHELL'S OWN TEST FOR A HEREDOC DELIMITER, and the source text is the right place to
+// ask: what makes `<<'EOF'` literal is that the delimiter WORD contained quoting, and that
+// is a property of the bytes rather than of any node — a backslash counts, and so does a
+// quote of either kind.
+func wordIsQuoted(src string, w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	start, end := int(w.Pos().Offset()), int(w.End().Offset())
+	if start < 0 || end > len(src) || start > end {
+		return false
+	}
+	// The set is: single quote, double quote, backslash.
+	return strings.ContainsAny(src[start:end], `'"\`)
+}
+
 // insideRange reports whether [start,end) sits inside any of these ranges.
 func insideRange(ranges [][2]int, start, end int) bool {
 	for _, r := range ranges {
@@ -1628,7 +1646,14 @@ func payloadSpans(src string) []span {
 			// the value is text that goes into the body as written. (An unquoted
 			// delimiter still expands `$name` in the body afterwards; that is the
 			// shell's rule and the caller's choice of delimiter.)
-			if n.Hdoc != nil {
+			// A QUOTED DELIMITER MEANS THE SHELL EXPANDS NOTHING IN THE BODY, and the
+			// grammar says so by reporting no nodes inside it. That is the same rule as
+			// everywhere else in this pass — what the grammar did not report, the caller
+			// kept from being parsed — so no span is emitted, and a `$1` there stays the
+			// text the caller wrote. With an unquoted delimiter the parser DOES report the
+			// references, and the span is only here to say how the value goes in: bare, as
+			// text, because a body is neither word-split nor quoted.
+			if n.Hdoc != nil && !wordIsQuoted(src, n.Word) {
 				out = append(out, span{start: int(n.Hdoc.Pos().Offset()), end: int(n.Hdoc.End().Offset()), mode: spanVerbatim})
 			}
 		}

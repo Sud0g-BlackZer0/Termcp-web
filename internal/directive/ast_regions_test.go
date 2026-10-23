@@ -5,15 +5,14 @@ import (
 	"testing"
 )
 
-// These pin the regions the PARSER knows about and the byte scan used to guess at.
+// These pin the regions the parser knows about, after the pass stopped deciding them on
+// its own.
 //
-// The substitution pass is a scan, and a scan is the right shape for it: a verbatim
-// region (a JSON frame, a target) has no shell to honour, so the shell's own quoting
-// is not a rule there, and the parser cannot see inside a single-quoted string to
-// find a `$1` that a frame directive's help tells the caller to write. What the scan
-// must not do is decide things the node types already decide, and each case below was
-// exactly that: a region with a node of its own — a `&`, an arithmetic expansion, a
-// here-document body — was read as plain bytes, and the plain-byte reading was wrong.
+// The rule they all follow is one sentence: a reference is a `$` the grammar reported, and
+// what the grammar did not report the caller deliberately kept from being parsed. Each case
+// below is that sentence landing somewhere a hand-rolled rule used to answer differently —
+// a `&` read as a separator, an arithmetic expression read as a word list, a heredoc body
+// read as a line, a flag value read as shell.
 func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 	bs := string(rune(92))
 	cases := []struct {
@@ -23,17 +22,16 @@ func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 		want string
 	}{
 		{
-			// Stmt.Semicolon is documented as "position of ';', '&', or '|&'", and
-			// trimming it the way a ';' is trimmed dropped the backgrounding: the shell
-			// ran `sleep 100` in the foreground and the call blocked on it.
+			// Stmt.Semicolon is documented as "position of ';', '&', or '|&'", and trimming
+			// it the way a ';' is trimmed dropped the backgrounding: the shell ran the
+			// command in the foreground and the call blocked until it finished.
 			name: "a backgrounding ampersand is part of the line",
 			src:  "run s1:1 sleep 100 &",
 			want: "sleep 100 &",
 		},
 		{
-			// The `;` ends the termcp statement, so it is termcp's punctuation and the
-			// payload never carries it: `echo hi;` is not what the caller wrote a
-			// command line of.
+			// The `;` ends the termcp statement, so it is termcp's punctuation and never the
+			// shell's: `echo hi;` is not a command line the caller wrote.
 			name: "a semicolon still is not",
 			src:  "run s1:1 echo hi; ls host",
 			want: "echo hi",
@@ -53,18 +51,22 @@ func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 			want: "echo $(( 21 * 2 ))",
 		},
 		{
-			// Redirect.Hdoc IS the body, terminator excluded — the parser read it, so
-			// its bounds are not a scan for a line that looks like the terminator.
+			// Redirect.Hdoc IS the body, terminator excluded — the parser read it, so its
+			// bounds are not a scan for a line that looks like the terminator.
 			name: "a here-document body is text, not a word",
 			src:  "run s1:1 cat <<EOF\n$1\nEOF\n",
 			sub:  Subst{Pos: []string{"echo C"}},
 			want: "cat <<EOF\necho C\nEOF",
 		},
 		{
-			name: "a quoted delimiter does not change that",
+			// A QUOTED DELIMITER IS THE CALLER SAYING "EXPAND NOTHING HERE", and the grammar
+			// answers accordingly: no nodes inside the body, so no references, so the text
+			// arrives as written. The same rule as everywhere else in this pass rather than a
+			// heredoc special case — which is what makes it predictable.
+			name: "a quoted delimiter leaves the body alone",
 			src:  "run s1:1 cat <<'EOF'\n$1\nEOF\n",
 			sub:  Subst{Pos: []string{"echo C"}},
-			want: "cat <<'EOF'\necho C\nEOF",
+			want: "cat <<'EOF'\n$1\nEOF",
 		},
 		{
 			name: "the tab-stripping form too",
@@ -73,8 +75,8 @@ func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 			want: "cat <<-EOF\n\techo C\n\tEOF",
 		},
 		{
-			// The narrowing that must not be lost: a reference beside a word is still
-			// one quoted word, and a `$` the caller escaped is still not a reference.
+			// The narrowing that must not be lost: a reference beside a word is one quoted
+			// word, and a `$` the caller kept from the parser is the caller's literal.
 			name: "a reference beside a word is still quoted",
 			src:  "run s1:1 echo $1",
 			sub:  Subst{Pos: []string{"a; b"}},
@@ -91,6 +93,16 @@ func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 			src:  "run s1:1 echo '$1'",
 			sub:  Subst{Pos: []string{"a; b"}},
 			want: "echo '$1'",
+		},
+		{
+			// A redirect target is inside the command line but outside the payload words, so
+			// it is shell (quoted as data) rather than a flag value (bare). One number used to
+			// answer both questions, and `> $1` arrived bare in a redirect — a syntax error
+			// for any value with a space in it.
+			name: "a redirect target is shell, and quoted as data",
+			src:  "run s1:1 echo hi > $1",
+			sub:  Subst{Pos: []string{"/tmp/a b"}},
+			want: "echo hi > '/tmp/a b'",
 		},
 	}
 
@@ -110,9 +122,9 @@ func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 	}
 }
 
-// TestTheAmpersandReachesTheTerminal is the end-to-end half of the first case above:
-// the payload is what gets typed into the shell, so a dropped `&` is a foreground
-// command however clean the parse looked.
+// TestTheAmpersandReachesTheTerminal is the end-to-end half of the first case above: the
+// payload is what gets typed into the shell, so a dropped `&` is a foreground command
+// however clean the parse looked.
 func TestTheAmpersandReachesTheTerminal(t *testing.T) {
 	f, err := ParseWithSubst("run s1:1 sleep 100 &", Subst{})
 	if err != nil {

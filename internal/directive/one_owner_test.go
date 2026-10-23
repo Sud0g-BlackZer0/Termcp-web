@@ -44,9 +44,14 @@ func TestEveryRegionStatesHowItTakesAValue(t *testing.T) {
 		{"a frame is verbatim", `call s1:1 cdp '{"e":"$1"}'`, Subst{Pos: []string{"2+3"}}, `'{"e":"2+3"}'`, ""},
 		{"an arithmetic expression is bare", `run s1:1 echo $(( $1 + 1 ))`, Subst{Pos: []string{"2"}}, `echo $(( 2 + 1 ))`, ""},
 		{"a heredoc body is text", "run s1:1 cat <<EOF\n$1\nEOF\n", Subst{Pos: []string{"echo C"}}, "cat <<EOF\necho C\nEOF", ""},
-		// A flag value is bare AND takes the caller's quotes at face value: the
-		// destination is not a shell, so quoting there would be bytes nobody sent.
-		{"a flag value is bare", `write s1 file /tmp/x --data '$1'`, Subst{Pos: []string{"a b"}}, "", "data"},
+		// A FLAG VALUE IS SUBSTITUTED WITH THE PARSER'S RECOGNITION AND INSERTED BARE. The
+		// two halves come from different places and both are stated here: whether a `$1`
+		// counts is the grammar's answer (so `'$1'` is the caller's literal), and how the
+		// value goes in is the destination's (a flag value is not shell, so nothing quotes
+		// it — `--data "a b"` and `--data $1` both arrive as `a b`).
+		{"a flag value is inserted bare", `write s1 file /tmp/x --data "$1"`, Subst{Pos: []string{"a b"}}, "", "data"},
+		{"and unquoted too", `write s1 file /tmp/x --data $1`, Subst{Pos: []string{"a b"}}, "", "data"},
+		{"but a single-quoted one is the caller's literal", `write s1 file /tmp/x --data '$1'`, Subst{Pos: []string{"a b"}}, "", "data-literal"},
 	}
 
 	for _, c := range cases {
@@ -57,8 +62,12 @@ func TestEveryRegionStatesHowItTakesAValue(t *testing.T) {
 			}
 			st := f.Statements[0]
 			if c.flag != "" {
-				if got, _ := st.Flag(c.flag); got != "a b" {
-					t.Errorf("--%s with args [%q] arrived as %q, want %q", c.flag, c.sub.Pos[0], got, "a b")
+				want := "a b"
+				if c.flag == "data-literal" {
+					want = "$1"
+				}
+				if got, _ := st.Flag("data"); got != want {
+					t.Errorf("--data with args [%q] arrived as %q, want %q", c.sub.Pos[0], got, want)
 				}
 				return
 			}

@@ -283,44 +283,46 @@ type resolver struct {
 	failed   error
 }
 
-// blind finds the references the grammar cannot see, everywhere a shell will not read.
+// blind reads the one kind of region the grammar does not read at all: an OPAQUE PAYLOAD.
 //
-// The grammar reports nothing inside a single-quoted string — that node's text is one
-// field, because a shell expands nothing there — and the caller may still have written a
-// reference: in a frame, in `--data`, in a `--name`. So the bytes are read directly, and
-// only where no shell will read them: a reference the parser already reported is skipped,
-// and so is anything inside a shell region.
+// THE RULE THE WHOLE PASS FOLLOWS: a reference is a `$` the grammar reported. What the
+// grammar did not report, the caller deliberately kept from being parsed — `'$1'` is the
+// shell's literal, and an AI writing a shell-flavoured line knows exactly why. Substituting
+// it would be this daemon overruling the quoting the caller wrote.
 //
-// NO QUOTE STATE IS INVOLVED, which is the point of confining the scan this way. The
-// regions that reach here have no quoting rules to model — a quote is a byte — so the only
-// escape left is a backslash, and it is the caller's way to write a literal `$`.
+// An opaque payload is the one exception, and it is not a rule of its own: `call` takes its
+// frame as KindPayload, which the grammar never interprets (a JSON frame is not a shell
+// word — its braces are not even legal syntax). So "the grammar did not report it" carries
+// no meaning there, and the bytes are the only truth. That is why this scans a span's bytes
+// and no other: a span whose mode is spanVerbatim is a declaration that nobody parses it.
 func (r *resolver) blind() {
-	for i := 0; i < len(r.src); {
-		switch r.src[i] {
-		case '\\':
-			i += 2
-			continue
-		case '$':
-		default:
-			i++
+	for _, sp := range r.spans {
+		if sp.mode != spanVerbatim {
 			continue
 		}
-		name, end, positional, ok := paramAt(r.src, i)
-		if !ok {
-			i++
-			continue
-		}
-		if mode, _ := spanAt(r.spans, r.src, i, end); mode == spanCommandLine || mode == spanWords {
-			i = end // the parser owns this one
-			continue
-		}
-		if !r.reported[i] {
-			if err := r.one(i, end, name, positional, false); err != nil {
-				r.failed = err
-				return
+		for i := sp.start; i < sp.end && i < len(r.src); {
+			switch r.src[i] {
+			case '\\':
+				i += 2
+				continue
+			case '$':
+			default:
+				i++
+				continue
 			}
+			name, end, positional, ok := paramAt(r.src, i)
+			if !ok {
+				i++
+				continue
+			}
+			if !r.reported[i] {
+				if err := r.one(i, end, name, positional, false); err != nil {
+					r.failed = err
+					return
+				}
+			}
+			i = end
 		}
-		i = end
 	}
 }
 

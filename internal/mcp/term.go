@@ -103,7 +103,16 @@ type termArgs struct {
 	//
 	// A positional reference anywhere else (beside other words, in a flag value, in a
 	// target) is substituted as ONE QUOTED WORD, so a value can never turn into
-	// syntax the caller did not write.
+	// syntax the caller did not write. In a region no shell reads — a flag value, a
+	// protocol frame — nothing quotes it, because nothing would unquote it.
+	//
+	// WHAT COUNTS AS A REFERENCE IS THE GRAMMAR'S ANSWER, and that is the whole rule:
+	// a `$` the parser reported is a reference; one it did not report the caller kept
+	// from being parsed. So `run h:1 echo '$1'` sends the literal, `--data '$1'` sends
+	// the literal, and `--data $1` sends the value — the same sentence, three
+	// destinations, no per-region quoting rules to remember. The one region the grammar
+	// never reads is a `call` payload (a JSON frame is not a shell word), so there the
+	// bytes are read directly.
 	//
 	// $0 is refused rather than bound to the first element: the shell gives $0 a
 	// meaning (the program's own name) that an argument list does not have, so
