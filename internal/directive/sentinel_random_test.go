@@ -7,11 +7,11 @@ import (
 
 // TestTheSentinelIsRandomPerCall pins the property that makes a leaked hole obvious.
 //
-// The token used to be `__termcp_<n>__`: fixed prefix, sequential index, so it was
+// The token used to be `__hole_<n>__`: fixed prefix, sequential index, so it was
 // PREDICTABLE. A predictable token is one a caller can type, which collapsed two
 // different facts into the same string — "this is a hole the fill pass has not reached"
 // and "this is what the caller wrote". After the fill bug, `write h file $1` wrote a
-// file literally named `__termcp_0__` and nothing could tell that apart from a caller
+// file literally named `__hole_0__` and nothing could tell that apart from a caller
 // who had chosen that name on purpose.
 //
 // Random per call separates them by construction: two calls never mint the same token,
@@ -58,8 +58,8 @@ func TestTheSentinelIsRandomPerCall(t *testing.T) {
 // back, because the fill is single-pass over the tokens it minted itself.
 func TestACallerCannotForgeAHole(t *testing.T) {
 	for _, value := range []string{
-		"__termcp_0011223344556677__",
-		"a __termcp_deadbeefdeadbeef__ b",
+		"__hole_0011223344556677__",
+		"a __hole_deadbeefdeadbeef__ b",
 		sentinelMarker,
 	} {
 		f, err := ParseWithSubst("write h file $1", Subst{Pos: []string{value}})

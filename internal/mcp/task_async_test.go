@@ -167,7 +167,7 @@ func TestAnUploadLandsWhereTheArgumentSaid(t *testing.T) {
 	if !strings.HasPrefix(got, "TERM/1 202") {
 		t.Fatalf("a transfer must answer with a receipt:\n%s", got)
 	}
-	if strings.Contains(got, "__termcp_") {
+	if strings.Contains(got, "__hole_") {
 		t.Fatalf("the receipt names a substitution placeholder as the destination:\n%s", got)
 	}
 	if !strings.Contains(got, dst) {

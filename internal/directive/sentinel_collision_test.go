@@ -17,10 +17,10 @@ func TestTheHolePrefixNeverCollides(t *testing.T) {
 		src  string
 		seed string
 	}{
-		{"a clean source takes the seed as-is", "write h file __HOLE__", "__termcp_abc_"},
-		{"a source that already holds it is extended", "x __termcp_abc_ y", "__termcp_abc_"},
-		{"and again, because one underscore is not enough", "__termcp_abc_ and ___termcp_abc_", "__termcp_abc_"},
-		{"the bare marker is the fallback seed", "a __termcp_ b", "__termcp_"},
+		{"a clean source takes the seed as-is", "write h file __HOLE__", "__hole_abc_"},
+		{"a source that already holds it is extended", "x __hole_abc_ y", "__hole_abc_"},
+		{"and again, because one underscore is not enough", "__hole_abc_ and ___hole_abc_", "__hole_abc_"},
+		{"the bare marker is the fallback seed", "a __hole_ b", "__hole_"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,7 +44,7 @@ func TestASourceFullOfTheMarkerStillParses(t *testing.T) {
 	// The marker appears in the cmd itself, in a position the fill pass scans. A naive
 	// fixed prefix would find that text and read it as a hole.
 	f, err := ParseWithSubst(
-		"write h file $1 --data __termcp__ $2",
+		"write h file $1 --data __hole__ $2",
 		Subst{Pos: []string{"/tmp/x", "value"}},
 	)
 	if err != nil {
@@ -55,10 +55,10 @@ func TestASourceFullOfTheMarkerStillParses(t *testing.T) {
 		t.Errorf("key = %q, want /tmp/x — a marker in the source swallowed the fill", st.Key)
 	}
 	// The marker text the CALLER wrote is their bytes, and a flag value is one word:
-	// `--data __termcp__ $2` hands the flag the marker and leaves $2 as a positional.
+	// `--data __hole__ $2` hands the flag the marker and leaves $2 as a positional.
 	// The point is that the marker was not read as a hole.
 	d, _ := st.Flag("data")
-	if d != "__termcp__" {
+	if d != "__hole__" {
 		t.Errorf("data = %q, want the caller's own marker text", d)
 	}
 }

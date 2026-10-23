@@ -472,10 +472,10 @@ func isSpaceByte(c byte) bool {
 // that leaked (see isSentinel), not enough to forge one.
 //
 // The rest is random per call. A fixed prefix made the token predictable, and a
-// predictable token is a value a caller can type: `write h file __termcp_0__` was a
+// predictable token is a value a caller can type: `write h file __hole_...__` was a
 // legal path, so "this is a hole" and "this is what the caller wrote" were the same
 // string. Random bytes per call make the two distinguishable by construction.
-const sentinelMarker = "__termcp_"
+const sentinelMarker = "__hole_"
 
 // sentinelPrefix mints the word that stands in for a raw hole in one call's cmd.
 //
