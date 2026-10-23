@@ -114,3 +114,66 @@ func TestJrpcOpenDoesNotClaimTools(t *testing.T) {
 		t.Errorf("jrpc is a bare frame channel and must not advertise tool discovery:\n%s", out)
 	}
 }
+
+// TestMcpOpenRefusesAPeerThatCannotHandshake pins the other half of "report what
+// the connection is for": when the MCP handshake fails, the open FAILED.
+//
+// It used to answer 200 with a handle and the failure in the body, which meant every
+// later call repeated a fact the open already knew — and reported it as 500
+// connection_failed, blaming the transport for what is a wrong URL (found by
+// dogfooding: `open … mcp http://plain-http-server/` answered 200, and the next
+// `call` answered Internal Server Error).
+func TestMcpOpenRefusesAPeerThatCannotHandshake(t *testing.T) {
+	// A plain HTTP server: it answers, but it is not an MCP endpoint.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	s := newTestServer(t)
+	internalSession(t, s)
+
+	// The registry is package-global, so the assertion is "this call added nothing"
+	// rather than "the registry is empty": another test's live peer is not this
+	// test's leak.
+	countMCP := func() int {
+		jrpcChannelsMu.Lock()
+		defer jrpcChannelsMu.Unlock()
+		n := 0
+		for _, h := range jrpcChannels {
+			if h.kind == "mcp" {
+				n++
+			}
+		}
+		return n
+	}
+	before := countMCP()
+
+	out := termText(t, s, map[string]any{"cmd": "open internal mcp " + srv.URL})
+	if !strings.HasPrefix(out, "TERM/1 502") {
+		t.Fatalf("an open whose handshake failed must not report success:\n%s", out)
+	}
+	if _, hasHandle := headerValue(t, out, "Handle"); hasHandle {
+		t.Errorf("a refused open handed back a handle:\n%s", out)
+	}
+	if !strings.Contains(out, "not an MCP endpoint") {
+		t.Errorf("the refusal does not say what the URL is:\n%s", out)
+	}
+	// A PORT THAT IS NOT UP IS STILL AN OPEN: an HTTP channel dials on its first frame,
+	// so a server that has not started yet is a handle worth having. The two cases have
+	// to stay distinguishable, or the lazy-connect contract this door has always had
+	// would be replaced by "every open needs a running server".
+	dead := termText(t, s, map[string]any{"cmd": "open internal mcp http://127.0.0.1:1"})
+	if !strings.HasPrefix(dead, "TERM/1 200") {
+		t.Fatalf("an unreachable peer should still open (it dials lazily):\n%s", dead)
+	}
+	if h, ok := headerValue(t, dead, "Handle"); ok {
+		termText(t, s, map[string]any{"cmd": "close " + h})
+	}
+
+	// No channel left behind: a handle that cannot carry a tool call has no use but
+	// `close`, so the refused open must not add one to the registry.
+	if after := countMCP(); after != before {
+		t.Errorf("the refused peer was left in the registry (%d → %d)", before, after)
+	}
+}
