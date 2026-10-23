@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
@@ -1044,6 +1045,21 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 	if len(stmt.Args) > 0 {
 		op, ok := directive.Lookup(stmt.Args[0])
 		if !ok {
+			// A NOUN IS NOT A VERB, BUT IT IS A WORD IN THE GRAMMAR.
+			//
+			// `help file` answered "unknown directive: file" — true, and useless to a
+			// caller holding that word from `ls <session> file`. The tree's nouns
+			// (file, host, session, channel, forward, peer) are how a caller thinks
+			// about the surface, while help is indexed by verb, so the word that sends
+			// them here is the one word this page could not answer.
+			//
+			// The answer is DERIVED from the usage lines, not tabulated: every line that
+			// names the word is a page of it. A hand-kept map would drift the first time
+			// a verb was added, which is the same reason the flag list is derived.
+			if lines := usageLinesNaming(stmt.Args[0]); lines != "" {
+				return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path},
+					Body: stmt.Args[0] + " is a node, not a verb. These act on it:\n" + lines}
+			}
 			// 400, NOT 404 — AND THE SAME 400 THE BARE WORD GETS.
 			//
 			// Typing the word directly answered 400 ("this line is malformed"), while
@@ -1091,6 +1107,19 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 
 	b.WriteString("termcp — a shell-like DSL controlling hosts over SSH.\n")
 	b.WriteString("Local (\"internal\", if enabled) and remote targets are treated identically.\n\n")
+
+	// THE SHORTEST PATH COMES FIRST. This page used to open on the whole worldview —
+	// six node kinds, two centres, nineteen verbs — which is the right reference and
+	// the wrong first screen: a caller who only wants a shell and one command read
+	// it, then asked "so what do I type first?". Three lines answer that before the
+	// grammar arrives; everything below is for the second visit.
+	b.WriteString("SHORTEST PATH — `run` does the whole loop, one call:\n")
+	b.WriteString("  ls host                      what is there (local and ssh, in columns)\n")
+	b.WriteString("  connect <host>               opens a channel, answers its handle (a1f3:1)\n")
+	b.WriteString("  run a1f3:1 $1                types the line, presses Enter, reads what came back\n")
+	b.WriteString("  args: [\"make && test\"]\n")
+	b.WriteString("  input/key/read are the same three steps taken separately, for a TUI or a\n")
+	b.WriteString("  long-running command you want to watch between calls.\n\n")
 
 	b.WriteString("cmd = the DSL.  sh = a shell command.\n")
 	b.WriteString("cmd holds directives only. sh never appears in cmd — it enters as a value through\n")
@@ -1146,6 +1175,36 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	}
 	body, code := capGenerated(b.String(), win)
 	return termReply{win: win, slots: []envelope.Slot{{Code: code, Body: body}}}
+}
+
+// usageLinesNaming returns every usage line that names word as a word, or "".
+//
+// Matching is on WORD BOUNDARIES: `help session` must not match `sessions`, and a
+// noun that happens to be a substring of another verb's argument (`host` inside
+// `--host`) is not what the caller typed. A line that names the word twice is still
+// printed once — the caller wants the verbs, not the count.
+func usageLinesNaming(word string) string {
+	word = strings.TrimSpace(word)
+	if word == "" {
+		return ""
+	}
+	var b strings.Builder
+	seen := map[string]bool{}
+	for _, op := range directive.Ops() {
+		if seen[op.Usage] {
+			continue
+		}
+		for _, field := range strings.FieldsFunc(op.Usage, func(r rune) bool {
+			return !(r == '_' || r == '-' || r == ':' || unicode.IsLetter(r) || unicode.IsDigit(r))
+		}) {
+			if field == word {
+				seen[op.Usage] = true
+				b.WriteString(op.Usage + "\n")
+				break
+			}
+		}
+	}
+	return b.String()
 }
 
 func dash(s string) string {
@@ -1285,6 +1344,14 @@ func listFromDoc(res *mcpgo.CallToolResult, listKey, field string) string {
 			continue
 		}
 		b.WriteString(getString(item, field, ""))
+		// WHERE IT IS, on the same line as the name. The kind column is the one that
+		// separates "the machine I am on" from "a machine I reach over ssh" — the
+		// first thing a reader of `ls host` is deciding — and `where` answers it
+		// (a local OS, or the user@host:port a remote entry dials).
+		if kind := getString(item, "kind", ""); kind != "" {
+			b.WriteString("\t" + kind)
+			b.WriteString("\t" + dash(getString(item, "where", "")))
+		}
 		if desc := getString(item, "description", ""); desc != "" {
 			b.WriteString("\t" + desc)
 		}

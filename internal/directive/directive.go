@@ -624,7 +624,14 @@ Offset and Next-Offset, and a slice never ends in the middle of a character.
 of a line-oriented pipe and advances ONLY when that frame was complete: an incomplete
 frame is held for the next call rather than cut in half. That cursor is kept per
 channel, independent of the plain byte reader — so reading raw bytes never consumes
-a frame, and reading frames never shifts the byte position of a plain read.`
+a frame, and reading frames never shifts the byte position of a plain read.
+
+AN EMPTY REPLY IS USUALLY EARLY, NOT BROKEN. On a live pty a 204 means "sampled,
+nothing new since the cursor" — the command may simply not have printed yet. The
+reply carries Sampled: true and, when the call did not wait at all, a Hint naming
+the remedy: pass a timeout on the call and the read blocks until output arrives or
+the window ends. Waiting is a parameter of THIS call, not a flag, and it is the same
+clock every other directive uses.`
 
 // runDetail states what `run` can and cannot know, because the difference is
 // invisible in the reply and the wrong guess sends the caller chasing a silent

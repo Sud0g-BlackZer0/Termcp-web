@@ -169,10 +169,19 @@ func (s *Server) awaitShellReady(ctx context.Context, handle string, budget time
 // reading a stream that never separates them.
 func createdBody(doc map[string]any, mode string) string {
 	handle := shortHandle(doc)
-	if mode == "pty" {
-		return fmt.Sprintf("%s pty\n", handle)
+	// THE HANDLE IS TWO ADDRESSES IN ONE WORD, and the first reply is where that has
+	// to be said: `a1f3:1` looks like one opaque id, so a caller carries it into
+	// every command — until a verb wants the session (`rm` deletes a session, not a
+	// channel) and answers "that is a channel". Spelling the parts once, here, is
+	// what makes the difference visible at the moment the word is new.
+	split := ""
+	if i := strings.LastIndex(handle, ":"); i > 0 {
+		split = fmt.Sprintf(" (session %s, channel %s)", handle[:i], handle[i+1:])
 	}
-	return fmt.Sprintf("%s pipe (stderr separable: --stream e)\n", handle)
+	if mode == "pty" {
+		return fmt.Sprintf("%s pty%s\n", handle, split)
+	}
+	return fmt.Sprintf("%s pipe (stderr separable: --stream e)%s\n", handle, split)
 }
 
 // shortHandle renders `<session>:N` from a handler reply.

@@ -1103,6 +1103,21 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 	if waited > 0 {
 		headers["Waited"] = fmt.Sprintf("%dms", waited.Milliseconds())
 	}
+	// A 204 WITH NO WAIT IS THE ONE REPLY THAT LOOKS LIKE A BUG.
+	//
+	// An empty read of a live shell is legitimate — the command may simply not have
+	// printed yet — but `Waited: 0ms` says that in a technical voice, in the header
+	// block a caller skims last. The reported reaction was to suspect the input had
+	// been dropped and spend a call proving it had not. Naming the flag is what turns
+	// that into an obvious next move.
+	//
+	// A HEADER, not a body sentence: this reply is a 204, and 204 must not carry a
+	// body — the REST entrance would drop it and only MCP would show the hint, which
+	// is the silent divergence between the two entrances this repo keeps paying for.
+	// It appears only on the empty-and-unwaited case, so a read with output never pays.
+	if code == 204 && waited == 0 && s.ptyRunning(stmt.Target) {
+		headers["Hint"] = "nothing yet — a pty is still running. Pass timeout=<ms> to wait for output"
+	}
 	if code == 204 && s.ptyRunning(stmt.Target) {
 		headers["Sampled"] = "true"
 	}

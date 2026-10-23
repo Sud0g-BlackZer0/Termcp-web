@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **第一屏不再让人猜**。让一个没用过 termcp 的 agent 从零跑一遍真实任务，它报的五处摩擦全部改了：
+  - `ls host` 从「六个裸名字」变成带列：`local`/`ssh` 加目标（本机给系统名，远端给 `user@host:port`）——它当时把 `internal` 当成 Linux 容器，靠 `uname -a` 才发现是本机，多花了三步。
+  - 空 `cmd` 的引导顶部新增 SHORTEST PATH 三行（`ls host` → `connect` → `run`），并说明 `run` 就是 input+Enter+read 一步到位——它当时以为 `run` 只是「把字打进去」，跟着多做了一次多余的 `read`。
+  - `help file` 不再回 `unknown directive`：帮助按动词索引，而调用方手里的词来自语法树的**名词**，所以名词页现在从用法行**推导**（`help file`/`help session`/`help peer` 都通），不会随新增动词漂移。
+  - `connect`/`open` 的回执把 `<session>:<channel>` 拆开写明（`a1f3:1 pty (session a1f3, channel 1)`）——它一路把 handle 当成一个不可分 id，直到 `rm` 回「这是 channel」才发现。
+  - 空的 `read` 带 `Hint` 头，点名该传 `timeout` 而不是催它怀疑工具；这是 204，所以放头部而不是正文（204 不能带 body，REST 入口会吞掉，只有 MCP 看得到的提示就是两个入口的分叉）。
+
 - **`open <session> mcp <url>` 握手失败时不再假装打开成功**。对一个不是 MCP 端点的 URL，它以前回 200、交出 handle，只在正文里写一句「握手失败」。于是那次已经知道的事实被推给了下一次调用：`call` 回 **500 `connection_failed`**——把「URL 写错了」报成「传输坏了」，而传输一直是好的。现在 `open` 回 502 并说清楚「这个 URL 不是 MCP 端点」（404 通常是路径错：MCP 服务回的是 POST 而不是 GET），同时把通道释放、不交 handle。狗粮时踩到的。
 
   连不上与服务端拒绝是两件事，不能合并：HTTP 通道在第一帧才拨号，所以「端口还没起来」仍算打开成功（handle 有用，等对端起好即可）；只有「对方应答了，但答的不是 MCP」才是终局——那个 URL 永远会给出同样的拒绝。

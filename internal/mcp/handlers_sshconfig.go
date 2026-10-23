@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -220,12 +221,52 @@ func (s *Server) handleListSSHConfigs(ctx context.Context, request mcpgo.CallToo
 			continue
 		}
 		item := map[string]any{"name": n}
-		if _, err := s.sshConfigs.Load(n); err != nil {
+		ent, err := s.sshConfigs.Load(n)
+		if err != nil {
 			item["broken"] = brokenReason(err)
+		} else {
+			// WHERE IT IS AND WHAT IT IS. A name alone cannot answer the first
+			// question a newcomer has — `internal` sits in the same column as a box in
+			// another rack, with nothing saying one is this machine and the other is
+			// ssh. Deciding which is which by trying `uname -a` costs three calls and
+			// is the wrong first impression to charge for a listing that already had
+			// the answer loaded.
+			//
+			// A remote entry reports its TARGET rather than an OS: the OS of a host
+			// that has never been connected to is unknown here, and a column that
+			// guessed would be the kind of listing that lies.
+			if ent.Kind == sshconfig.KindInternal {
+				item["kind"] = "local"
+				item["where"] = runtime.GOOS
+			} else {
+				item["kind"] = "ssh"
+				item["where"] = targetOf(ent.DialSpec)
+			}
 		}
 		arr = append(arr, item)
 	}
 	return jsonResult(map[string]any{"ssh_configs": arr}), nil
+}
+
+// targetOf renders the `user@host:port` a remote entry dials, for a listing column.
+//
+// An entry may leave any of the three out (the SSH defaults fill them in at dial
+// time), so each part is printed only when it was written down: a fabricated
+// `root@localhost:22` beside an entry that says nothing would be this listing
+// inventing configuration.
+func targetOf(d sshconfig.DialSpec) string {
+	s := d.Host
+	if d.Port > 0 {
+		s += fmt.Sprintf(":%d", d.Port)
+	}
+	if d.User != "" {
+		if s == "" {
+			s = d.User + "@"
+		} else {
+			s = d.User + "@" + s
+		}
+	}
+	return s
 }
 
 // brokenReason renders a load failure as one line fit for a listing column.
