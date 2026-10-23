@@ -1384,7 +1384,8 @@ func ParseWithSubst(src string, sub Subst) (*File, error) {
 	// text only to find those regions, and its failures are not reported: the real
 	// parse below is the one that answers.
 	raw := payloadSpans(src)
-	substituted, sentinels, err := substitute(src, sub, raw)
+	refs := parserRefs(src)
+	substituted, sentinels, err := substitute(src, sub, raw, refs)
 	if err != nil {
 		return nil, &Error{Msg: "cannot parse cmd: " + err.Error()}
 	}
@@ -1517,6 +1518,80 @@ func trailingPayloadOp(stmts []Statement) string {
 	return ""
 }
 
+// parserRefs lists every reference the grammar reports, plus the ones it cannot report.
+//
+// THE GRAMMAR IS ASKED, NOT IMITATED. A parameter expansion is a node; whether it sits
+// inside double quotes is a question about the nodes it sits inside; whether it is
+// positional is a field of the node. All three were previously re-derived by scanning
+// bytes and toggling a flag, which is a second opinion about a fact the parser had already
+// established — and every disagreement between the two was a defect (issue #141 among
+// them).
+//
+// THE ONE THING THE GRAMMAR CANNOT ANSWER is a `$` inside a single-quoted string: that
+// node's text is a single field with no children, because a shell expands nothing there.
+// The parser is right about shell, so in a shell region that is the end of it — a quoted
+// reference is the shell's literal. In a region no shell reads (a frame, `--data`, a name)
+// the bytes are the truth instead, and `resolve` reads them there.
+func parserRefs(src string) []ref {
+	file, err := syntax.NewParser().Parse(strings.NewReader(src), "")
+	if err != nil {
+		// The source does not parse, so there is nothing to report here: the real parse
+		// below reports the problem, and a reference in a line that does not parse is not
+		// the interesting fact about it.
+		return nil
+	}
+	var dq [][2]int
+	var out []ref
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.DblQuoted:
+			// Pre-order, so an enclosing quote is recorded before the nodes inside it.
+			dq = append(dq, [2]int{int(n.Pos().Offset()), int(n.End().Offset())})
+		case *syntax.ParamExp:
+			if r, ok := refOfParam(src, n); ok {
+				r.dq = insideRange(dq, r.start, r.end)
+				out = append(out, r)
+			}
+		}
+		return true
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].start < out[j].start })
+	return out
+}
+
+// refOfParam reads one expansion, or declines it.
+//
+// Declining is the point of the list: `${x:-y}`, `${#x}`, `${x/a/b}`, `$@`, `$?` and `$$`
+// are the SHELL's constructs, and this protocol does not rewrite a construct whose meaning
+// depends on a variable it never sees.
+func refOfParam(src string, p *syntax.ParamExp) (ref, bool) {
+	if p.Excl || p.Length || p.Width || p.Index != nil || p.Slice != nil || p.Repl != nil || p.Exp != nil {
+		return ref{}, false
+	}
+	name := p.Param.Value
+	if name != "" && !isIdent(name) && !allDigits(name) {
+		return ref{}, false
+	}
+	// `Short` is the unbraced spelling (`$N`), NOT "positional": `$N` is a name and `$1`
+	// is an index, and the two live in different namespaces. Only digits are positional.
+	return ref{
+		start:      int(p.Pos().Offset()),
+		end:        int(p.End().Offset()),
+		name:       name,
+		positional: allDigits(name),
+	}, true
+}
+
+// insideRange reports whether [start,end) sits inside any of these ranges.
+func insideRange(ranges [][2]int, start, end int) bool {
+	for _, r := range ranges {
+		if start >= r[0] && end <= r[1] {
+			return true
+		}
+	}
+	return false
+}
+
 // payloadSpans reports the byte ranges of src that hold a directive PAYLOAD, which
 // is the only region where a caller's value is shell syntax rather than data.
 //
@@ -1605,6 +1680,7 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 	if !known {
 		return nil
 	}
+	bodyEnd := commandEnd(stmt)
 	rest := call.Args[1:]
 	// The target is consumed exactly where the parser consumes it, and it is RAW
 	// when it is there.
@@ -1640,7 +1716,7 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 			if restValueFlag(op, key) && i+1 < len(rest) {
 				// PER-WORD: `--args` on ext is parsed again by SplitArgv, so each
 				// whole-word `$N` is one argv element and must arrive unquoted.
-				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: wordsEnd(rest), mode: spanWords})
+				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: bodyEnd, mode: spanWords})
 			}
 			if !strings.Contains(w, "=") && !valuelessFlag(op, key) && i+1 < len(rest) {
 				i++ // the flag's value word
@@ -1665,7 +1741,7 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 			// reason as the flag kind above: each whole-word `$N` is one argv element
 			// and must arrive unquoted.
 			if i+1 < len(rest) {
-				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: wordsEnd(rest), mode: spanWords})
+				return append(out, span{start: int(rest[i+1].Pos().Offset()), end: bodyEnd, mode: spanWords})
 			}
 			return out
 		}
@@ -1679,6 +1755,12 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 	}
 	return append(out, span{
 		start: int(rest[i].Pos().Offset()),
+		// THE REGION IS THE COMMAND LINE; THE PAYLOAD IS ITS WORDS. A redirect or a pipe
+		// after the words is still read by the shell, so a reference there is shell syntax
+		// and gets quoted as data — while `$1 | wc -l` has `$1` as its whole payload and
+		// hands the terminal a command line.
+		end:        bodyEnd,
+		payloadEnd: wordsEnd(rest),
 		// THE END COMES FROM THE SAME WORD LIST AS THE START (issues #141, #155).
 		//
 		// It used to be `commandEnd(stmt)` — the end of the shell STATEMENT — and a
@@ -1699,7 +1781,6 @@ func statementRawSpans(src string, stmt *syntax.Stmt) []span {
 		// `bodyEnd` still bounds the payload TEXT that goes to the terminal: that is
 		// the whole line, pipes and redirects included. Only the REGION — the answer
 		// to "is this reference the payload" — stops at the last payload word.
-		end:  wordsEnd(rest),
 		mode: op.payloadSpanMode(),
 	})
 }
