@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -237,7 +238,7 @@ func (s *Server) handleListSSHConfigs(ctx context.Context, request mcpgo.CallToo
 			// guessed would be the kind of listing that lies.
 			if ent.Kind == sshconfig.KindInternal {
 				item["kind"] = "local"
-				item["where"] = runtime.GOOS
+				item["where"] = localWhere(ent)
 			} else {
 				item["kind"] = "ssh"
 				item["where"] = targetOf(ent.DialSpec)
@@ -246,6 +247,35 @@ func (s *Server) handleListSSHConfigs(ctx context.Context, request mcpgo.CallToo
 		arr = append(arr, item)
 	}
 	return jsonResult(map[string]any{"ssh_configs": arr}), nil
+}
+
+// localWhere names the OS and the shell a local session will run.
+//
+// The shell belongs in the first screen because it decides whether the caller's
+// first command works: a caller that assumed bash typed `ls -la` into PowerShell and
+// got `Get-ChildItem: 找不到与参数名称 'la' 匹配的参数`, with a PATH-supplied `uname`
+// answering `MINGW64_NT` and confirming the wrong guess. What the profile names wins;
+// otherwise this reports the shell the server would spawn, which is a fact only the
+// server has (pwsh vs powershell vs cmd depends on PATH).
+//
+// The program name is read with strings.Fields rather than the argv grammar because
+// this is a LABEL, not something to run: a quoted `"C:\Program Files\pwsh.exe" -NoLogo`
+// may label as `"C:\Program` and still name the right shell to a human, while the
+// grammar's error would leave the column empty.
+func localWhere(ent *sshconfig.Entry) string {
+	where := runtime.GOOS
+	prog := ""
+	if line := sshconfig.EffectiveDefaultShell(ent); line != "" {
+		if f := strings.Fields(line); len(f) > 0 {
+			prog = f[0]
+		}
+	} else {
+		prog, _ = shell.NewDetector().Argv()
+	}
+	if prog != "" {
+		where += " " + filepath.Base(prog)
+	}
+	return where
 }
 
 // targetOf renders the `user@host:port` a remote entry dials, for a listing column.

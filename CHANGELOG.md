@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`$1` 写进文件路径时不再泄漏成占位符**。`write <session> file $1 --local-path go.mod` 会把文件写到字面名为 `__termcp_0__` 的路径，并回 202「accepted」、回执里就写着这个名字。没人拒绝它——路径本来就允许是任何东西，调用方是去它指定的位置找不到文件、再 `find /` 才发现的。替换表的展开漏了 `Statement.Key` 一个字段；**每个带子资源 key 的动词都有同一个洞**（file/forward/host/ext/alias/task/peer 地址），所以修在共享函数一行里，而不是每个调用点各加一个守卫。回归测试按字段遍历 Statement 而不是列出「该填的字段」——这个 bug 的形态就是「清单里少了一项」，照同一份清单写的测试会一起漏掉。
+
+  - `ls host` 的本地条目现在连 shell 一起报（`local windows powershell.exe`），不再只给 OS：第二个狗粮 agent 因此把 `ls -la` 打进了 PowerShell，而 PATH 里的 `uname` 回 `MINGW64_NT` 还替它确认了错的猜测。本地会话用哪个 shell 只有服务端知道（pwsh/powershell/cmd 取决于 PATH）。
+  - 引导里 `file` 那行说明哪个动词搬字节：`get <session> file <path>` 给的是元数据和上下传 URL，`read` 才是内容——四个动词并列却没有任何区分提示。
+
 - **第一屏不再让人猜**。让一个没用过 termcp 的 agent 从零跑一遍真实任务，它报的五处摩擦全部改了：
   - `ls host` 从「六个裸名字」变成带列：`local`/`ssh` 加目标（本机给系统名，远端给 `user@host:port`）——它当时把 `internal` 当成 Linux 容器，靠 `uname -a` 才发现是本机，多花了三步。
   - 空 `cmd` 的引导顶部新增 SHORTEST PATH 三行（`ls host` → `connect` → `run`），并说明 `run` 就是 input+Enter+read 一步到位——它当时以为 `run` 只是「把字打进去」，跟着多做了一次多余的 `read`。

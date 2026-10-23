@@ -137,3 +137,53 @@ func TestTaskVerbsRefuseWhatTheyCannotAnswer(t *testing.T) {
 		t.Errorf("an empty task list does not say how a transfer is started:\n%s", empty)
 	}
 }
+
+// TestAnUploadLandsWhereTheArgumentSaid pins the end-to-end half of the sentinel leak.
+//
+// The parser's own test proves the hole is filled; this proves the filled value is
+// what the file verb acts on. They are different claims: a value expanded into a field
+// nobody reads is still a file in the wrong place, and the reported symptom was
+// exactly that — a 202 "accepted" receipt naming `__termcp_0__`, and the caller
+// finding out by looking for the file where they had asked.
+func TestAnUploadLandsWhereTheArgumentSaid(t *testing.T) {
+	s := newTestServer(t)
+	h := openPty(t, s)
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
+	sid, _, _ := strings.Cut(h, ":")
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "asked-for.bin")
+
+	// The destination arrives as a positional value, which is how an agent passes a
+	// path it computed: the address in the receipt must be the address it computed.
+	got := termText(t, s, map[string]any{
+		"cmd":  "write " + sid + " file $1 --local-path " + src,
+		"args": []any{dst},
+	})
+	if !strings.HasPrefix(got, "TERM/1 202") {
+		t.Fatalf("a transfer must answer with a receipt:\n%s", got)
+	}
+	if strings.Contains(got, "__termcp_") {
+		t.Fatalf("the receipt names a substitution placeholder as the destination:\n%s", got)
+	}
+	if !strings.Contains(got, dst) {
+		t.Fatalf("the receipt does not name the path that was asked for (%s):\n%s", dst, got)
+	}
+	// And the bytes really are there, which is the part a receipt cannot be trusted
+	// about on its own.
+	taskID := headerValueOr(got, "Task", "")
+	if taskID == "" {
+		t.Fatalf("no task id in:\n%s", got)
+	}
+	done := termText(t, s, map[string]any{"cmd": "get task " + taskID, "timeout": 20})
+	if !strings.Contains(done, "done") {
+		t.Fatalf("the transfer did not finish:\n%s", done)
+	}
+	if _, err := os.Stat(dst); err != nil {
+		t.Fatalf("the file is not where the argument said: %v", err)
+	}
+}

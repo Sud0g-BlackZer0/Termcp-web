@@ -523,8 +523,21 @@ func (t *sentinelTable) expand(s string) string {
 // expandStatement fills the raw holes of one parsed statement.
 //
 // It runs AFTER parsing, so the Statement's fields already hold the sentinels the
-// parser was allowed to see: the payload, the Path echo, the target, the positional
-// args and every flag value all come through here.
+// parser was allowed to see: the payload, the Path echo, the target, the KEY, the
+// positional args and every flag value all come through here.
+//
+// THE KEY WAS MISSING, AND A LEAKED SENTINEL IS A WRONG ADDRESS, NOT A BAD ONE.
+//
+// `write <session> file $1 --local-path go.mod` wrote the file to the literal path
+// `__termcp_0__` — the sentinel the substitution table mints for a hole — and
+// answered 202 "accepted" with that name in the receipt. Nothing refused it, because
+// a path is allowed to be anything; the caller found out by looking for the file
+// where they asked and not finding it. Every verb that takes a sub-resource key had
+// the same hole (file, forward, host, ext, alias, task, a peer address), which is why
+// this is one line here rather than a guard at each of them.
+//
+// Key is the last of them: Op and Kind are declared words, and the parser refuses a
+// sentinel for those by design (a hole is not a name it can match).
 func (t *sentinelTable) expandStatement(st Statement) Statement {
 	if t == nil {
 		return st
@@ -532,6 +545,7 @@ func (t *sentinelTable) expandStatement(st Statement) Statement {
 	st.Payload = t.expand(st.Payload)
 	st.Path = t.expand(st.Path)
 	st.Target = t.expand(st.Target)
+	st.Key = t.expand(st.Key)
 	for i, a := range st.Args {
 		st.Args[i] = t.expand(a)
 	}
