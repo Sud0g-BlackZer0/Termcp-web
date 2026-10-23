@@ -1300,6 +1300,22 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 500 .74rem var(--font-mono); color: var(--text-primary);
 }
+/* The name is a BUTTON (it renames), so it has to stop looking like one: a row is
+   scanned, not operated. It keeps the text metrics exactly, drops the chrome, and
+   grows the underline + accent only when pointed at or focused — the same
+   affordance the window title uses, because it is the same control. */
+.archive-row-rename {
+  appearance: none; -webkit-appearance: none;
+  margin: 0; padding: 0; border: 0; background: none;
+  text-align: left; cursor: pointer;
+  border-bottom: 1px solid transparent;
+}
+.archive-row-rename:hover,
+.archive-row-rename:focus-visible {
+  color: var(--accent);
+  border-bottom-color: currentColor;
+  outline: none;
+}
 /* Under the name: where it ran, and what it ran. The profile is a chip because it
    is a name from a fixed set (a connection), and the command is loose text because
    it is arbitrary — one is scannable at a glance, the other only when looked at. */

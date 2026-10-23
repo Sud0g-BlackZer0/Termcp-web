@@ -26,7 +26,10 @@ func TestArchiveRendersRowsNotCards(t *testing.T) {
 	}
 	for _, want := range []string{
 		`'archive-row'`,
-		`class="archive-row-name"`,
+		`archive-row-name`,
+		/* The name is the rename control, so it is a button: an archived session has
+		   no dock tab to right-click (issue #160). */
+		`archive-row-rename`,
 		`class="archive-row-age"`,
 		/* The row is the thing the batch component ticks, and it is keyed by the
 		   session's ID. A name is a label: two archived sessions can share one (a
@@ -1194,4 +1197,40 @@ func stripJSComments(src string) string {
 	src = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(src, "")
 	src = regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(src, "")
 	return src
+}
+
+// TestAnArchivedRowCanBeRenamedFromItsName pins issue #160's reachability claim.
+//
+// Renaming an archived session used to have one path: right-click its tab in the
+// dock. The dock lists RUNNING sessions only, so an archived one usually has no tab
+// at all — and a right-click has no meaning on the phone this page is mostly used
+// from. The server has always accepted the rename (`PATCH /api/sessions/{id}` works
+// on a DEAD session); only the way in was missing.
+//
+// The assertions are about the WIRING, not the markup: a name that is not a control,
+// or one wired to a second implementation of the PATCH, would both pass a screenshot.
+func TestAnArchivedRowCanBeRenamedFromItsName(t *testing.T) {
+	sessions := readAssetLF(t, "static/js/sessions.js")
+
+	// The name is a control rather than a span, so a keyboard reaches it too.
+	if !strings.Contains(sessions, `class="archive-row-name archive-row-rename"`) {
+		t.Fatal("the archive row's name is not a rename control; an archived session has no other way in")
+	}
+	// It calls the ONE rename implementation, the same one the tab menu uses: a
+	// second prompt + PATCH would be a second set of rules for the same edit.
+	body := between(t, sessions, "querySelector('.archive-row-rename')", "\n    });")
+	if !strings.Contains(body, "renameSessionById(s)") {
+		t.Errorf("the name click must go through renameSessionById, got:\n%s", body)
+	}
+	// And it must not fall through to the row's own handler, which opens the
+	// transcript: renaming a session and then finding its terminal behind the prompt
+	// is the bug this guard exists for.
+	if !strings.Contains(body, "stopPropagation()") {
+		t.Errorf("the rename click must stop propagating to the row's open handler:\n%s", body)
+	}
+	// The dock tab's menu keeps its item: a session WITH a window is still renamed
+	// there, and the two entries must not drift into different behaviour.
+	if !strings.Contains(readAssetLF(t, "static/js/shell-windows.js"), "renameSessionById(s)") {
+		t.Error("the tab menu's rename went away; a session with a window loses its entry too")
+	}
 }

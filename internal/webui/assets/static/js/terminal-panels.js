@@ -33,6 +33,8 @@ function _initShellWindowUI(win, connLabel, sessionId) {
     });
   }
 
+  bindWindowTitleRename(win);
+
   bindShellWindowCloseButton(win, closeBtn);
 
   win._inputClosed = false;
