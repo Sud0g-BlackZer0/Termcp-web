@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	pkgsftp "github.com/pkg/sftp"
@@ -146,7 +148,7 @@ func (s *Client) ReadFile(remotePath string, offset, length int64, mode string, 
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("seek: %w", err)
 		}
-		localFile, err := os.Create(localPath)
+		localFile, err := os.Create(NativeLocalPath(localPath))
 		if err != nil {
 			return nil, fmt.Errorf("create local file: %w", err)
 		}
@@ -254,6 +256,27 @@ func (s *Client) writeInline(remotePath string, offset *int64, data string, mode
 	return int64(n), nil
 }
 
+// NativeLocalPath rewrites a POSIX-shell path into the spelling this host's file
+// system API understands.
+//
+// The daemon is usually driven from a shell, and a shell reports paths in its own
+// dialect: Git Bash hands out `/d/home/x` for `D:\home\x`, and os.Open on Windows
+// has no idea what that is — it answers "The system cannot find the path
+// specified", which names neither the path nor the problem (found by driving a
+// real Windows daemon from Git Bash). Only a leading `/<letter>/` is rewritten:
+// on Windows that spelling is never a native path, so nothing that used to work
+// changes meaning.
+func NativeLocalPath(p string) string {
+	if runtime.GOOS != "windows" || len(p) < 3 || p[0] != '/' || p[2] != '/' {
+		return p
+	}
+	c := p[1]
+	if !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') {
+		return p
+	}
+	return strings.ToUpper(string(c)) + ":" + filepath.FromSlash(p[2:])
+}
+
 // ProgressFunc receives incremental byte counts during a transfer.
 type ProgressFunc func(n int64)
 
@@ -287,7 +310,7 @@ func (s *Client) writeFromLocal(remotePath string, offset *int64, localPath stri
 // An explicit offset patches the target in place, because a patch cannot be
 // assembled in a sibling without copying the rest of the file first.
 func (s *Client) WriteFromLocalProgress(ctx context.Context, remotePath string, offset *int64, localPath string, localOffset, length int64, onProgress ProgressFunc) (int64, error) {
-	localFile, err := os.Open(localPath)
+	localFile, err := os.Open(NativeLocalPath(localPath))
 	if err != nil {
 		return 0, fmt.Errorf("open local file: %w", err)
 	}
@@ -643,7 +666,7 @@ func (s *Client) ReadToLocalProgress(ctx context.Context, remotePath, localPath 
 		return 0, fmt.Errorf("seek: %w", err)
 	}
 
-	partPath := localPath + ".termcp-part"
+	partPath := NativeLocalPath(localPath) + ".termcp-part"
 	localFile, err := os.Create(partPath)
 	if err != nil {
 		return 0, fmt.Errorf("create local file: %w", err)

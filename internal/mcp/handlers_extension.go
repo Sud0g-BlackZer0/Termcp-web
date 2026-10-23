@@ -232,7 +232,11 @@ func extensionSaved(s *Server, ext *extensions.Extension) (*mcpgo.CallToolResult
 	// session is coming up; the returned template is what was persisted.
 	st, _ := s.extensions.Status(ext.Name)
 	entry := extensionConfigMap(ext)
-	entry["status"] = statusOr(st, extensions.StatusUnavailable)
+	status, next := extensionStatusWord(ext.Name, st, ext.IsEnabled())
+	entry["status"] = status
+	if next != "" {
+		entry["next"] = next
+	}
 	b, err := json.Marshal(entry)
 	if err != nil {
 		return toolError(CodeInternalError, "encoding extension: %s", err), nil
@@ -277,6 +281,29 @@ func extensionConfigMap(ext *extensions.Extension) map[string]any {
 	return entry
 }
 
+// extensionStatusWord is the word a reply prints for a template's state.
+//
+// `unavailable` IS TWO DIFFERENT PIECES OF NEWS (#159 D3). It is the reconciler's
+// initial state — "nothing has proved this works yet" — and also its terminal one
+// for a probe that failed. A caller that had just created an extension read the
+// first as the second, concluded the create had failed and retried in a loop,
+// while the walk that would answer the question was already scheduled. So the two
+// are told apart by what the state actually holds: no session and no failures
+// means nobody has tried yet, and that prints as the transitional word. A disabled
+// template is never "starting" — nothing will walk it — and a template with a
+// failure keeps `unavailable`, because that is the word that makes a reader look
+// at the reason.
+func extensionStatusWord(name string, st extensions.Status, enabled bool) (word, next string) {
+	word = statusOr(st, extensions.StatusUnavailable)
+	if word != extensions.StatusUnavailable || len(st.Failures) > 0 || st.SessionID != "" {
+		return word, ""
+	}
+	if !enabled {
+		return extensions.StatusDisabled, ""
+	}
+	return extensions.StatusProbing, "the reconciler is trying it now; `get ext " + name + "` reports how it went"
+}
+
 // extensionRuntimeFields writes the reconciler's half of an extension onto a
 // result entry: the status, the handles an available extension is driven
 // through, the tunnels it declared, and how long until the next automatic
@@ -284,7 +311,13 @@ func extensionConfigMap(ext *extensions.Extension) map[string]any {
 // history they carry — the list keeps the latest reason, get keeps the history —
 // so everything they share is written once, here.
 func extensionRuntimeFields(entry map[string]any, st extensions.Status, withHistory bool) {
-	entry["status"] = statusOr(st, extensions.StatusUnavailable)
+	enabled, _ := entry["enabled"].(bool)
+	name, _ := entry["name"].(string)
+	status, next := extensionStatusWord(name, st, enabled)
+	entry["status"] = status
+	if next != "" {
+		entry["next"] = next
+	}
 	if st.SessionID != "" {
 		entry["session_id"] = st.SessionID
 	}

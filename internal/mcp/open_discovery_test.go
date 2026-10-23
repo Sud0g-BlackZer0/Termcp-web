@@ -66,8 +66,15 @@ func TestMcpOpenReportsDiscoveredTools(t *testing.T) {
 	if !strings.Contains(out, "run_query") {
 		t.Errorf("every tool should be listed:\n%s", out)
 	}
-	if !strings.Contains(out, "tools/call") {
+	// The next call's shape is the unguessable part, and it is now the HIGH-LEVEL one:
+	// a tool name and an arguments object, not a hand-written envelope (#159). The
+	// raw frame is still there for everything that is not a tool call, but it is no
+	// longer what a caller should be taught first.
+	if !strings.Contains(out, "call "+h+" <tool>") {
 		t.Errorf("open must name the next call's shape, since that is the unguessable part:\n%s", out)
+	}
+	if !strings.Contains(out, "get "+h+" tools") {
+		t.Errorf("open should point at the call that lists the required arguments:\n%s", out)
 	}
 	// The handle must appear in the suggested command, or the caller still has to
 	// join two pieces of the reply by hand.

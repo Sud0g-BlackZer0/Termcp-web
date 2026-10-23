@@ -965,7 +965,7 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	if action == "list" {
 		// The boot manifest: one extension per line, with its state and handle, so
 		// a caller that lost its context gets its toolset back in one call.
-		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: extensionListing(res)}
+		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: s.extensionListing(res)}
 	}
 	doc, _ := toolResultMap(res)
 	return generatedSlot(stmt, win, compactDocument(doc))
@@ -1305,7 +1305,14 @@ func listFromDoc(res *mcpgo.CallToolResult, listKey, field string) string {
 // extensionListing renders `ext list` as the boot manifest: name, state, handle,
 // and a one-line note. This is the call that gives a caller its toolset back after
 // its context was cleared, so it must be one call and must be scannable.
-func extensionListing(res *mcpgo.CallToolResult) string {
+//
+// THE HANDLE IS THE ADDRESS, NOT THE RAW CHANNEL ID (#159 D2). The reconciler
+// reports a shell id (`9ff338e1-68b`), which is a UUID fragment: it identifies the
+// channel but is not what the rest of the surface takes. An address is
+// `<session>:<index>` — the same spelling `ps` prints and every later command
+// pastes — so a caller that copies this row can act on it directly instead of
+// calling `get ext` to translate.
+func (s *Server) extensionListing(res *mcpgo.CallToolResult) string {
 	doc, ok := toolResultMap(res)
 	if !ok {
 		return toolResultText(res)
@@ -1321,7 +1328,10 @@ func extensionListing(res *mcpgo.CallToolResult) string {
 		state := getString(item, "status", "")
 		handle := getString(item, "session_id", "")
 		if shell := getString(item, "shell_id", ""); shell != "" {
-			handle = shell
+			// The address when it can be derived, the id otherwise: a shell-less
+			// extension (an SFTP-only window) has no channel and reports its
+			// session, which is exactly the address a file read takes.
+			handle = s.addressOf(getString(item, "session_id", ""), shell)
 		}
 		notes := strings.ReplaceAll(getString(item, "notes", ""), "\n", " ")
 		if len(notes) > 60 {
@@ -1333,6 +1343,29 @@ func extensionListing(res *mcpgo.CallToolResult) string {
 		return "(no extensions installed)\n"
 	}
 	return b.String()
+}
+
+// addressOf turns a session id and a channel id into the address the rest of the
+// surface speaks: `<session>:<index>`.
+//
+// It falls back to the channel id when the session is gone or the index is unknown
+// — a restored manifest can predate the index — because a handle that is merely
+// less convenient still lets the caller look the channel up, while an empty column
+// says nothing at all.
+func (s *Server) addressOf(sessionID, shellID string) string {
+	if sessionID == "" || shellID == "" {
+		return dash(shellID)
+	}
+	sess := s.sessMgr.Get(sessionID)
+	if sess == nil {
+		return shellID
+	}
+	for _, sh := range sess.ListChildShells() {
+		if sh.ID == shellID && sh.Index > 0 {
+			return handleOf(sessionID, sh.Index)
+		}
+	}
+	return shellID
 }
 
 // capGenerated applies the byte and line windows to a generated reply, in that

@@ -126,6 +126,20 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 				}
 				return []envelope.Slot{s.cdpProtocol(ctx, stmt, h, domain)}
 			}
+			// `tools` IS THE MCP SIBLING OF `protocol`: the peer's own table, read live,
+			// in the same two positions (`mcp tools` and `mcp:1 tools`). An argument names
+			// one tool and prints its full input schema.
+			if stmt.Kind == "mcp" && (stmt.Key == "tools" || (len(stmt.Args) > 0 && stmt.Args[0] == "tools")) {
+				tool := ""
+				if stmt.Key == "tools" {
+					if len(stmt.Args) > 0 {
+						tool = stmt.Args[0]
+					}
+				} else if len(stmt.Args) > 1 {
+					tool = stmt.Args[1]
+				}
+				return []envelope.Slot{s.mcpToolList(ctx, stmt, h, win, tool)}
+			}
 			return []envelope.Slot{s.cdpDescribe(stmt, h, index)}
 		}
 		if stmt.Kind == "file" {

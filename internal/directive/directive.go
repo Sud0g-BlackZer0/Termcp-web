@@ -471,9 +471,9 @@ var ops = []Op{
 
 	{Name: "call", Kind: KindPayload, PayloadSpan: spanVerbatim, Target: true,
 		Kinds:     []string{"cdp", "mcp", "jrpc"},
-		Flags:     []string{"send"},
-		Valueless: []string{"send"},
-		Usage:     "call <session> cdp|mcp|jrpc[:N][@target] [--send] <frame>   |   call <channel> <frame>",
+		Flags:     []string{"send", "json"},
+		Valueless: []string{"send", "json"},
+		Usage:     "call <session> cdp|mcp|jrpc[:N][@target] [--send] <frame>   |   call <session> mcp:<n> <tool> [<json-args>]   |   call <channel> <frame>",
 		Detail:    callDetail},
 
 	// --- configuration, which outlives any session ---
@@ -553,16 +553,21 @@ page until it is dealt with, rather than timing out while the human is away.`
 // readDetail states the defaults because "read" without a selector is the
 // common call: whether that means "new bytes" or "everything" decides what the
 // caller does next, and guessing it from silence is how loops get written.
-const readDetail = `Defaults: the new bytes since the last read on a live channel; a closed channel
-returns its tail. --stream o keeps stdout only, e keeps stderr only; the default
+const readDetail = `Defaults: the new bytes since the last read, on a live channel and on a
+closed one alike. --stream o keeps stdout only, e keeps stderr only; the default
 keeps both. --cursor N is a byte offset (end+1 from Content-Range), --from-line N
 a complete line, --tail N the last N lines.
 
 READ IS A CURSOR. A plain read CONSUMES what it returns: the next plain read of
 an unchanged channel is legitimately empty, which is not data loss and not an
-error. To see the whole log again, ask for it by position (--from-line 1); to
-peek without consuming, use bytes_limit 0 on the call (it returns the handle and
-the range it would have read).
+error. To see the whole log again, ask for it by position (--from-line 1, or
+offset 0); to peek without consuming, use bytes_limit 0 on the call (it returns
+the handle and the range it would have read).
+
+A CLOSED CHANNEL IS A CURSOR TOO, and it was not always: with no live reader to
+hold a position, the default read answered with the TAIL of the history — the same
+bytes on every call, offsets that never advanced — which reads exactly like the
+live answer and is a different question. --offset 0 is the full replay, and --tail N is still a tail.
 
 --grep RE FILTERS BEFORE THE WINDOW, AND THE DIFFERENCE MATTERS. The pattern runs
 over this daemon's own transcript — the command already finished, its bytes are
@@ -613,7 +618,13 @@ Offset and Next-Offset, and a slice never ends in the middle of a character.
   read internal cdp:1 --at 57 --offset 0
   read internal cdp:1 --at 57 --offset 4096 --bytes 512
 
---since moves through TIME; --at moves through one payload. Neither consumes.`
+--since moves through TIME; --at moves through one payload. Neither consumes.
+
+--frame HAS ITS OWN CURSOR. read <channel> --frame parses one JSON-RPC frame out
+of a line-oriented pipe and advances ONLY when that frame was complete: an incomplete
+frame is held for the next call rather than cut in half. That cursor is kept per
+channel, independent of the plain byte reader — so reading raw bytes never consumes
+a frame, and reading frames never shifts the byte position of a plain read.`
 
 // runDetail states what `run` can and cannot know, because the difference is
 // invisible in the reply and the wrong guess sends the caller chasing a silent

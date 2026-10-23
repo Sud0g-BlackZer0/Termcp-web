@@ -237,7 +237,14 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 			TotalLines:  totalLines,
 			LineBytes:   lineBytes,
 		}
-	case p.TailLines != nil || p.TailBytes || (src.Live == nil && p.Offset == nil):
+	// AN EXPLICIT TAIL IS A TAIL. The extra disjunct that used to be here — a
+	// closed source read with no selector at all — answered the same call the same
+	// way forever: it is a TAIL, not a cursor, so a caller polling an extension's
+	// output re-read the same bytes on every call and the offsets never advanced
+	// (#159 C1). The caller layer now supplies a cursor for that case (it is the
+	// layer that can hold one: this package is deliberately stateless), so what
+	// arrives here is either an explicit tail or an explicit offset.
+	case p.TailLines != nil || p.TailBytes:
 		raw, st, tot, err := src.scanTailWindow(p.TailLines, p.MaxBytes)
 		if err != nil {
 			return Window{}, errf(ErrOperation, "%s", err.Error())
@@ -280,6 +287,16 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		}
 		w = Window{Output: rendered, Raw: filtered, Start: offset, End: end, Total: total, HasMore: end < total, PartialTail: rawPartialTail(raw)}
 	default:
+		if src.Live == nil {
+			// NO SELECTOR ON A CLOSED SOURCE. This cannot silently pick one: “the
+			// whole history” is what the caller did not ask for (and is the O(N²)
+			// replay #159 C1 was opened about), “the tail” answers a different
+			// question, and a live reader cursor does not exist here. The caller
+			// layer knows which one it meant — the MCP read supplies a stored cursor
+			// automatically — so reaching this means a surface skipped that step.
+			return Window{}, errf(ErrInvalid, "%s",
+				"this channel is closed, so a read needs to say where to start: offset, from_line or tail_lines")
+		}
 		// Live streaming cursor path (unchanged semantics).
 		pre := src.Live.ReaderCursor(p.ReaderID)
 		if pre < 0 {

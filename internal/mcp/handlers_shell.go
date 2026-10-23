@@ -488,9 +488,28 @@ func (s *Server) handleReadOutput(ctx context.Context, request mcpgo.CallToolReq
 		return bad, nil
 	}
 
+	// A CLOSED CHANNEL KEEPS ITS OWN POSITION (#159 C1).
+	//
+	// `read <ch>` on a live channel means "what is new since my last read". On a
+	// closed one it used to mean "the tail", which reads the same and is not: the
+	// same call returned the same bytes on every poll, so a caller watching an
+	// extension's output re-read its whole history each time and the offsets never
+	// moved. The cursor makes the closed case mean what the live case means; an
+	// explicit offset (0 included) is still the full replay, and an explicit tail
+	// is still a tail.
+	key := ""
+	if src.Live == nil && p.Offset == nil && p.FromLine == 0 && p.TailLines == nil && !p.TailBytes {
+		key = src.SessID + "\x00" + src.ShellID
+		at := s.closedReadCursor(key)
+		p.Offset = &at
+	}
+
 	w, err := transcript.Read(ctx, src, p)
 	if err != nil {
 		return toolResultForErr(err), nil
+	}
+	if key != "" {
+		s.setClosedReadCursor(key, w.End)
 	}
 	return jsonResult(windowResult(w, src)), nil
 }

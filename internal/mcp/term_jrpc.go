@@ -15,6 +15,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/envelope"
 	"github.com/open-mcp-ai/termcp/internal/jrpc"
+	"github.com/open-mcp-ai/termcp/internal/ns"
 )
 
 // Three directives, one channel.
@@ -170,7 +171,7 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 	// REVIEW is deliberately not run here: whether an admitted open is HELD for a
 	// human is the event-hook layer's decision (issue #128), and duplicating that
 	// decision at this layer is how the two would drift apart.
-	if slot, refused := s.refuseDoor(ctx, stmt, op); refused {
+	if slot, refused := s.refuseDoor(ctx, stmt, op, sessionID); refused {
 		return slot
 	}
 	// `mcp open .../sse` used to be refused with a sentence about the legacy
@@ -290,7 +291,7 @@ func (s *Server) jrpcDiscoverMCP(ctx context.Context, h *jrpcHandle, handle stri
 		return "\ntools: none (the peer advertises no tools)\n", true
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("\ntools (%d) — call one with `call %s '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"...\",\"arguments\":{}}}'`:\n", len(items), handle))
+	b.WriteString(fmt.Sprintf("\ntools (%d) — call one with `call %s <tool> {…}` (`get %s tools` lists required keys):\n", len(items), handle, handle))
 	for _, raw := range items {
 		item, ok := raw.(map[string]any)
 		if !ok {
@@ -311,47 +312,37 @@ func (s *Server) jrpcDiscoverMCP(ctx context.Context, h *jrpcHandle, handle stri
 }
 
 // refuseDoor applies a session's capability whitelist to one of the frame-channel
-// doors.
+// doors (mcp / cdp / jrpc).
 //
-// It answers a NARROWER question than refuseAction, and the difference is not an
-// oversight: refuseAction resolves the session a statement names so it can read
-// that session's restriction. A door names no session — its target is a URL — so
-// the restriction that governs it is the one on the session the CALLER already
-// holds.
-//
-// That is why the loop below is over sessions rather than a lookup of one: the
-// namespaces this caller may see ARE the ones whose grants govern it. A
-// restricted session among them that does not list the door refuses the open; if
-// every visible session is unrestricted (the ordinary case, and every operator
-// surface) the call proceeds, which is what keeps this from changing anything for
-// a caller who was never restricted.
-//
-// ponytail: a linear scan over live sessions, on an operation a caller performs a
-// handful of times per conversation. An index of "the restriction governing a
-// caller" is the right shape once a caller can hold several restrictions at once;
-// today it cannot.
-func (s *Server) refuseDoor(ctx context.Context, stmt directive.Statement, op string) (envelope.Slot, bool) {
-	if s.sessMgr == nil {
+// THE SESSION CHECKED IS THE ONE THE CALL NAMES, and nothing else. It used to walk
+// every session in the caller's namespace and refuse as soon as ANY of them lacked
+// the capability — so one restricted profile anywhere in the instance (any extension
+// template that does not list `mcp.open`) refused the door for every caller, and
+// `--allow mcp.open` on the session actually being used changed nothing. A door is
+// opened THROUGH a session, and that session's template is whose whitelist applies
+// (#159).
+func (s *Server) refuseDoor(ctx context.Context, stmt directive.Statement, op, sessionID string) (envelope.Slot, bool) {
+	if s.sessMgr == nil || sessionID == "" {
 		return envelope.Slot{}, false
 	}
-	callerNS := callerNamespace(ctx)
-	capID := op + ".open"
-	for _, snap := range s.sessMgr.ListAll() {
-		if callerNS != "" && snap.Namespace != callerNS {
-			continue
-		}
-		// ListAll hands back snapshots; the restriction lives on the live
-		// session object, which is what Get returns.
-		sess := s.sessMgr.Get(snap.ID)
-		if sess == nil || sess.Restriction().Allows(capID) {
-			continue
-		}
+	sess, bad := s.resolveTunnelSession(sessionID)
+	if bad != nil || sess == nil {
+		return envelope.Slot{}, false
+	}
+	if callerNS := callerNamespace(ctx); callerNS != "" && sess.Namespace != callerNS {
 		return envelope.Slot{Code: 403, Headers: map[string]string{
 			"Path":       stmt.Path,
 			"Error-Code": CodeForbidden,
-		}, Body: "this session's template does not grant " + capID}, true
+		}, Body: ns.ForbiddenForeign(callerNS)}, true
 	}
-	return envelope.Slot{}, false
+	capID := op + ".open"
+	if sess.Restriction().Allows(capID) {
+		return envelope.Slot{}, false
+	}
+	return envelope.Slot{Code: 403, Headers: map[string]string{
+		"Path":       stmt.Path,
+		"Error-Code": CodeForbidden,
+	}, Body: "this session's template does not grant " + capID}, true
 }
 
 // devtoolsSocket turns a browser's debug endpoint into the socket it advertises.
@@ -456,6 +447,16 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		}
 		return envelope.Slot{Code: 204, Headers: headers, Body: "no frame within the window"}
 	case "call", "send":
+		// A TOOL NAME IS NOT A FRAME, and the two cannot be confused: a frame is a JSON
+		// object and starts with '{', a tool name never does (#159). The test peels the
+		// caller's grouping quotes first, because `call <peer> '{"…"}'` is how a frame
+		// with spaces in it is spelled — the quote is grouping, not part of the value,
+		// and reading it as "not a frame" would refuse the commonest spelling there is.
+		// Every other frame — notifications, progress, sampling, anything custom —
+		// keeps the escape hatch unchanged.
+		if op == "mcp" && len(rest) > 1 && !strings.HasPrefix(unquoteWord(strings.TrimSpace(rest[1])), "{") {
+			return s.mcpToolCall(ctx, stmt, h, strings.Join(rest[1:], " "))
+		}
 		frame, bad := parseJRPCFrame(stmt, rest[1:])
 		if bad != nil {
 			return *bad
