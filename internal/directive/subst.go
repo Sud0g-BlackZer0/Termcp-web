@@ -333,6 +333,23 @@ func (r *resolver) one(start, end int, name string, positional, dq bool) error {
 	// else — a frame, a target, a flag value, a heredoc body — is bytes.
 	shell := mode == spanCommandLine || mode == spanWords
 
+	// ESCAPING IS A PROPERTY OF THE DESTINATION, NOT OF THE QUOTES.
+	//
+	// `dq` says the reference sat inside double quotes in cmd, which is a fact about the
+	// SOURCE. It only means anything when a shell will later read those quotes and take them
+	// off: a value destined for a file path, a target or a JSON frame is the caller's bytes,
+	// and escaping it injects backslashes nobody asked for.
+	//
+	// The reported case: `write <session> file "$1"` — the ordinary instinct to quote a path
+	// — answered 202 and created a file whose NAME contained the escape sequences
+	// (`C:\\Users\\...\\asked.bin`), because shell escaping was applied to a destination no
+	// shell reads. The unquoted `$1` was right all along, which is the shape of the bug: two
+	// spellings of the same intent, one of them silently corrupt.
+	//
+	// `run h:1 "$1"` is the case the flag exists for and it keeps its escaping: the payload
+	// IS read by a shell, the quotes reach it, and the value has to survive that unquoting.
+	escapes := dq && shell
+
 	if positional {
 		// Positional substitution is opt-in with the args channel: with no args the caller
 		// is writing a plain shell line, and `$1` there is the shell's own positional
@@ -363,7 +380,7 @@ func (r *resolver) one(start, end int, name string, positional, dq bool) error {
 			// it: a flag value arrives at its destination as the bytes between the flags,
 			// and shell quoting there would be bytes the caller never sent.
 			raw: raw || !shell,
-			dq:  dq,
+			dq:  escapes,
 		})
 		return nil
 	}
@@ -397,7 +414,7 @@ func (r *resolver) one(start, end int, name string, positional, dq bool) error {
 		// payload: `run h:1 $CMD` is a whole payload, but the caller chose the data channel
 		// and splicing it unquoted would turn its semicolons into syntax.
 		raw: !shell,
-		dq:  dq,
+		dq:  escapes,
 	})
 	return nil
 }
