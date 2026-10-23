@@ -88,7 +88,12 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 		body += peers
 	}
 	if strings.TrimSpace(body) == "" {
-		body = "(nothing is running)\n"
+		// AN EMPTY LISTING HAS TO SAY WHAT TO DO NEXT, or it reads as "there is
+		// nothing here" when the truth is "nothing is RUNNING yet". The reporting
+		// caller's first move was `ls`, it said only "nothing is running", and
+		// `ls host` -- the one command that answers "what could I connect to" -- was a
+		// guess it had to make from the guide (issue #161, P2-5).
+		body = "(nothing is running)\n`ls host` shows the saved targets; `connect <host>` opens one.\n"
 	}
 	// PS IS THE STATE, SO ITS learn_mode TEACHES THE STATE VERBS.
 	//

@@ -863,7 +863,7 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 	if v, ok := stmt.Flag("encoding"); ok {
 		args["charset"] = v
 	}
-	return s.readSlot(ctx, stmt, win, args)
+	return s.readSlot(ctx, stmt, win, args, 0)
 }
 
 // readSlotAfter reads the window a command produced, starting where it was
@@ -890,12 +890,29 @@ func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, wi
 			Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.UnsatisfiedRange(start)},
 		}
 	}
+	waitStarted := time.Now()
+	// windowExpired is a FACT the wait already computed and then threw away: a pty has
+	// no completion signal, so "the window ran out while bytes were still arriving" is
+	// the closest thing to "this command is still running" the server can honestly say —
+	// and without it the caller cannot tell a finished command from a window that ended
+	// (issue #161, P1-3).
+	windowExpired := false
 	if wait := s.completionWait(stmt.Target); wait {
 		s.awaitExit(ctx, stmt.Target, win)
 	} else if s.ptyRunning(stmt.Target) {
-		s.awaitWindow(ctx, stmt.Target, win, start)
+		windowExpired = s.awaitWindow(ctx, stmt.Target, win, start)
 	}
-	return s.readSlot(ctx, stmt, win, args)
+	slot := s.readSlot(ctx, stmt, win, args, time.Since(waitStarted))
+	if windowExpired && slot.Code < 400 && s.ptyRunning(stmt.Target) && slot.Headers["Still-Running"] == "" {
+		// Same header the pipe path uses, same meaning: the command was accepted and has
+		// not finished. It is set only when the window expired, so it does not become the
+		// permanently-true flag that kept it off the pty path in the first place.
+		if slot.Headers == nil {
+			slot.Headers = map[string]string{}
+		}
+		slot.Headers["Still-Running"] = "true"
+	}
+	return slot
 }
 
 // ptyRunning reports whether the handle is a live pty channel. The handle may
@@ -942,10 +959,15 @@ const ptyPoll = 20 * time.Millisecond
 // after printing comes back with what it printed so far, and the caller reads on.
 // That is the same contract a terminal has — you cannot tell "done" from "quiet"
 // either — and it is the one direction the old blind sleep got wrong.
-func (s *Server) awaitWindow(ctx context.Context, handle string, win termArgs, start int64) {
+//
+// IT RETURNS WHICH OF THE TWO HAPPENED, because the caller can act on the difference:
+// the window running out means the command has not finished, which is a fact worth a
+// header. Ending on quiet means the command stopped talking, which is as close to "done"
+// as a terminal ever gets.
+func (s *Server) awaitWindow(ctx context.Context, handle string, win termArgs, start int64) (windowExpired bool) {
 	limit := time.Duration(win.TimeoutSeconds * float64(time.Second))
 	if limit <= 0 {
-		return
+		return false
 	}
 	deadline := time.Now().Add(limit)
 	last := start
@@ -979,7 +1001,7 @@ func (s *Server) awaitWindow(ctx context.Context, handle string, win termArgs, s
 			}
 		}
 		if !time.Now().Before(deadline) {
-			return
+			return true
 		}
 	}
 }
@@ -1035,14 +1057,24 @@ func (s *Server) awaitExit(ctx context.Context, handle string, win termArgs) {
 
 // readSlot performs one read and renders it. This is where the three axes are
 // applied for every directive that returns bytes.
-func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win termArgs, args map[string]any) envelope.Slot {
+//
+// `waited` IS HOW MUCH OF THE CALLER'S WINDOW IS ALREADY SPENT. The wait before this
+// read (awaitWindow / awaitExit) burns the caller's budget, and the read that follows
+// then passed the FULL timeout again — so a `run` with timeout=60 could block for 120
+// seconds, and the second half of that was invisible in the reply. The window is one
+// budget, not two: the read gets what is left.
+//
+// That is also what makes `timeout` mean one thing. `readTimeout` capped a plain read at
+// 60 and left `run` uncapped, so the same parameter bounded two directives differently
+// and nothing in the reply said which had happened (issue #161, P1-3).
+func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win termArgs, args map[string]any, waited time.Duration) envelope.Slot {
 	started := time.Now()
 	args["max_bytes"] = float64(win.BytesLimit)
 	args["max_lines"] = float64(win.LinesLimit)
 	// A pipe channel that has not exited yet must not block for the whole timeout
 	// on a read that has nothing new; a pty read waits for the quiet window
 	// instead. Both are upper bounds, so the smaller of the two wins.
-	args["timeout"] = readTimeout(win)
+	args["timeout"] = readTimeout(remaining(win, waited))
 
 	res, fail := s.callTool(ctx, "shell_output", args)
 	if fail != nil {
@@ -1053,6 +1085,20 @@ func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win ter
 		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
 	}
 	return s.windowSlot(stmt, win, doc, time.Since(started))
+}
+
+// remaining is the part of the caller's window that the wait did not spend.
+//
+// A negative or zero remainder is zero: the wait already used the budget, so the read
+// that follows must not block at all. That is the difference between "the window ended"
+// and "the window ended, and then we waited again".
+func remaining(win termArgs, waited time.Duration) termArgs {
+	left := win.TimeoutSeconds - waited.Seconds()
+	if left < 0 {
+		left = 0
+	}
+	win.TimeoutSeconds = left
+	return win
 }
 
 // windowSlot renders a shell_output document as an envelope slot.
@@ -1300,14 +1346,18 @@ func foldOrTruncateLines(body string, limit int, policy string) string {
 	return b.String()
 }
 
-// readTimeout is the blocking wait a read gets: the caller's timeout, capped so a
-// non-blocking read (timeout 0) really is non-blocking.
+// readTimeout is the blocking wait a read gets.
+//
+// IT USED TO CAP AT 60 SILENTLY, which made one parameter mean two things: `run` waited
+// the caller's full window and `read` waited at most a minute, with nothing in the reply
+// saying which bound had applied (issue #161, P1-3). The cap is gone: the budget passed
+// here is already what is LEFT of the caller's window (see readSlot), so the number is
+// the caller's own and no second, hidden one is needed.
+//
+// Zero stays zero: a non-blocking read really is non-blocking.
 func readTimeout(win termArgs) float64 {
 	if win.TimeoutSeconds <= 0 {
 		return 0
-	}
-	if win.TimeoutSeconds > 60 {
-		return 60
 	}
 	return win.TimeoutSeconds
 }
