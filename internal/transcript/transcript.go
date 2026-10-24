@@ -113,13 +113,25 @@ func (o *Source) Len() (int64, error) {
 // readers and for DEAD sessions alike.
 func (o *Source) ByteRange(start int64, max int) ([]byte, int64, error) {
 	if o.Live != nil {
+		// THE TWO WAYS A BUFFER AND ITS LOG CAN DISAGREE ARE OPPOSITE ENDS OF IT.
+		//
+		// The buffer can be BEHIND (the log is appended first — see Len) or AHEAD of
+		// where its own record starts (compaction drops a prefix every reader has
+		// passed, and with no reader at all it drops everything). Either one makes the
+		// buffer's answer wrong in a way the caller cannot see, so both are answered
+		// from the log, which is the record and is complete from offset 0.
+		if o.MsgMgr != nil && start < o.Live.OutputBaseOffset() {
+			// The head: the buffer dropped these bytes, the log still has them. Serving
+			// a clamped range instead would put a start in Content-Range that the caller
+			// did not ask for and cannot reconcile.
+			return o.MsgMgr.OutputByteRange(o.SessID, o.ShellID, start, max)
+		}
 		data, total, err := o.Live.OutputByteRange(start, max)
 		if o.MsgMgr == nil || (err == nil && len(data) >= max) {
 			return data, total, err
 		}
-		// THE BUFFER HAS NOT CAUGHT UP WITH THE LOG YET (see Len). Fill the rest from
-		// the log rather than reporting a short window, so a positional read sees the
-		// same bytes whichever record it reads them from.
+		// The tail: the buffer has not been given these bytes yet. Fill from the log at
+		// the offset right after what the buffer DID serve, so nothing is repeated.
 		rest, logTotal, lerr := o.MsgMgr.OutputByteRange(o.SessID, o.ShellID, start+int64(len(data)), max-len(data))
 		if lerr != nil {
 			// Nothing else can answer, so the buffer's own result stands — including its
@@ -137,11 +149,16 @@ func (o *Source) ByteRange(start int64, max int) ([]byte, int64, error) {
 	return o.MsgMgr.OutputByteRange(o.SessID, o.ShellID, start, max)
 }
 
-// BaseOffset is the absolute offset of the earliest retained byte of a live
-// source (0 for a persisted one). Bytes before it were dropped by buffer
-// compaction; a positional read clamps forward to it.
+// BaseOffset is the absolute offset of the earliest byte this source can serve.
+//
+// ZERO WHENEVER THERE IS A LOG, because the log is the record and it starts at zero:
+// the in-memory buffer may have dropped a prefix (compaction), but a caller asking for
+// that prefix gets it from the log, so telling them it is gone would be a fact about
+// the cache reported as a fact about the stream. Without a log the buffer IS the record,
+// and then its base is the honest answer — bytes before it were dropped and cannot be
+// served by anything.
 func (o *Source) BaseOffset() int64 {
-	if o.Live != nil {
+	if o.Live != nil && o.MsgMgr == nil {
 		return o.Live.OutputBaseOffset()
 	}
 	return 0

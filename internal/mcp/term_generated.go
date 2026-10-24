@@ -195,7 +195,12 @@ func (s *Server) channelSlot(stmt directive.Statement, win termArgs, cs *session
 	if info.ExitCode != nil {
 		writeKV(&b, "exit_code", fmt.Sprint(*info.ExitCode))
 	}
-	writeKV(&b, "bytes", fmt.Sprint(cs.BufferLen()))
+	// THE SOURCE'S LENGTH, NOT THE BUFFER'S. `bytes` answers "is there anything new
+	// since I last looked", and the buffer is a CACHE of the log (see
+	// transcript.Source.Len): for a few microseconds per chunk it is behind, and
+	// `get <channel>` reported a smaller number than `read` would deliver. One
+	// address cannot describe a stream two ways.
+	writeKV(&b, "bytes", fmt.Sprint(s.streamLen(cs)))
 	writeKV(&b, "created", ageOf(info.CreatedAt))
 	body, code, cut, total := capGeneratedCounted(b.String(), win)
 	headers := map[string]string{"Path": stmt.Path}
@@ -1923,4 +1928,24 @@ func peerLines(sessions []api.Session) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// streamLen is one channel's stream length, asked of the record rather than of the
+// cache in front of it.
+//
+// It falls back to the buffer when there is no log to ask (a session with persistence
+// off), which is the same answer the cache gives and the only one available there.
+func (s *Server) streamLen(cs *session.ChildShell) int64 {
+	n := cs.BufferLen()
+	if s.msgMgr == nil {
+		return n
+	}
+	sessID := cs.ParentSessionID()
+	if sessID == "" {
+		return n
+	}
+	if m, err := s.msgMgr.OutputSize(sessID, cs.ID); err == nil && m > n {
+		return m
+	}
+	return n
 }

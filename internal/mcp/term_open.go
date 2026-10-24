@@ -158,7 +158,13 @@ func (s *Server) awaitShellReady(ctx context.Context, handle string, budget time
 	}
 	deadline := time.Now().Add(budget)
 	for {
-		if src.Live.BufferLen() > 0 {
+		// THE SOURCE'S LENGTH, so the wait sees the byte as soon as the RECORD does.
+		// The buffer is a cache of the log and is behind it for a few microseconds per
+		// chunk; polling the cache made `open` occasionally answer "the shell has not
+		// spoken" about a shell whose output a `read` would have returned. And the
+		// number this waits on has to be the one `Content-Range` reports, or the two
+		// answers describe the same stream differently.
+		if n, err := src.Len(); err == nil && n > 0 {
 			return true
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {
@@ -167,7 +173,7 @@ func (s *Server) awaitShellReady(ctx context.Context, handle string, budget time
 		// TEN MILLISECONDS is a compromise on purpose: `ReadTerminalStream` would block
 		// until the bytes arrive, but it reads through a registered reader cursor, and
 		// creating one here would be state that exists for a wait. Polling a counter has
-		// no such cost, and the counter is the same number `Content-Range` reports.
+		// no such cost.
 		time.Sleep(10 * time.Millisecond)
 	}
 }
