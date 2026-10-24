@@ -66,7 +66,14 @@ func TestAByteWindowDoesNotSplitACharacter(t *testing.T) {
 // applied where the cut happens — which is why the charset travels with the read.
 func TestAByteWindowDoesNotSplitADeclaredCharsetCharacter(t *testing.T) {
 	// "中" in GBK is 0xd6 0xd0; a 2-byte window ("a" + the first byte) must stop after "a".
-	write := "printf 'a\326\320b'"
+	//
+	// THE OCTAL ESCAPES ARE DOUBLED ON PURPOSE, so they are still backslashes in the Go
+	// string and printf converts them at RUNTIME. A single backslash here is a Go escape:
+	// the raw bytes 0xD6 0xD0 end up inside an argv element, and they do not survive that
+	// trip — the internal SSH server renders them as the text `\xd6\xd0`, so the channel
+	// carries ten bytes of literal escape instead of the four this test is about (CI on
+	// Linux reported Content-Range 0-9/10). Nothing here needs a raw byte to cross it.
+	write := "printf 'a\\326\\320b'"
 	if runtime.GOOS == "windows" {
 		write = `[Console]::OpenStandardOutput().Write([byte[]](0x61,0xD6,0xD0,0x62),0,4)`
 	}
