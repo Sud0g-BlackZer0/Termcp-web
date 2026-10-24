@@ -1085,8 +1085,17 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 			// names the word is a page of it. A hand-kept map would drift the first time
 			// a verb was added, which is the same reason the flag list is derived.
 			if lines := usageLinesNaming(stmt.Args[0]); lines != "" {
+				// A NODE'S VERBS ARE NOT ALWAYS ITS WHOLE STORY. They are derived from the
+				// usage lines, which is right; but a capability spelled as a flag on an
+				// existing verb has no line to be derived from. `ext` has one — an extension
+				// can be rebuilt — and this page listed five verbs, none of which said so,
+				// which is how an agent ended up with no way to refresh one after a deploy.
+				body := stmt.Args[0] + " is a node, not a verb. These act on it:\n" + lines
+				if note, ok := directive.NodeNote(stmt.Args[0]); ok {
+					body += "\n" + note + "\n"
+				}
 				return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path},
-					Body: stmt.Args[0] + " is a node, not a verb. These act on it:\n" + lines}
+					Body: body}
 			}
 			// 400, NOT 404 — AND THE SAME 400 THE BARE WORD GETS.
 			//

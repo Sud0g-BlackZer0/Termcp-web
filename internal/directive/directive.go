@@ -193,6 +193,35 @@ type Op struct {
 	Core bool
 }
 
+// nodeNotes records the one thing about a node that its verbs do not say.
+//
+// THE VERB LINES ARE DERIVED, AND THIS MAP IS NOT. `help <node>` collects every
+// usage line naming the word, because a hand-kept list of verbs drifts the first
+// time a verb is added. This is the case that derivation cannot cover: a
+// capability spelled as a FLAG on an existing verb has no line of its own, and
+// nothing in the table says `--restart` belongs to the ext kind rather than host
+// or alias.
+//
+// So it is kept to one short entry per node, on purpose. An entry that grew into a
+// paragraph would be the signal that the node needs a verb of its own — which is
+// what #181 turned out to be, and why `edit ext <name> --restart` now exists.
+var nodeNotes = map[string]string{
+	"ext": `An extension can also be REBUILT, which is not a verb here because it changes
+nothing:
+
+  edit ext <name> --restart
+
+The process holds the script it started with, so a target whose extension script has
+been updated in place — a git pull changes the file and not the session template —
+needs the session torn down before the new code can run. Nothing else would notice.`,
+}
+
+// NodeNote returns the note for a node, when its verbs do not tell the whole story.
+func NodeNote(name string) (string, bool) {
+	note, ok := nodeNotes[name]
+	return note, ok
+}
+
 // Statement is one directive after parsing.
 type Statement struct {
 	Op     string

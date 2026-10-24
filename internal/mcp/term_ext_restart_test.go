@@ -57,3 +57,22 @@ func TestHelpEditListsRestart(t *testing.T) {
 		t.Errorf("help edit does not mention --restart: %q", got)
 	}
 }
+
+// `help ext` listed five verbs, none of which could rebuild an extension, so an
+// agent that had just updated one had nothing to ask. The verbs stay derived; the
+// capability they cannot express is the one line this adds.
+func TestHelpExtSaysAnExtensionCanBeRebuilt(t *testing.T) {
+	s := newTestServer(t)
+	got := termText(t, s, map[string]any{"cmd": "help ext"})
+
+	for _, want := range []string{"is a node, not a verb", "edit ext <name> --restart", "torn down"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("help ext is missing %q:\n%s", want, got)
+		}
+	}
+	// The derived half must still be there: the note is an addition, not a
+	// replacement for the lines that come from the table.
+	if !strings.Contains(got, "edit host|ext|alias <name>") {
+		t.Errorf("help ext lost its derived verb lines:\n%s", got)
+	}
+}
