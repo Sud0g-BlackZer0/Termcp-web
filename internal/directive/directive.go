@@ -1866,14 +1866,24 @@ func ParseWithSubst(src string, sub Subst) (*File, error) {
 					}
 					return nil, err
 				}
-				if err := checkParamDomains(parsed, op); err != nil {
+			}
+			filled := sentinels.expandStatement(parsed)
+			// WHAT THE VALUE IS, AFTER IT IS THE VALUE. The whole-word rule and the
+			// payload rule have to run BEFORE this line, because both are questions
+			// about the shape of the caller's text and a hole is still visible there.
+			// A domain question is the opposite: `--repeat $1` is a number when the
+			// value arrives, and asking before the holes are filled refused it as
+			// "got \"__hole_…\"" — every numeric, enum and geometry flag was
+			// unreachable through a reference, and the caller was told their 3 was not
+			// a number.
+			if op, known := Lookup(filled.Op); known {
+				if err := checkParamDomains(filled, op); err != nil {
 					if derr, ok := err.(*Error); ok {
 						derr.Parsed = len(out.Statements)
 					}
 					return nil, err
 				}
 			}
-			filled := sentinels.expandStatement(parsed)
 			if err := checkTargetKindAfterSubst(filled); err != nil {
 				if derr, ok := err.(*Error); ok {
 					derr.Parsed = len(out.Statements)
@@ -2362,7 +2372,7 @@ func commandEnd(stmt *syntax.Stmt) int {
 // The fix is not to interpret those bytes — that is the shell's job, and this parser
 // does not run commands. It is to REFUSE them and say which value to pass instead. A
 // value the grammar cannot cut is the only kind that means what it says.
-func checkValueWasNotCutOff(op Op, flag, value string, rest []word, at int) error {
+func checkValueWasNotCutOff(op Op, flag, value string, rest []word, at int, holes *sentinelTable) error {
 	// A WORD RIGHT AFTER THE VALUE IS A WORD THAT WAS CUT OFF. This is checked at the
 	// one place that knows a value flag just took a word, rather than by guessing from
 	// arity: `key s:1 enter` and `help read` take bare words legitimately, and a rule
@@ -2376,7 +2386,7 @@ func checkValueWasNotCutOff(op Op, flag, value string, rest []word, at int) erro
 	if at+1 < len(rest) && !strings.HasPrefix(rest[at+1].text, "--") {
 		return &Error{
 			Op: op.Name,
-			Msg: "--" + flag + " took " + strconv.Quote(value) + " as its value, and " + strconv.Quote(rest[at+1].text) +
+			Msg: "--" + flag + " took " + strconv.Quote(holes.spell(value)) + " as its value, and " + strconv.Quote(holes.spell(rest[at+1].text)) +
 				" is a separate word after it — so it is not part of the value and nothing would use it.\n" +
 				"Quote a value that contains a space (--" + flag + " \"a b\"), or pass it as args.",
 			Usage: op.Usage,
@@ -2495,7 +2505,7 @@ func checkPayloadType(st Statement, holes *sentinelTable, op Op) error {
 		Msg: op.Name + " takes a VARIABLE, not a command line: its payload must be exactly one reference " +
 			"($1, $2 … or $NAME), and the shell text goes in that value.\n" +
 			"Writing the line directly is refused because the payload would then be read by two languages " +
-			"at once: `" + firstLine(raw) + "` is a shell pipeline to one reader and a termcp directive to " +
+			"at once: `" + firstLine(holes.spell(raw)) + "` is a shell pipeline to one reader and a termcp directive to " +
 			"the other, and neither reading is a guess worth making.\n" +
 			"Use: " + op.Name + " <channel> $1   with args: [\"the command line\"]",
 		Usage: op.Usage,
@@ -2863,7 +2873,7 @@ func parseStatement(src string, stmt *syntax.Stmt, holes *sentinelTable) (Statem
 			// THE VALUE ENDED HERE, AND THIS IS THE ONLY PLACE THAT KNOWS IT. Both
 			// spellings are covered because the check is about what FOLLOWS the value:
 			// `--data a b` and `--data=a b` are the same truncation.
-			if err := checkValueWasNotCutOff(op, key, val, rest, i); err != nil {
+			if err := checkValueWasNotCutOff(op, key, val, rest, i, holes); err != nil {
 				return Statement{}, false, err
 			}
 			i++
@@ -2961,7 +2971,7 @@ func parseStatement(src string, stmt *syntax.Stmt, holes *sentinelTable) (Statem
 			} else {
 				storeFlag(out.Flags, key, val)
 			}
-			if err := checkValueWasNotCutOff(op, key, val, rest, i); err != nil {
+			if err := checkValueWasNotCutOff(op, key, val, rest, i, holes); err != nil {
 				return Statement{}, false, err
 			}
 		}
