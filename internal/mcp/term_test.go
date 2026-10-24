@@ -134,7 +134,7 @@ func TestTermHelp(t *testing.T) {
 	if _, rest, ok := strings.Cut(single, "\n\n"); ok {
 		body = rest // skip the envelope: status line and headers
 	}
-	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <channel> <line>") {
+	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <channel> $1") {
 		t.Errorf("the body does not open with the usage template:\n%s", single)
 	}
 }
@@ -278,7 +278,8 @@ func TestTermRunOnPtyReadsTheWindow(t *testing.T) {
 	h := openPty(t, s)
 	start := time.Now()
 	text := termText(t, s, map[string]any{
-		"cmd":     "run " + h + " echo hi",
+		"cmd":     "run " + h + " $1",
+		"args":    []any{"echo hi"},
 		"timeout": float64(2),
 	})
 	elapsed := time.Since(start)
@@ -346,7 +347,7 @@ func TestTermRunStartsAtItsOwnOffset(t *testing.T) {
 	})
 	waitForContent(t, s, h, "seq-finished-marker")
 
-	second := termText(t, s, map[string]any{"cmd": "run " + h + " echo SECOND", "timeout": float64(2)})
+	second := termText(t, s, map[string]any{"cmd": "run " + h + " $1", "args": []any{"echo SECOND"}, "timeout": float64(2)})
 	if !strings.Contains(second, "SECOND") {
 		t.Fatalf("the second command's output is missing:\n%s", second)
 	}
@@ -1250,23 +1251,28 @@ func TestTermNamespaceIsolationHoldsPerDirective(t *testing.T) {
 	// Every directive that names alice's channel must be refused for bob — not
 	// just the ones that reach a handler. info/span/close read the manager
 	// directly, which is exactly how they would slip through.
-	for _, cmd := range []string{
-		"input " + handle + " echo pwned",
-		"run " + handle + " echo pwned",
-		"key " + handle + " enter",
-		"read " + handle,
-		"get " + handle,
-		"span " + handle,
-		"close " + handle,
-		"resize " + handle + " 10 10",
+	//
+	// `run` and `input` take their shell text as a VALUE now (the payload is one
+	// variable reference), so the refusal has to be reached with a well-formed
+	// statement: the namespace check is about who may drive the channel, not about
+	// what the line says.
+	for _, call := range []map[string]any{
+		{"cmd": "input " + handle + " $1", "args": []any{"echo pwned"}},
+		{"cmd": "run " + handle + " $1", "args": []any{"echo pwned"}},
+		{"cmd": "key " + handle + " enter"},
+		{"cmd": "read " + handle},
+		{"cmd": "get " + handle},
+		{"cmd": "span " + handle},
+		{"cmd": "close " + handle},
+		{"cmd": "resize " + handle + " 10 10"},
 	} {
-		res, err := s.call(bob, "term", map[string]any{"cmd": cmd})
+		res, err := s.call(bob, "term", call)
 		if err != nil {
 			t.Fatal(err)
 		}
 		out := toolResultText(res)
 		if !res.IsError || !strings.HasPrefix(out, "TERM/1 403 Forbidden") {
-			t.Errorf("%q was not refused with 403 for another namespace:\n%s", cmd, out)
+			t.Errorf("%q was not refused with 403 for another namespace:\n%s", call["cmd"], out)
 		}
 	}
 
@@ -1309,7 +1315,7 @@ func TestTermRefusalIsNeverSuccessShaped(t *testing.T) {
 	}
 	handle := handleFrom(t, toolResultText(created))
 
-	res, err := s.call(bob, "term", map[string]any{"cmd": "input " + handle + " echo pwned"})
+	res, err := s.call(bob, "term", map[string]any{"cmd": "input " + handle + " $1", "args": []any{"echo pwned"}})
 	if err != nil {
 		t.Fatal(err)
 	}

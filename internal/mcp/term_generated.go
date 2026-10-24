@@ -1191,7 +1191,7 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	b.WriteString("cmd holds directives only. sh never appears in cmd — it enters as a value through\n")
 	b.WriteString("args ($1, $2) or vars ($NAME). cmd supports &&, ||, ;, and &.\n")
 	b.WriteString("  run a1f3:1 $1   args: [\"make && test\"]   one sh line, operators live\n")
-	b.WriteString("  run a1f3:1 make && notify done           two cmd directives\n\n")
+	b.WriteString("  run a1f3:1 $1 && notify done             two cmd directives\n\n")
 
 	// THE TREE IS THE GRAMMAR. Every statement is a verb plus the address of the
 	// node it works on, so learning the tree teaches the whole surface: a caller who

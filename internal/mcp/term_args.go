@@ -332,6 +332,9 @@ func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
 	}
 	collect(readNumberArg(args, "timeout", &w.TimeoutSeconds))
 	var bytesLimit, linesLimit, totalLimit float64
+	if _, given := args["bytes_limit"]; given {
+		w.BytesLimitSet = true
+	}
 	collect(readNumberArg(args, "bytes_limit", &bytesLimit))
 	collect(readNumberArg(args, "lines_limit", &linesLimit))
 	collect(readNumberArg(args, "total_bytes_limit", &totalLimit))

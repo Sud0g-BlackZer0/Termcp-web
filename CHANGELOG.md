@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### 新增
+
+- **`cmd` 里不再有 shell 拼接：一个引用必须是它所在的那个词的全部**。`$1`/`$2`/`$NAME` 要么独占一个词，要么不出现在 `cmd` 里——`/tmp/$1`、`--data a$1`、`--data $(( $1 + 1 ))` 现在一律拒绝并给出替代写法，而不是静默拼出一个谁都没写的值。这不是洁癖：由两种语言拼成的词会被读两遍，每一遍的含义都不同，而回复两种情况下都是 200。**能力没有减少，只是换了拼法**——整个值作为值传过去：`cmd: "write h file $1"` + `args: ["/tmp/x"]`。`call` 的帧按声明例外（`PayloadSpan: spanVerbatim`，它交给协议对端、不经过任何 shell），所以 JSON 模板里的 `$1` 照旧。判定放在**词表上**而不是逐个字段上：target、kind、key、positional、flag 值、词表都是从同一批词切出来的，一处检查覆盖全部，以后加字段也不必再想起这条规则。
+- **`read … | write …`：把字节从一个节点搬到另一个节点，不经过调用方上下文**。左侧是 channel 或文件（`--cursor`/`--offset`/`--from-line`/`--tail`/`--stream` 照旧由调用方指定），右侧只能是 `write <session> file <path>`。两端直接对接（两个 SFTP 端用 `io.Pipe` 相连，都是 `io.Copy`），中间**不落盘、不缓冲**；只有「channel → 文件」这一侧因为 transcript 没有增量读取器而先把跨度读成一段字节。空间窗默认不参与（拷贝是整段），调用方显式给了 `bytes_limit` 才截。回复是 202 + 任务回执（`Kind: copy`），`get task` 等待并报进度。拷贝是**原始字节**，与 `read` 默认渲染成终端画面相反。`|` 出现在其他任何组合上一律拒绝并说明「payload 里的 `|` 属于远端 shell」，而在此之前右侧是**静默丢弃**的。
+- **`run`/`input` 的 payload 现在必须是恰好一个变量引用**（`$1`、`${10}` 或 `$NAME`），命令行走 `args` 值。以前 payload 是「行尾全部」，于是同一段文本被两个语言同时读：`run h:1 ls | write h:2 file /x` 对远端 shell 是「把 ls 的输出管给一个叫 write 的程序」（Linux 上真有这个程序，是给别人终端发消息的），对 termcp 是一条管道；`run h:1 echo a; b` 是两条指令。现在只有一种读法，`|` 也只剩 termcp 一个含义。**随之消失的写法**（把整行放进 `args` 即可）：`run h:1 $1 | wc -l`、`run h:1 echo $1`（变量旁有字）、heredoc 正文里放变量、算术里的变量。payload 里的 `&`/`;`/`&&`/`|` 仍是 termcp 的语句运算符，shell 自己的那些写进值里。
+- **参数类型声明**：指令表现在声明每个 flag 的值域（`"offset:number"`、`"stream:enum=o,e,all"`、`"size:geometry"`），并新增 `Op.PayloadType`；校验在**任何 handler 运行之前**发生。顺手修掉三个静默：`--stream nonsense` 以前静默等于 stdout，`--on-exit nonsense` 同理，`--size nonsense` 以前静默用默认尺寸（`fmt.Sscanf` 解析失败返回 0，调用方再把 0 跳过）。
+
 ### 改进
 
 - **生成式回包会说出自己本来有多长（#178）**。`help read` 是 10683 字节，而调用方没有办法先问大小再决定要不要花：`bytes_limit: 0` 这个「只要通道、不要字节」的便宜形式，对频道读回答 `bytes */2593`，对生成式回包却回一个不带任何尺寸的空 204——唯一能省钱的问法，恰好在唯一需要它的地方失效。现在被窗口切掉的回包和被 `bytes_limit: 0` 抽空的回包，都带上和流式读取同一个 `Content-Range: bytes */N`；完整交付的回包不带这个头，因为「完整」本身就是它的尺寸。尺寸随 `capGeneratedCounted` 一起返回，所以渲染生成式回包的九个地方一个都不会漏——第一版补丁改的是其中一个调用者，测试还过了，因为测的是辅助函数而不是一条回包。
@@ -13,9 +20,19 @@
 
 - **`kind=mcp` 不再自带 `npx -y example-mcp-server`**。一个 MCP 扩展就是"一个程序加它的 argv"，没有可猜的惯例——`npx -y <package>` 只是启动方式之一，`python server.py` 是另一种。那个默认值在两个方向上都错：**给了自己程序的创建会继承那串参数**（`--command cat` 实际执行 `cat -y example-mcp-server`，报 `cat: illegal option -- y`——既没说哪个 flag，也没说默认值从哪来），而**什么都不给的创建会得到一个能通过校验、永远跑不起来的模板**，看起来配好了，比报错更坏。现在 `--command`/`--args` 由调用方填满，漏了就在创建时被拒：`mode=pipe requires a command (a pipe channel has no fallback shell)`。预设仍然提供**确实算惯例**的东西：pipe 模式、能力白名单、驱动 stdio 服务器的 notes——程序名不算惯例。
 
+### 修复
+
+- **一个值被 shell 语法截断时不再回 200**。三处同源：`write s file /x --data a>b` 的 `>b` 被读成重定向，值变成 `a`；`--data a b` 的值是 `a`，`b` 变成一个没人读的 positional；两者都曾经**静默成功**。现在拒绝并指名哪个 flag、以及用引号或 `args` 怎么写。`--data=a b` 是同一个截断的另一种拼法，一并覆盖——检查问的是「值之后跟着什么」，不是值的拼法。
+- **指令的回复不再泄漏内部替换标记**。拒绝文案曾经回显 `a__hole_9f3c_0__` 而不是调用方写的 `a$1`：标记是本服务的记账，泄漏出去就把一条教学错误变成一道谜题。
+
 ## v0.2.8-rc.5 — 2026-10-24
 
 ### 新增
+
+- **`run`/`input` 的 payload 现在必须是恰好一个变量引用**（`$1`、`${10}` 或 `$NAME`），命令行走 `args` 值。以前 payload 是「行尾全部」，于是同一段文本被两个语言同时读：`run h:1 ls | write h:2 file /x` 对远端 shell 是「把 ls 的输出管给一个叫 write 的程序」（Linux 上真有这个程序，是给别人终端发消息的），对 termcp 是一条管道；`run h:1 echo a; b` 是两条指令。现在只有一种读法，`|` 也只剩 termcp 一个含义。**随之消失的写法**（把整行放进 `args` 即可）：`run h:1 $1 | wc -l`、`run h:1 echo $1`（变量旁有字）、heredoc 正文里放变量、算术里的变量。payload 里的 `&`/`;`/`&&`/`|` 仍是 termcp 的语句运算符，shell 自己的那些写进值里。
+- **参数类型声明**：指令表现在声明每个 flag 的值域（`"offset:number"`、`"stream:enum=o,e,all"`、`"size:geometry"`），并新增 `Op.PayloadType`；校验在**任何 handler 运行之前**发生。顺手修掉三个静默：`--stream nonsense` 以前静默等于 stdout，`--on-exit nonsense` 同理，`--size nonsense` 以前静默用默认尺寸（`fmt.Sscanf` 解析失败返回 0，调用方再把 0 跳过）。
+
+- **`read … | write …`：把字节从一个节点搬到另一个节点，不经过调用方上下文**。左侧是 channel 或文件（`--cursor`/`--offset`/`--from-line`/`--tail`/`--stream` 照旧由调用方指定），右侧只能是 `write <session> file <path>`。两端直接对接（两个 SFTP 端用 `io.Pipe` 相连，都是 `io.Copy`），中间**不落盘、不缓冲**；只有「channel → 文件」这一侧因为 transcript 没有增量读取器而先把跨度读成一段字节。空间窗默认不参与（拷贝是整段），调用方显式给了 `bytes_limit` 才截。回复是 202 + 任务回执（`Kind: copy`），`get task` 等待并报进度。拷贝是**原始字节**，与 `read` 默认渲染成终端画面相反。`|` 出现在其他任何组合上一律拒绝并说明「payload 里的 `|` 属于远端 shell」，而在此之前右侧是**静默丢弃**的。
 
 - **`open <session> mcp <url>` 握手失败时不再假装打开成功**。以前回 200、交出 handle，只在正文里写一句「握手失败」，于是那次已经知道的事实被推给下一次调用：`call` 回 500 `connection_failed`——把「URL 写错了」报成「传输坏了」。现在 `open` 回 502 并说清这个 URL 不是 MCP 端点，同时释放通道、不交 handle。连不上与服务端拒绝仍是两件事：HTTP 通道第一帧才拨号，所以「端口还没起来」仍算打开成功。
 

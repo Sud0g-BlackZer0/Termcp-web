@@ -301,6 +301,17 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 
 	// --- read: a channel's new bytes, a file's content, or a peer's frames ---
 	case "read":
+		// A PIPELINE IS ONE STATEMENT WITH TWO ENDS, and it is answered by the copy
+		// before any of the single-ended read paths below can claim it.
+		if stmt.Pipe != nil {
+			return s.pipeCopy(ctx, stmt, win)
+		}
+		// The right half of a pipeline is only reachable through its left half, so
+		// reaching it here means something routed it alone. Refuse rather than run a
+		// write against a target nobody named.
+		if stmt.Piped {
+			return []envelope.Slot{badRequest(stmt, "this is the right half of a `|`; it runs as part of the pipeline")}
+		}
 		if stmt.Kind == "file" {
 			return []envelope.Slot{s.directiveFile(ctx, withFlags(stmt, map[string]string{
 				"action":      "read",
