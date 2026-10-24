@@ -77,21 +77,10 @@ const (
 	// all — while the frame directives' help used to tell callers to quote the frame.
 	spanVerbatim
 
-	// spanArithmetic is the inside of `$(( ))` / `(( ))`, where a QUOTED WORD IS
-	// NOT AN OPERAND.
-	//
-	// The shell reads an arithmetic expansion as an expression, so the data rule's
-	// one quoted word is a syntax error there and the line never runs:
-	//
-	//	run h:1 echo $(( $1 + 1 ))   args ["2"]  ->  echo $(( '2' + 1 ))
-	//	                                             syntax error: operand expected
-	//
-	// The parser already knows where these regions are (an ArithmExp or ArithmCmd
-	// node), so they are reported by the same AST pass that reports payloads rather
-	// than guessed at from the text. Inside one, a value is inserted as the caller's
-	// own bytes — the caller chose an arithmetic context, and only a bare operand can
-	// be one.
-	spanArithmetic
+	// THERE WAS A FOURTH MODE HERE — `spanArithmetic`, the inside of `$(( ))`, where a
+	// quoted word is not an operand. It is gone with the region that produced it: the
+	// whole-word rule refuses a reference glued to the operators around it, so no
+	// accepted statement ever consulted it. See the note in analyzeSource.
 )
 
 // span is a half-open byte range of cmd with the insertion mode that governs it.
@@ -123,7 +112,7 @@ type span struct {
 // region the reference is in.
 func (s span) admits(src string, start, end int) (mode spanMode, raw bool) {
 	switch s.mode {
-	case spanVerbatim, spanArithmetic:
+	case spanVerbatim:
 		// A shell never reads these, so the value is the caller's own bytes.
 		return s.mode, true
 

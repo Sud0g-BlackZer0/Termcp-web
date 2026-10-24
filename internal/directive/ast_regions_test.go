@@ -3,8 +3,6 @@ package directive
 import (
 	"strings"
 	"testing"
-
-	"mvdan.cc/sh/v3/syntax"
 )
 
 // These pin the regions the parser knows about, after the pass stopped deciding them on
@@ -54,25 +52,25 @@ func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 			name:    "an arithmetic expansion is not a payload any more",
 			src:     "run s1:1 echo $(( $1 + 1 ))",
 			sub:     Subst{Pos: []string{"2"}},
-			wantErr: "takes a VARIABLE",
+			wantErr: "cannot sit inside a shell line",
 		},
 		{
 			name:    "a named value in arithmetic is not either",
 			src:     "run s1:1 echo $(( $N * 2 ))",
 			sub:     Subst{Named: map[string]string{"N": "21"}},
-			wantErr: "takes a VARIABLE",
+			wantErr: "cannot sit inside a shell line",
 		},
 		{
 			name:    "a here-document body is not a payload any more",
 			src:     "run s1:1 cat <<EOF\n$1\nEOF\n",
 			sub:     Subst{Pos: []string{"echo C"}},
-			wantErr: "takes a VARIABLE",
+			wantErr: "cannot sit inside a shell line",
 		},
 		{
 			name:    "the tab-stripping here-document too",
 			src:     "run s1:1 cat <<-EOF\n\t$1\n\tEOF\n",
 			sub:     Subst{Pos: []string{"echo C"}},
-			wantErr: "takes a VARIABLE",
+			wantErr: "cannot sit inside a shell line",
 		},
 		{
 			// A QUOTED DELIMITER IS THE CALLER SAYING "EXPAND NOTHING HERE", and a payload
@@ -163,53 +161,5 @@ func TestTheAmpersandReachesTheTerminal(t *testing.T) {
 	}
 	if !f.Statements[0].Background {
 		t.Error("the statement did not become concurrent")
-	}
-}
-
-// TestHeredocDelimiterQuotingComesFromTheAST pins the last byte-level syntax decision this
-// pass used to make.
-//
-// What makes a heredoc body literal is that any part of the DELIMITER was quoted, and the
-// pass used to find that out by scanning the delimiter's source slice for a quote or a
-// backslash. The parser had already classified every part, so the question is a node type:
-// SglQuoted or DblQuoted for a quote, a backslash inside a Lit for an escape, an ordinary
-// Lit for neither. The cases below are the spellings where those differ.
-func TestHeredocDelimiterQuotingComesFromTheAST(t *testing.T) {
-	bs := string(rune(92))
-	cases := []struct {
-		name  string
-		src   string
-		quote bool
-	}{
-		{"bare delimiter", "run s1:1 cat <<EOF\n$1\nEOF\n", false},
-		{"single-quoted delimiter", "run s1:1 cat <<'EOF'\n$1\nEOF\n", true},
-		{"double-quoted delimiter", "run s1:1 cat <<\"EOF\"\n$1\nEOF\n", true},
-		{"escaped delimiter", "run s1:1 cat <<" + bs + "EOF\n$1\nEOF\n", true},
-		{"quote in the middle of the word", "run s1:1 cat <<E\"O\"F\n$1\nEOF\n", true},
-		{"escape in the middle of the word", "run s1:1 cat <<E" + bs + "OF\n$1\nEOF\n", true},
-		{"tab-stripping bare delimiter", "run s1:1 cat <<-EOF\n\t$1\n\tEOF\n", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			f, err := syntax.NewParser().Parse(strings.NewReader(c.src), "")
-			if err != nil {
-				t.Fatalf("Parse(%q): %v", c.src, err)
-			}
-			found := false
-			syntax.Walk(f, func(n syntax.Node) bool {
-				r, ok := n.(*syntax.Redirect)
-				if !ok || r.Hdoc == nil {
-					return true
-				}
-				found = true
-				if got := wordIsQuoted(r.Word); got != c.quote {
-					t.Errorf("wordIsQuoted(%q) = %v, want %v", c.src, got, c.quote)
-				}
-				return true
-			})
-			if !found {
-				t.Fatalf("%q has no heredoc to inspect", c.src)
-			}
-		})
 	}
 }

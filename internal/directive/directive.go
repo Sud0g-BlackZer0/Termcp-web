@@ -2016,24 +2016,26 @@ func analyzeSource(src string) ([]span, []ref) {
 				r.dq = insideRange(dq, r.start, r.end)
 				refs = append(refs, r)
 			}
-		case *syntax.ArithmExp:
-			// ARITHMETIC CONTEXT COMES FROM THE PARSER. `$(( ))` is an expression, not a
-			// word list, so the quoting that makes a value data would make the
-			// expression invalid — and the node type is the only thing that knows the
-			// difference between a `$1` in an operand and a `$1` in a command line.
-			spans = append(spans, span{start: int(n.Pos().Offset()), end: int(n.End().Offset()), mode: spanArithmetic})
-		case *syntax.Redirect:
-			// A HERE-DOCUMENT BODY IS ITS OWN NODE.
-			//
-			// `Redirect.Hdoc` is the body the parser already read — lines between the
-			// `<<EOF` line and the terminator. A quoted delimiter means the shell
-			// expands nothing in the body, which the grammar mirrors by emitting no
-			// ParamExp nodes; an unquoted delimiter DOES emit them, and the span tells
-			// the replacer to insert them bare as text rather than quoted as a word.
-			if n.Hdoc != nil && !wordIsQuoted(n.Word) {
-				spans = append(spans, span{start: int(n.Hdoc.Pos().Offset()), end: int(n.Hdoc.End().Offset()), mode: spanVerbatim})
-			}
 		}
+		// TWO REGION KINDS USED TO BE COLLECTED HERE, and both are unreachable now.
+		//
+		// The rule that a reference is the WHOLE word it sits in (see
+		// checkOneWordOneLanguage) means no reference can sit inside shell syntax any
+		// more, so a region describing shell syntax has nothing left to decide:
+		//
+		//   - ARITHMETIC (`ArithmExp`): `--data $(( $1 + 1 ))` and `run h:1 echo $(( $1 +
+		//     1 ))` are both refused — the reference is glued to the operators around it.
+		//     Every statement that produced one of these spans is refused, so the span
+		//     never reached a decision: measured, the insertion mode it selects
+		//     (`spanArithmetic`) does not appear in a single accepted statement.
+		//   - A HERE-DOCUMENT BODY (`Redirect.Hdoc`): a here-doc needs a redirect, and a
+		//     redirect is refused on a verb that runs no command line, while a payload
+		//     verb's payload must be exactly one reference — `run h:1 $1 <<EOF` is
+		//     refused for that reason. The body's references are refused with it.
+		//
+		// ponytail: this is deleted BECAUSE the whole-word rule holds. Lifting that rule
+		// is the one change that makes both regions live again, and this comment is
+		// where the two walks go back.
 		return true
 	})
 	for _, stmt := range file.Stmts {
@@ -2072,35 +2074,6 @@ func refOfParam(src string, p *syntax.ParamExp) (ref, bool) {
 		name:       name,
 		positional: allDigits(name),
 	}, true
-}
-
-// wordIsQuoted asks the AST whether the delimiter word was quoted.
-//
-// THE GRAMMAR'S OWN MODEL, NOT A STRING SCAN. In a heredoc, what makes the body
-// literal is that any part of the delimiter was quoted — a single quote, a double
-// quote, or an escaped character (`<<\EOF`). The AST tells these three apart by
-// node type and literal contents:
-//   - SglQuoted or DblQuoted means the caller used quotes;
-//   - a Lit holding a backslash means a character was escaped;
-//   - anything else (an ordinary unescaped Lit) is an unquoted delimiter.
-//
-// Asking the AST nodes rather than scanning the source slice keeps the quoting
-// model where it belongs: in the parser that already classified each part.
-func wordIsQuoted(w *syntax.Word) bool {
-	if w == nil {
-		return false
-	}
-	for _, p := range w.Parts {
-		switch part := p.(type) {
-		case *syntax.SglQuoted, *syntax.DblQuoted:
-			return true
-		case *syntax.Lit:
-			if strings.Contains(part.Value, "\\") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // insideRange reports whether [start,end) sits inside any of these ranges.
