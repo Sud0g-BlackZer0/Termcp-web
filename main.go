@@ -435,10 +435,6 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	}
 	mcpSrv.SetConnectionsListener(webuiH.NotifyClientsChanged)
 
-	// An approval decision must also wake an agent parked on shell_notify, so it
-	// learns the outcome without polling. Fan-out stays in one place: the web UI
-	// keeps its own listener (installed in Register) and this one forwards the
-	// same transitions to the notify subsystem's rules.
 	if verifier != nil {
 		mainSrv.Handler = auth.Middleware(verifier, mux)
 	}

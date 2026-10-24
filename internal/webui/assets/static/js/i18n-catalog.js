@@ -289,14 +289,11 @@ var I18N_CATALOG = {
     'win.term.tab': 'Terminal',
     'win.fw.tab': 'Forwardings',
     'win.files.tab': 'Files',
-    'win.notify.tab': 'Notifications',
 
     /* --- review mode (approval gate) --- */
     'tab.reviewWaiting': 'Commands waiting for review',
     'conn.approval.mark': 'New sessions require command review by default',
     'conn.approval.markAria': 'Review mode enabled by default',
-    'win.notify.tip': 'Wake-up rules for this shell (notify tool)',
-    'ntf.emptyHint': 'This tab lists rules that notify an agent (notify tool), not the toasts shown in the corner.',
     'modal.conn.loopbackOnly': 'Built-in loopback connection: it dials this machine over the built-in SSH server, so host, credentials and jumps do not apply. Only the settings below are used.',
     'modal.conn.field.approval': 'Review every AI write by default',
     'modal.conn.field.approvalHint': 'Sessions started from this profile begin with review mode on: each command waits for you to Accept or Reject it before any byte reaches the shell.',
@@ -340,10 +337,6 @@ var I18N_CATALOG = {
     'fw.empty': 'No active forwards',
 
     /* --- notifications panel --- */
-    'ntf.empty': 'No wake-up rules for this shell',
-    'ntf.unregister': 'Unregister',
-    'ntf.channel.sampling': 'sampling',
-    'ntf.channel.resource': 'resource',
 
     /* --- forwarding modal --- */
     'modal.forward.title': 'New Forwarding',
@@ -744,14 +737,11 @@ var I18N_CATALOG = {
     'win.term.tab': '终端',
     'win.fw.tab': '端口转发',
     'win.files.tab': '文件',
-    'win.notify.tab': '通知',
 
     /* --- review mode (approval gate) --- */
     'tab.reviewWaiting': '等待审核的命令',
     'conn.approval.mark': '新会话默认需要审核命令',
     'conn.approval.markAria': '默认启用审核模式',
-    'win.notify.tip': '该 shell 的唤醒规则（notify 工具）',
-    'ntf.emptyHint': '此标签页列出的是通知代理的规则（notify 工具），不是角落弹出的提示。',
     'modal.conn.loopbackOnly': '内置回环连接：它通过内置 SSH 服务连接本机，因此主机、凭据和跳板都不适用，只用下方的设置。',
     'modal.conn.field.approval': '默认审核 AI 的每次写入',
     'modal.conn.field.approvalHint': '从该配置启动的会话默认开启审核模式：每条命令都会等你接受或拒绝后才发送到 shell。',
@@ -795,10 +785,6 @@ var I18N_CATALOG = {
     'fw.empty': '暂无端口转发',
 
     /* --- notifications panel --- */
-    'ntf.empty': '暂无通知规则',
-    'ntf.unregister': '取消注册',
-    'ntf.channel.sampling': '采样',
-    'ntf.channel.resource': '资源',
 
     /* --- forwarding modal --- */
     'modal.forward.title': '新建端口转发',
@@ -1199,14 +1185,11 @@ var I18N_CATALOG = {
     'win.term.tab': '終端',
     'win.fw.tab': '通訊埠轉送',
     'win.files.tab': '檔案',
-    'win.notify.tab': '通知',
 
     /* --- review mode (approval gate) --- */
     'tab.reviewWaiting': '等待審核的指令',
     'conn.approval.mark': '新工作階段預設需要審核命令',
     'conn.approval.markAria': '預設啟用審核模式',
-    'win.notify.tip': '此 shell 的喚醒規則（notify 工具）',
-    'ntf.emptyHint': '此分頁列出的是通知代理的規則（notify 工具），不是角落彈出的提示。',
     'modal.conn.loopbackOnly': '內建回環連線：它透過內建 SSH 服務連線本機，因此主機、認證與跳板都不適用，只使用下方的設定。',
     'modal.conn.field.approval': '預設審核 AI 的每次寫入',
     'modal.conn.field.approvalHint': '從此設定啟動的工作階段預設開啟審核模式：每道指令都會等你接受或拒絕後才送到 shell。',
@@ -1250,10 +1233,6 @@ var I18N_CATALOG = {
     'fw.empty': '尚無通訊埠轉送',
 
     /* --- notifications panel --- */
-    'ntf.empty': '尚無通知規則',
-    'ntf.unregister': '取消註冊',
-    'ntf.channel.sampling': '取樣',
-    'ntf.channel.resource': '資源',
 
     /* --- forwarding modal --- */
     'modal.forward.title': '新增通訊埠轉送',

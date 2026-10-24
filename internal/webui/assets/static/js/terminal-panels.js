@@ -51,28 +51,13 @@ function _initShellWindowUI(win, connLabel, sessionId) {
   setupShellWindowResize(win);
   setupMobileSessionSwitcher(win);
 
-  // --- Header tab switching (term / fw / file / notify panels) ---
-  // Inject the Notifications tab here so both the pending and connected
-  // window templates get it without duplicating the tab-bar markup.
+  // --- Header tab switching (term / fw / file panels) ---
   var tabBarEl = win.querySelector('.shell-tab-bar');
-  if (tabBarEl && !tabBarEl.querySelector('.shell-tab-btn[data-stab="notify"]')) {
-    var ntfTabBtn = document.createElement('button');
-    ntfTabBtn.type = 'button';
-    ntfTabBtn.className = 'shell-tab-btn';
-    ntfTabBtn.setAttribute('data-stab', 'notify');
-    ntfTabBtn.setAttribute('data-i18n-title', 'win.notify.tip');
-    ntfTabBtn.title = t('win.notify.tip');
-    ntfTabBtn.innerHTML = '<svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6a3.5 3.5 0 017 0c0 2.5 1 3.5 1 3.5H2.5s1-1 1-3.5z"/><path d="M5.8 11.5a1.2 1.2 0 002.4 0"/></svg>';
-    tabBarEl.appendChild(ntfTabBtn);
-  }
   /* The lock is declared here — before the pane tabs, so the markup still reads
-     gate-then-faces and no template has to know about the bell. The bell is
-     injected below and the lock is then moved after it, so the row reads
-     term · fw · file · notify · review: the two state controls sit together at
-     the end, away from the navigation. */
+     gate-then-faces and the two state controls sit together at the end, away from
+     the navigation. */
   var reviewBtn = tabBarEl && tabBarEl.querySelector('.shell-review-lock');
-  var notifyBtn = tabBarEl && tabBarEl.querySelector('.shell-tab-btn[data-stab="notify"]');
-  if (reviewBtn && notifyBtn) tabBarEl.appendChild(reviewBtn);
+  if (reviewBtn) tabBarEl.appendChild(reviewBtn);
   var tabBtns = win.querySelectorAll('.shell-tab-btn');
   var terminalWrap = win.querySelector('.shell-terminal-wrap');
   var tabPanels = win.querySelectorAll('.shell-tab-panel');
@@ -145,52 +130,6 @@ function _initShellWindowUI(win, connLabel, sessionId) {
     listEl.scrollTop = listEl.scrollHeight;
   }
   win._refreshFwList = function() { refreshShellFwList(win); };
-
-  // Refresh notifications list for this window (from global cache).
-  function refreshShellNtfList(w) {
-    w = w || win;
-    var listEl = w.querySelector('.shell-ntf-list');
-    if (!listEl) return;
-    var rules = (window._lastNotifications || []).filter(function(n) { return n.session_id === sessionId; });
-    if (!rules.length) {
-      // This tab lists wake-up RULES (the ones the notify tool registers), not the
-      // toasts that appear in the corner. Those are two different things, and an
-      // empty panel beside a toast that just popped reads as a bug — so the empty
-      // state says which thing is empty.
-      listEl.innerHTML = '<div style="padding:16px;color:var(--term-fg-muted);text-align:center;line-height:1.6">'
-        + escapeHtml(t('ntf.empty'))
-        + '<div style="margin-top:6px;font-size:0.72rem;color:var(--term-fg-faint)">'
-        + escapeHtml(t('ntf.emptyHint'))
-        + '</div></div>';
-      return;
-    }
-    listEl.innerHTML = rules.map(function(n){
-      var evColor = n.event === 'exit' ? 'var(--term-danger)' : (n.event === 'silence' ? 'var(--term-warning)' : 'var(--term-success)');
-      var extra = (n.event === 'silence' && n.silence_seconds) ? ' ' + n.silence_seconds + 's' : '';
-      var chLabel = n.channel === 'sampling' ? t('ntf.channel.sampling') : t('ntf.channel.resource');
-      var unregisterTip = t('ntf.unregister');
-      return '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--term-border-2)" onmouseover="this.style.background=\'var(--term-hover)\'" onmouseout="this.style.background=\'\'">' +
-        '<span style="font-size:0.65rem;font-weight:600;text-transform:uppercase;padding:1px 5px;border-radius:3px;color:' + evColor + ';border:1px solid ' + evColor + ';flex-shrink:0;min-width:56px;text-align:center">' + escapeHtml(n.event) + escapeHtml(extra) + '</span>' +
-        '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.78rem"><span style="color:var(--term-fg-muted)">' + escapeHtml(chLabel) + '</span> <span style="color:var(--term-border-4)">·</span> <span style="color:var(--term-fg-mid)">' + escapeHtml(n.shell_id) + '</span></span>' +
-        '<button class="shell-ntf-del-btn" data-ntfid="' + escapeHtml(n.rule_id) + '" title="' + unregisterTip + '" style="padding:2px 6px;font-size:0.68rem;border:1px solid transparent;border-radius:3px;background:transparent;color:var(--term-border-4);cursor:pointer;flex-shrink:0" onmouseover="this.style.borderColor=\'var(--term-danger)\';this.style.color=\'var(--term-danger)\'" onmouseout="this.style.borderColor=\'transparent\';this.style.color=\'var(--term-border-4)\'">✕</button>' +
-        '</div>';
-    }).join('');
-    listEl.querySelectorAll('.shell-ntf-del-btn').forEach(function(btn) {
-      btn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        deleteNotification(this.getAttribute('data-ntfid')).then(function(){ loadNotifications(); }).catch(function(){});
-      });
-    });
-  }
-  win._refreshNtfList = function() { refreshShellNtfList(win); };
-  var ntfRefreshBtn = win.querySelector('.shell-ntf-refresh-btn');
-  if (ntfRefreshBtn) {
-    ntfRefreshBtn.addEventListener('click', function(e) {
-      e.stopPropagation();
-      spinIconOnce(this);
-      loadNotifications();
-    });
-  }
 
   // File operations for this shell window
   var filePathInput = win.querySelector('.shell-file-path');

@@ -58,7 +58,6 @@ var mcpAllow = []string{
 	capability.ShellOutput,
 	capability.ShellReaderRegister,
 	capability.ShellReaderUnregister,
-	capability.ShellNotify,
 	capability.SessionInfo,
 }
 
