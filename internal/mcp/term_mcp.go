@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -174,7 +176,7 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 		return envelope.Slot{Code: 204, Headers: map[string]string{
 			"Path":          stmt.Path,
 			"Content-Range": envelope.ContentRange(from, from+rawLen-1, total),
-		}, Body: "no complete frame yet"}
+		}, Body: "no complete frame yet" + notAFrame(body)}
 	}
 	start := from + int64(strings.Index(body, frame))
 	end := start + int64(len(frame))
@@ -343,37 +345,76 @@ func (s *Server) setRecvCursor(handle string, at int64) {
 	s.recvCursors[handle] = at
 }
 
+// notAFrame says what the buffer holds when nothing in it parsed as a value, so a
+// caller can tell a peer that writes a banner from a peer that is merely slow.
+//
+// "no complete frame yet" is the same sentence for both, and only one of them is
+// worth waiting on. A caller that retries a banner retries for ever.
+func notAFrame(body string) string {
+	s := strings.TrimSpace(body)
+	if s == "" || s[0] == '{' || s[0] == '[' {
+		// Empty, or the start of a value that is simply not finished: the honest
+		// "not yet", and nothing to explain.
+		return ""
+	}
+	line := s
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	const limit = 160
+	if len(line) > limit {
+		line = line[:limit]
+		// Never end the quote on half a character.
+		for len(line) > 0 && !utf8.ValidString(line) {
+			line = line[:len(line)-1]
+		}
+		line += "\u2026"
+	}
+	return " — the bytes in front are not a frame: " + strconv.Quote(line)
+}
+
 // firstJSONValue returns the first complete JSON value in raw.
 //
 // It scans for a complete object or array rather than trusting a newline: a frame
 // may be pretty-printed, and a line-delimited peer may still emit a value with
 // embedded newlines inside a string.
+//
+// A STDIO PEER WRITES ITS OWN NOISE ONTO THE SAME STREAM, AND THAT NOISE CAN START
+// WITH THE BYTE A FRAME STARTS WITH. Measured twice, on two unrelated servers:
+// chrome-devtools-mcp announces itself with "[chrome-devtools-mcp] The connecting
+// client did not negotiate the MCP roots capability…", and
+// @modelcontextprotocol/server-filesystem with "…using allowed directories set from
+// server args: [ 'C:\\tc' ]". A scan that trusted the first '[' in the buffer was
+// then parsing the banner — for ever. The bytes were never missing; the parse
+// started in the wrong place, and the caller was told "not yet" about a frame that
+// had already arrived, with no way to act on it.
+//
+// SO EVERY CANDIDATE IS TRIED, in the order the buffer holds them, and the first one
+// that decodes into a complete value wins. A candidate that is not JSON fails within
+// its first byte or two, which is what keeps the scan cheap.
 func firstJSONValue(raw string) (string, bool) {
-	// SKIP THE NOISE BEFORE THE FRAME, and there is always some: a stdio peer's own
-	// startup output shares this stream. Measured on @modelcontextprotocol/
-	// server-everything it was 149 bytes of npm warning and a "Starting default
-	// (STDIO) server..." banner, and every recv on that channel reported "no complete
-	// frame yet" while a complete frame sat in the buffer — the decoder was being
-	// handed the warning, not the frame.
-	//
-	// A frame starts at a '{' or a '['. Nothing before the first one can be part of
-	// it: a JSON object's first byte must be '{' (a leading BOM or whitespace is not
-	// this protocol's problem, and whitespace is handled by the scan below). Scanning
-	// for those two bytes is what the line-delimited reality of a pipe channel needs.
-	start := strings.IndexAny(raw, "{[")
-	if start < 0 {
-		return "", false
-	}
-	trimmed := raw[start:]
-	dec := json.NewDecoder(strings.NewReader(trimmed))
-	var value json.RawMessage
-	if err := dec.Decode(&value); err != nil {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '{' && raw[i] != '[' {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(raw[i:]))
+		var value json.RawMessage
+		err := dec.Decode(&value)
+		if err == nil {
+			return strings.TrimSpace(string(value)), true
+		}
+		// THE ONE FAILURE THAT MEANS "WAIT" RATHER THAN "WRONG PLACE". The input
+		// ending inside a value is a frame still arriving; anything else is a
+		// candidate that was never a frame, so the scan moves on.
+		//
+		// Stopping here is also what bounds the cost. A partial 30 KB frame holds
+		// hundreds of '{', and the poll loop would rescan the whole buffer for each
+		// of them, every 25 ms, for the whole budget.
 		if errors.Is(err, io.ErrUnexpectedEOF) || isSyntaxEOF(err) {
 			return "", false
 		}
-		return "", false
 	}
-	return strings.TrimSpace(string(value)), true
+	return "", false
 }
 
 // isSyntaxEOF reports whether a JSON decode failed only because the input ended.
