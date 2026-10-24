@@ -117,8 +117,8 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 	// A generated reply is capped by the same window as a byte stream: a listing is
 	// exactly as capable of flooding a context as a log is, and the directives with
 	// no stream to continue are the ones with no other protection.
-	body, code, cut := capGeneratedCounted(body, win)
-	noteTruncated(headers, cut, win)
+	body, code, cut, total := capGeneratedCounted(body, win)
+	noteTruncated(headers, code, cut, total, win)
 	return envelope.Slot{Code: code, Headers: headers, Body: body}
 }
 
@@ -161,9 +161,9 @@ func (s *Server) directiveInfo(ctx context.Context, stmt directive.Statement, wi
 		writeKV(&b, "shell", fmt.Sprintf("%s %s %s %s",
 			handleOf(info.ID, sh.Index), sh.Status, dash(string(sh.Mode)), dash(sh.Name)))
 	}
-	body, code, cut := capGeneratedCounted(b.String(), win)
+	body, code, cut, total := capGeneratedCounted(b.String(), win)
 	headers := map[string]string{"Path": stmt.Path}
-	noteTruncated(headers, cut, win)
+	noteTruncated(headers, code, cut, total, win)
 	return envelope.Slot{Code: code, Headers: headers, Body: body}
 }
 
@@ -197,9 +197,9 @@ func (s *Server) channelSlot(stmt directive.Statement, win termArgs, cs *session
 	}
 	writeKV(&b, "bytes", fmt.Sprint(cs.BufferLen()))
 	writeKV(&b, "created", ageOf(info.CreatedAt))
-	body, code, cut := capGeneratedCounted(b.String(), win)
+	body, code, cut, total := capGeneratedCounted(b.String(), win)
 	headers := map[string]string{"Path": stmt.Path}
-	noteTruncated(headers, cut, win)
+	noteTruncated(headers, code, cut, total, win)
 	return envelope.Slot{Code: code, Headers: headers, Body: body}
 }
 
@@ -1113,9 +1113,9 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 			// reads once it has decided to produce the thing.
 			body += "\n" + op.Detail + "\n"
 		}
-		capped, code, cut := capGeneratedCounted(body, win)
+		capped, code, cut, total := capGeneratedCounted(body, win)
 		headers := map[string]string{"Path": stmt.Path}
-		noteTruncated(headers, cut, win)
+		noteTruncated(headers, code, cut, total, win)
 		return envelope.Slot{Code: code, Headers: headers, Body: capped}
 	}
 	var b strings.Builder
@@ -1123,9 +1123,9 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 		b.WriteString(op.Usage)
 		b.WriteByte('\n')
 	}
-	capped, code, cut := capGeneratedCounted(b.String(), win)
+	capped, code, cut, total := capGeneratedCounted(b.String(), win)
 	headers := map[string]string{"Path": stmt.Path}
-	noteTruncated(headers, cut, win)
+	noteTruncated(headers, code, cut, total, win)
 	return envelope.Slot{Code: code, Headers: headers, Body: capped}
 }
 
@@ -1229,9 +1229,9 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 			b.WriteString("  " + line + "\n")
 		}
 	}
-	body, code, cut := capGeneratedCounted(b.String(), win)
+	body, code, cut, total := capGeneratedCounted(b.String(), win)
 	headers := map[string]string{}
-	noteTruncated(headers, cut, win)
+	noteTruncated(headers, code, cut, total, win)
 	return termReply{win: win, slots: []envelope.Slot{{Code: code, Headers: headers, Body: body}}}
 }
 
@@ -1498,15 +1498,22 @@ func (s *Server) addressOf(sessionID, shellID string) string {
 // generatedSlot renders a generated body through the caller's window: the same
 // three axes that bound a stream bound a listing or a document.
 func generatedSlot(stmt directive.Statement, win termArgs, body string) envelope.Slot {
-	capped, code, cut := capGeneratedCounted(body, win)
+	capped, code, cut, total := capGeneratedCounted(body, win)
 	headers := map[string]string{"Path": stmt.Path}
-	noteTruncated(headers, cut, win)
+	noteTruncated(headers, code, cut, total, win)
 	return envelope.Slot{Code: code, Headers: headers, Body: capped}
 }
 
-// noteTruncated adds the header a cut generated reply carries, and nothing when
-// nothing was cut: a header that is always present is a header nobody reads.
-func noteTruncated(headers map[string]string, cut int, win termArgs) {
+func noteTruncated(headers map[string]string, code, cut, total int, win termArgs) {
+	if code != 200 && total > 0 {
+		// The same Content-Range a streamed read uses, saying only how long the reply
+		// would have been. A generated reply has no cursor, so `bytes */N` is the whole
+		// of what it can say — but that N is what lets a caller price the page instead
+		// of discovering the size by paying it. The documented cheap form
+		// (`bytes_limit: 0`) used to answer with an empty 204 carrying no size at all,
+		// while the same call on a channel answered `bytes */2593`.
+		headers["Content-Range"] = envelope.UnsatisfiedRange(int64(total))
+	}
 	if cut <= 0 {
 		return
 	}
@@ -1515,7 +1522,7 @@ func noteTruncated(headers map[string]string, cut int, win termArgs) {
 }
 
 func capGenerated(body string, win termArgs) (string, int) {
-	capped, code, _ := capGeneratedCounted(body, win)
+	capped, code, _, _ := capGeneratedCounted(body, win)
 	return capped, code
 }
 
@@ -1532,14 +1539,17 @@ func capGenerated(body string, win termArgs) (string, int) {
 // body, and reporting a count there would suggest a partial answer that does not exist.
 // foldOrTruncate already appends its own notice to a truncated body; this number is for
 // the reply's headers, which is where a caller looks before reading the body at all.
-func capGeneratedCounted(body string, win termArgs) (string, int, int) {
+func capGeneratedCounted(body string, win termArgs) (capped string, code, cut, total int) {
+	total = len(body)
 	if win.BytesLimit == 0 {
 		// The schema's zero-byte window: streamed replies hand back a handle and
 		// consume nothing; a generated reply has no stream, so it is simply empty.
-		return "", 204, 0
+		// The total still travels, because "how big is this page" is the one fact a
+		// caller needs before deciding to spend a window on it.
+		return "", 204, 0, total
 	}
-	code := 200
-	cut := 0
+	code = 200
+	cut = 0
 	if win.BytesLimit > 0 && len(body) > win.BytesLimit {
 		before := len(body)
 		body = foldOrTruncate(body, win.BytesLimit, win.OnBytesOverflow)
@@ -1558,7 +1568,7 @@ func capGeneratedCounted(body string, win termArgs) (string, int, int) {
 			}
 		}
 	}
-	return body, code, cut
+	return body, code, cut, total
 }
 
 // setFlagString copies a string flag into a handler argument.
