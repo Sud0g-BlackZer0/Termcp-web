@@ -498,8 +498,8 @@ var ops = []Op{
 			"default-shell", "default-mode", "default-approval",
 			"jump-host", "jump-user", "jump-port", "jump-password", "jump-private-key", "jump-key-passphrase",
 			"kind", "target", "command", "args", "url", "headers", "allow", "paths", "notes", "enabled",
-			"forwards"},
-		Valueless: []string{"trust-unknown-host", "default-approval", "enabled"},
+			"forwards", "restart"},
+		Valueless: []string{"trust-unknown-host", "default-approval", "enabled", "restart"},
 		RestValue: []string{"args"},
 		Usage:     "edit host|ext|alias <name> [flags]",
 		Detail:    editDetail},
@@ -1051,7 +1051,23 @@ A HOST ENTRY IS REMOVED WITH rm, NOT edit: rm host prod. Configuration and live 
 share the erase verb because they are the same intent on different halves of the tree —
 delete exists only for the composite form, rm host|ext|alias.
 
-Same gate as create: without --mcp-manage-ssh-configs a host write is refused 403.`
+Same gate as create: without --mcp-manage-ssh-configs a host write is refused 403.
+
+--restart REBUILDS AN EXTENSION'S SESSION, and it is the only thing here that is not
+a configuration change. An edit rebuilds too, but only when it changes the TEMPLATE:
+the reconciler compares a fingerprint, so a session template that reads the same
+builds the same thing and nothing happens. The case that leaves is the one where the
+file is the same and its contents are not — a git pull in a clone, a redeploy — and
+then the process is still running the script it started with:
+
+  edit ext myserver --restart
+
+The reconciler calls this action retry, and retry is accepted too; restart is the
+word a caller reaches for after an update, which is why it is the documented one.
+
+It changes nothing else, so it is refused in combination with any of the flags above
+rather than half-performed: "edit the description" and "rebuild the process" are two
+operations, and a call that asks for both gets neither.`
 
 const deleteDetail = `Remove saved configuration.
 

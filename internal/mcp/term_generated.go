@@ -1013,7 +1013,7 @@ func extensionCapability(action string) (string, bool) {
 		return capability.ExtUpdate, true
 	case "delete":
 		return capability.ExtDelete, true
-	case "retry":
+	case "retry", "restart":
 		return capability.ExtRetry, true
 	}
 	return "", false

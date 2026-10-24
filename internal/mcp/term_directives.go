@@ -473,6 +473,22 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 			if act == "edit" {
 				act = "update"
 			}
+			// --restart REBUILDS THE SESSION, and it is the one thing on this node that is
+			// not a configuration change. An edit already rebuilds when it changes the
+			// session template — the reconciler compares a fingerprint — but not when the
+			// template reads the same and only the FILE it names has changed, which is
+			// exactly a git pull. Then the process is still running the old script, and the
+			// DSL is the only entrance an agent gets, so without this it had no way to say
+			// "rebuild it": the reconciler's action was reachable from the MCP tool and the
+			// admin API, but not from the language the agent actually speaks.
+			if boolFlag(stmt, "restart") {
+				if other := firstFlagOtherThan(stmt, "restart"); other != "" {
+					return []envelope.Slot{badRequest(stmt,
+						"--restart rebuilds the session and changes no configuration, so it cannot be combined with --"+
+							other+"; send the edit and the rebuild as two calls")}
+				}
+				act = "retry"
+			}
 			return []envelope.Slot{s.directiveExtension(ctx, withFlags(stmt, map[string]string{
 				"action": act, "name": stmt.Key,
 			}), win)}
@@ -504,6 +520,27 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 // The copy is shallow except for the flag map: a statement is shared between the
 // statements of one cmd, and mutating the caller's map would make `a; b` where a is
 // translated leak its flags into b.
+// firstFlagOtherThan names a flag the caller set besides the one given.
+//
+// It exists so a call that asks for two things can be refused BY NAME. The
+// alternative - doing one of them and reporting success - is the failure mode this
+// codebase has been bitten by more than once: the caller believes it did both, and
+// the half that was dropped is the one it cannot see.
+func firstFlagOtherThan(stmt directive.Statement, except string) string {
+	names := make([]string, 0, len(stmt.Flags))
+	for name := range stmt.Flags {
+		if name != except {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	// Map order is random and the message is read by a person: sort it.
+	sort.Strings(names)
+	return names[0]
+}
+
 func withFlags(stmt directive.Statement, set map[string]string) directive.Statement {
 	flags := make(map[string]*string, len(stmt.Flags)+len(set))
 	for k, v := range stmt.Flags {
