@@ -145,7 +145,14 @@ func (s *Server) directiveOpen(ctx context.Context, stmt directive.Statement, wi
 // Generous enough for a profile that draws a prompt (a themed PowerShell on a cold
 // machine is the slow case observed), short enough that a caller notices nothing when the
 // shell is silent.
-const shellReadyBudget = 3 * time.Second
+//
+// A VAR RATHER THAN A CONST, because the tests shorten it. The wait's result is one the
+// caller ignores — `open` hands over the handle whether or not the shell spoke, and a
+// shell too slow to answer inside the budget is still the caller's shell — so no test
+// needs the real three seconds to prove anything. It was paying them once per open that
+// never speaks, which came to 87s of this package's 240s runtime. The default is what
+// ships; only the suite changes it.
+var shellReadyBudget = 3 * time.Second
 
 // awaitShellReady waits until the channel has produced its first byte, or the budget runs
 // out. It returns whether the shell spoke, which the caller currently ignores: the handle
