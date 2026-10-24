@@ -48,7 +48,12 @@ func TestStatusAsksAboutOneNameNotTheWholeDirectory(t *testing.T) {
 	// the name already known, Status must not call List. A directory that cannot be
 	// READ still answers about the files in it, which is only possible if the lookup
 	// stats the one path instead of enumerating.
-	if err := os.Chmod(store.root(), 0o000); err != nil {
+	// 0o100, NOT 0o000: listing needs READ on the directory, and stat'ing one path
+	// inside it needs SEARCH (execute). Removing both proves nothing about whether the
+	// lookup enumerates — every implementation fails, and the check below reports that
+	// as "Exists is enumerating". Found by CI on Linux, which is the only place the
+	// permission bits are obeyed.
+	if err := os.Chmod(store.root(), 0o100); err != nil {
 		t.Skipf("cannot make the directory unreadable on this platform: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(store.root(), 0o755) })

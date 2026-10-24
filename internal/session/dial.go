@@ -53,32 +53,36 @@ func remoteDialAddr(r *RemoteSSH) string {
 	return net.JoinHostPort(strings.TrimSpace(r.Host), strconv.Itoa(port))
 }
 
-// The dial timeout's range, and they live here because this is where the clamp is.
+// The dial timeout's numbers, and they live here because this is where they are used.
 //
-// MinDialTimeoutSeconds is 1, NOT 30: 30 is the DEFAULT, and the two were confused once —
-// a comment here read "clamps DialTimeoutSeconds to [30, 120]", which described a floor the
-// code did not have (`toSec <= 0 { toSec = 30 }` is a default, and `5` was honoured as 5).
-// Reading that comment as the domain turned a fast-fail setting into a refusal, which is a
-// worse failure than the silent clamp it was meant to fix: a caller that wants a 5 second
-// dial so a script fails fast could no longer say so at all.
+// 30 IS THE DEFAULT, NOT A FLOOR, and the two were confused once — a comment here read
+// "clamps DialTimeoutSeconds to [30, 120]", which described a floor the code did not have
+// (`toSec <= 0 { toSec = 30 }` is a default, and `5` was honoured as 5). Reading that
+// comment as the domain turned a fast-fail setting into a refusal, which is a worse failure
+// than the silent clamp it was meant to fix: a caller that wants a 5 second dial so a script
+// fails fast could no longer say so at all.
+//
+// RecommendedDialTimeoutSeconds is the same kind of number the window arguments publish: a
+// size to stay under, not a wall. A longer dial is honoured — a slow link or a bastion chain
+// is a real reason to want one, and this server cannot see the link the caller is on.
 const (
-	MinDialTimeoutSeconds     = 1
-	MaxDialTimeoutSeconds     = 120
-	DefaultDialTimeoutSeconds = 30
+	MinDialTimeoutSeconds         = 1
+	RecommendedDialTimeoutSeconds = 120
+	DefaultDialTimeoutSeconds     = 30
 )
 
-// ClampDialTimeoutSeconds brings a dial timeout into the range the dialler honours.
+// ClampDialTimeoutSeconds resolves a dial timeout: an unset (or negative) value becomes the
+// default, and everything else is the caller's number.
 //
-// It is exported because the config validator asks it instead of restating the bounds:
-// a second copy of a range drifts, and the copy that drifts is the one not enforcing
-// anything. Two things are clamped — an unset value becomes the default, and a value
-// written before the check existed is capped — and nothing else is touched.
+// It is exported because the config validator asks it instead of restating the rule: a
+// second copy drifts, and the copy that drifts is the one not enforcing anything. There is
+// deliberately NO upper clamp — a value above RecommendedDialTimeoutSeconds is a request
+// this server has no basis to overrule, and capping it silently is the failure mode this
+// whole area was fixed for (a profile that said 600 was stored as 600, echoed as 600 and
+// dialled at 120).
 func ClampDialTimeoutSeconds(seconds int) int {
-	switch {
-	case seconds <= 0:
+	if seconds <= 0 {
 		return DefaultDialTimeoutSeconds
-	case seconds > MaxDialTimeoutSeconds:
-		return MaxDialTimeoutSeconds
 	}
 	return seconds
 }

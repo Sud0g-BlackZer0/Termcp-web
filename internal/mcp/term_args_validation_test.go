@@ -57,12 +57,14 @@ func TestWindowArgumentTypesAreRefused(t *testing.T) {
 
 // Out-of-range numbers are refused with the bound, not clamped.
 //
-// THE BOUNDS THAT ARE LEFT ARE THE ONES THAT BREAK SOMETHING. A timeout above the cap
-// loses the reply to the transport in front of the caller, and a window narrower than one
-// character can never return one — those are refused. The space recommendations
-// (bytes_limit above 32 KiB, a longer tail, a bigger reply budget) are NOT refused: the
-// caller pays for what lands in its own context, so the reply is its call to make, and the
-// numbers are published as sizes to stay under (TestTheSchemaSaysWhichWindowSizesAreRecommended).
+// ONLY TWO KINDS OF BOUND ARE LEFT, and both are about the call working at all rather than
+// about how much it costs: a negative number is a typo (there is no "-1 seconds"), and a
+// window narrower than one character can never return one, so it withholds the same bytes
+// on every call and advances nothing. Every CEILING was removed on purpose — time and space
+// are what the caller pays for, and this server has no basis to overrule the only party that
+// can judge the trade. Those numbers are published as sizes to stay under
+// (TestTheSchemaSaysWhichWindowSizesAreRecommended) and honoured above them
+// (TestALargeWindowIsHonouredNotRefused).
 func TestWindowArgumentBoundsAreRefused(t *testing.T) {
 	s := newTestServer(t)
 	cases := []struct {
@@ -70,7 +72,6 @@ func TestWindowArgumentBoundsAreRefused(t *testing.T) {
 		want string
 	}{
 		{map[string]any{"timeout": -1}, "timeout must be >= 0"},
-		{map[string]any{"timeout": 99999}, "timeout must be <= 60"},
 		{map[string]any{"bytes_limit": -5}, "bytes_limit must be >= 0"},
 		{map[string]any{"lines_limit": -5}, "lines_limit must be >= 0"},
 		{map[string]any{"total_bytes_limit": 0}, "total_bytes_limit must be >= 1"},
@@ -87,6 +88,22 @@ func TestWindowArgumentBoundsAreRefused(t *testing.T) {
 		if !strings.Contains(got, "400") || !strings.Contains(got, tc.want) {
 			t.Errorf("%v must be refused with %q:\n%s", tc.args, tc.want, got)
 		}
+	}
+}
+
+// TestALargeWindowIsHonouredNotRefused is the other half of the rule, for time.
+//
+// A wait above the recommendation used to be a 400. The reasoning was sound as far as it
+// went — the transport in front of the caller gives up sooner, so a longer window loses the
+// reply — but it is the CALLER that loses the reply, and it is the only party that knows
+// which client it is talking through. Refusing made its vocabulary depend on a timeout
+// somewhere it cannot see. The number is a recommendation now, and the reply reports how
+// long it actually waited.
+func TestALargeWindowIsHonouredNotRefused(t *testing.T) {
+	s := newTestServer(t)
+	got := s.Term(context.Background(), "ls", map[string]any{"cmd": "ls", "timeout": 99999}).Text()
+	if strings.Contains(got, "400") || strings.Contains(got, "timeout must be") {
+		t.Fatalf("a long wait is the caller's own risk to take:\n%s", got)
 	}
 }
 
@@ -168,11 +185,11 @@ func TestSchemaPublishesTheDeclaredBounds(t *testing.T) {
 				t.Errorf("%s: schema minimum = %v, declaration says %v", name, prop["minimum"], v)
 			}
 		}
-		if v, want := boundValue(d.Max); want {
-			got, _ := prop["maximum"].(float64)
-			if got != v {
-				t.Errorf("%s: schema maximum = %v, declaration says %v", name, prop["maximum"], v)
-			}
+		// NO MAXIMUM, AND THE SCHEMA MUST NOT INVENT ONE. Every upper bound in this table
+		// was removed on purpose: the caller pays for the time and the context, and a
+		// published ceiling would make a client refuse a value this server honours.
+		if raw, present := prop["maximum"]; present {
+			t.Errorf("%s: the schema publishes a maximum (%v) that no longer exists", name, raw)
 		}
 	}
 }

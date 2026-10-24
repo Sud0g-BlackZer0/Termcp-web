@@ -591,7 +591,9 @@ func parseReadParams(args map[string]any) (readParams, *mcpgo.CallToolResult) {
 		Stream:    getString(args, "stream", ""),
 	}
 	if p.Timeout < 0 || p.Timeout > 60 {
-		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("timeout must be between 0 and 60, got %v", p.Timeout))
+		// NO UPPER BOUND: this is the same number the `timeout` argument documents as a
+		// recommendation. Refusing it here would make the tool's own schema a lie.
+		return readParams{}, toolError(CodeInvalidArgument, "%s", fmt.Sprintf("timeout must not be negative, got %v", p.Timeout))
 	}
 	if err := transcript.ValidateParams(p); err != nil {
 		return readParams{}, toolResultForErr(err)

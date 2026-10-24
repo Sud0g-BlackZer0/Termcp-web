@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -25,7 +27,24 @@ func gbkSession(t *testing.T, s *Server) string {
 		// brackets of a PowerShell expression are not words otherwise.
 		return openPipe(t, s, `pwsh -NoLogo -NoProfile -Command '[Console]::OpenStandardOutput().Write([byte[]](0xD2,0xD4,0xCF,0xC2,0x0A),0,5)'`)
 	}
-	return openPipe(t, s, "sh -c 'printf \322\324\317\302'")
+	// THE BYTES COME FROM A FILE, because the directive line is TEXT and the parser
+	// refuses a cmd that is not valid UTF-8 — which is the right rule for a command
+	// language and exactly what this test needs to get around: its whole subject is a
+	// session whose OUTPUT is GBK. `printf '\322…'` does not work either: the escaping
+	// rules of the DSL and of sh's printf would have to agree about backslashes, and that
+	// agreement is what this cycle changed. A file has no escaping in it at all.
+	script := writeScript(t, "cat "+gbkFixture(t))
+	return openPipe(t, s, "sh "+script)
+}
+
+// gbkFixture writes 以下 in GBK (D2 D4 CF C2) plus a newline, and returns the path.
+func gbkFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gbk.txt")
+	if err := os.WriteFile(path, []byte{0xD2, 0xD4, 0xCF, 0xC2, 0x0A}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // waitForGbkOutput polls until the channel's window decodes, without consuming it.

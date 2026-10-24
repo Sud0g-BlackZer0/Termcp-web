@@ -191,12 +191,17 @@ func validateDialSpec(d *DialSpec, label string) error {
 	// to bound a dial. The dialler owns the range (session.ClampDialTimeoutSeconds) and this
 	// asks it rather than restating the numbers — two copies of a bound drift apart, and the
 	// copy that drifts is always the one that is not enforcing anything.
-	if d.DialTimeoutSeconds < 0 ||
-		(d.DialTimeoutSeconds != 0 && session.ClampDialTimeoutSeconds(d.DialTimeoutSeconds) != d.DialTimeoutSeconds) {
-		return fmt.Errorf("%s dial_timeout_seconds must be 0 (the default, %ds) or between %d and %d, got %d: "+
-			"the dialler would replace it, so the value would be stored and then not used: %w",
-			label, session.DefaultDialTimeoutSeconds, session.MinDialTimeoutSeconds,
-			session.MaxDialTimeoutSeconds, d.DialTimeoutSeconds, ErrInvalid)
+	// NEGATIVE IS REFUSED; EVERYTHING ELSE IS THE CALLER'S NUMBER.
+	//
+	// A dial timeout above the recommendation is a request this server has no basis to
+	// overrule — a slow link or a long bastion chain is a real reason to want one — so it
+	// is stored and honoured. Below zero is a typo, not a wish, and it is the one value
+	// the dialler has to replace to have anything to do at all.
+	if d.DialTimeoutSeconds < 0 {
+		return fmt.Errorf("%s dial_timeout_seconds must not be negative, got %d "+
+			"(0 means the default, %ds; %ds is the value to stay under): %w",
+			label, d.DialTimeoutSeconds, session.DefaultDialTimeoutSeconds,
+			session.RecommendedDialTimeoutSeconds, ErrInvalid)
 	}
 	return nil
 }

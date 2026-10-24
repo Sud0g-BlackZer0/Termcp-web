@@ -41,29 +41,31 @@ const (
 	defaultLinesLimit      = 200
 	defaultTotalBytesLimit = 32768
 
-	// THE WINDOW BOUNDS TWO THINGS, AND ONLY ONE OF THEM IS A WALL.
+	// THE WINDOW IS TWO COSTS THE CALLER PAYS, AND NEITHER IS A WALL.
 	//
 	// It bounds how long one call may wait and how much one call may bring into the
 	// caller's context, because both are costs paid by the model on the other side.
 	// Waiting long holds a turn open; reading a lot fills a context.
 	//
-	//	TIME IS REFUSED ABOVE ITS CAP, because the wall is real and not ours: the
-	//	transport in front of the caller gives up first (30s for the SSE bridge, 15s for
-	//	a peer call, and the reporting client's own MCP plugin is under a minute), so a
-	//	longer window LOSES THE REPLY. maxWaitSeconds sits below all of them, and a
-	//	number above it is refused because honouring it would fail anyway — silently,
-	//	with the caller holding a timeout instead of an answer.
+	//	NEITHER HAS A HARD CAP, and the reason is the same for both: the caller is the
+	//	party paying, it is the only party that knows the job, and this server has no
+	//	basis to overrule the one decision it cannot see the whole of. So these three
+	//	numbers are SIZES TO STAY UNDER, published as such in the argument schema, and a
+	//	larger value is honoured. The reply then says what happened — `Waited` and
+	//	`Still-Running` for time, `Truncated` for a generated reply, `Content-Range` for
+	//	a windowed one — so a value that ran into someone else's ceiling is visible as a
+	//	fact rather than as a refusal.
 	//
-	//	SPACE IS ADVISED, NOT REFUSED, because there is no such wall. windowBytesMax
-	//	(32 KiB, about eight thousand tokens) is the size one reply should stay under;
-	//	past it a reply stops being something a caller reads and becomes something it
-	//	works through. But the caller is the one paying for that context, and it is the
-	//	only party that can judge the trade — so a larger window is honoured and the
-	//	reply says it was large. Refusing would be this server overruling the one
-	//	decision it has no basis to make.
+	//	There IS a real ceiling on time and it is not this server's: the MCP transport in
+	//	front of the caller may give up sooner (30s on the SSE bridge, 15s on a peer
+	//	call), and past that the reply is lost while the command runs on. Refusing above
+	//	a number this server picked made the caller's vocabulary depend on a timeout
+	//	somewhere it cannot see; the headers let it discover the real ceiling itself.
 	//
-	//	windowLinesMax is the same kind of number for a log tail (2000 lines), already
-	//	past what one call should carry and bounded by the byte window anyway.
+	//	windowBytesMax is about eight thousand tokens: past it a reply stops being
+	//	something a caller reads and becomes something it works through. windowLinesMax
+	//	is the same kind of number for a log tail, already past what one call should
+	//	carry and bounded by the byte window anyway.
 	maxWaitSeconds = 60
 	windowBytesMax = 32768
 	windowLinesMax = 2000

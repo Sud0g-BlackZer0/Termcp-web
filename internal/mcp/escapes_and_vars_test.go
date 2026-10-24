@@ -85,7 +85,7 @@ func TestRawControlBytesAreRefusedOnlyInAShellLine(t *testing.T) {
 // TestAKeystrokeIsADirectiveNotAByte pins the replacement for `allow_escapes`.
 //
 // The switch existed so a caller could send Ctrl-C. It should never have been a
-// byte in a command line: `key <channel> ctrl-c` says what it means, and the
+// byte in a command line: `key <channel> ctrl+c` says what it means, and the
 // terminal gets the byte without any line having to carry it.
 func TestAKeystrokeIsADirectiveNotAByte(t *testing.T) {
 	s := newTestServer(t)
@@ -96,7 +96,10 @@ func TestAKeystrokeIsADirectiveNotAByte(t *testing.T) {
 	termText(t, s, map[string]any{"cmd": "run " + h + " echo READY", "timeout": 2})
 	waitForGrepContent(t, s, h, "READY")
 
-	got := termText(t, s, map[string]any{"cmd": "key " + h + " ctrl-c"})
+	// `ctrl+c`, the spelling the directive publishes. The test used `ctrl-c`, which the
+	// key table does not answer, so on every platform that runs the assertion below it was
+	// checking a 400 for an unknown key and reporting "the gate refused the byte".
+	got := termText(t, s, map[string]any{"cmd": "key " + h + " ctrl+c"})
 	if strings.Contains(got, "raw_control_byte") {
 		t.Fatalf("the key directive must not be refused by the gate:\n%s", got)
 	}

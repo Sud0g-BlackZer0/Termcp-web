@@ -1757,7 +1757,7 @@ Response 200:
 
 <!-- BEGIN termdoc: args -->
 | `cmd` | Empty or omitted returns the guide (where am I, what can I do, what is here) — never an error. A `cmd` that is present but not a string is a 400: a command that was sent and did not survive the transport is not the same request as one never sent |
-| `timeout` | Seconds to look (default 2, max 60; a pipe returns as soon as its process exits). An upper bound on waiting, not a completion wait |
+| `timeout` | Seconds to look (default 2; a pipe returns as soon as its process exits). 60 is the wait to stay under, not a wall: a longer window is allowed, and the reply says how long it waited. An upper bound on waiting, not a completion wait |
 | `bytes_limit` | Bytes per slot (default 8192; `0` = the channel only, no bytes, otherwise at least 4 — a window narrower than one character cannot return one). 32768 is the size to stay under, not a wall: you are paying for the context, so a larger window is allowed and said so in the reply |
 | `lines_limit` | Lines per slot (default 200; `0` = no line limit). 2000 is the size to stay under, not a wall: a longer tail is allowed, and said so in the reply |
 | `total_bytes_limit` | Cap for the whole reply (default 32768). 32768 is the size to stay under, not a wall — this is YOUR budget for one reply, so set it as high as you are willing to read |

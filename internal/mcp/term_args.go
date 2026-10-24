@@ -74,18 +74,20 @@ type termArgDecl struct {
 	// Enum lists the accepted values for argEnum.
 	Enum []string
 
-	// Min and Max are the accepted range for an argNumber. A nil bound means
-	// "unbounded on that side".
+	// Min is the lowest value an argNumber accepts. There is no Max: every upper bound
+	// this table used to carry was removed on purpose, because each one was a size or a
+	// duration the CALLER pays for, and refusing it made this server overrule the only
+	// party that can judge the trade. The numbers that used to be ceilings are published
+	// as recommendations in Desc/DocNote instead.
 	//
-	// They are declared HERE, next to the default, because the three readers must
-	// not be able to disagree: the schema publishes them (so a client can refuse a
-	// bad value before the call), parseTermArgs enforces them (so the REST entrance,
-	// which never reaches mcp-go's schema validator, refuses exactly the same
-	// values), and docs/api.md renders them. Before this, the schema carried only a
-	// `default`, the parser carried an if-chain of ranges, and the doc carried prose
-	// — three copies of one rule.
+	// It is declared HERE, next to the default, because the three readers must not be
+	// able to disagree: the schema publishes it (so a client can refuse a bad value
+	// before the call), parseTermArgs enforces it (so the REST entrance, which never
+	// reaches mcp-go's schema validator, refuses exactly the same values), and
+	// docs/api.md renders it. Before this, the schema carried only a `default`, the
+	// parser carried an if-chain of ranges, and the doc carried prose — three copies of
+	// one rule.
 	Min any
-	Max any
 
 	// BoundNote is what a caller is told when it lands outside Min/Max, after the
 	// range itself.
@@ -114,14 +116,21 @@ var termArgDecls = []termArgDecl{
 	{
 		Name:    "timeout",
 		Kind:    argNumber,
-		Desc:    fmt.Sprintf("Seconds to wait for output (0 = don't wait); an upper bound, not a completion wait. Max %d. Default %d.", maxWaitSeconds, defaultTimeoutSeconds),
-		DocNote: fmt.Sprintf("Seconds to look (default %d, max %d; a pipe returns as soon as its process exits). An upper bound on waiting, not a completion wait", defaultTimeoutSeconds, maxWaitSeconds),
+		Desc:    fmt.Sprintf("Seconds to wait for output (0 = don't wait); an upper bound, not a completion wait. Default %d; %d is the wait to stay under.", defaultTimeoutSeconds, maxWaitSeconds),
+		DocNote: fmt.Sprintf("Seconds to look (default %d; a pipe returns as soon as its process exits). %d is the wait to stay under, not a wall: a longer window is allowed, and the reply says how long it waited. An upper bound on waiting, not a completion wait", defaultTimeoutSeconds, maxWaitSeconds),
 		Def:     defaultTimeoutSeconds,
 		DefText: strconv.Itoa(defaultTimeoutSeconds),
 		Min:     0,
-		Max:     maxWaitSeconds,
-		BoundNote: fmt.Sprintf("termcp bounds BOTH how long a call may wait and how much it may bring into your context: waiting long is not allowed, and neither is reading a lot. Both cost the caller, and this protocol keeps that cost small on purpose.\n"+
-			"So this is an upper bound on waiting, not a wait for completion: the command keeps running and `read <channel>` takes another look whenever you want one. Max %ds, because the MCP transport in front of you gives up sooner (30s on this server's SSE bridge, 15s on a peer call) and a longer window would lose the reply while the command ran on.\n"+
+		// NO UPPER BOUND ON PURPOSE. It used to be refused above maxWaitSeconds, on the
+		// reasoning that the transport in front of the caller gives up first, so a longer
+		// window loses the reply. That is true of the transport and not of this server's
+		// decision: the caller is the one who will lose the reply, it knows which client it
+		// is talking through, and refusing makes the number it can say depend on a timeout
+		// somewhere else. The reply already reports `Waited` and `Still-Running`, so a wait
+		// that hit someone else's ceiling is visible as a fact rather than as a refusal.
+		BoundNote: fmt.Sprintf("Time and space are both costs the caller pays, and neither has a hard cap here: %d seconds is the wait to stay under, not a wall.\n"+
+			"So this is an upper bound on waiting, not a wait for completion: the command keeps running and `read <channel>` takes another look whenever you want one.\n"+
+			"One real ceiling exists and it is not this server's: the MCP transport in front of you may give up sooner (30s on this server's SSE bridge, 15s on a peer call). Past that the reply is lost while the command runs on, and the reply's own `Waited`/`Still-Running` headers are how you tell what happened.\n"+
 			"Work that outlives a call belongs on something that outlives it: `open <session> --argv <cmd>` (a pipe reports its exit), `write … --local-path` (a transfer answers with a task you poll).", maxWaitSeconds),
 	},
 	{
@@ -458,9 +467,6 @@ func readNumberArg(args map[string]any, name string, dst *float64) *directive.Er
 	}
 	if lo, ok := boundValue(d.Min); ok && v < lo {
 		return &directive.Error{Msg: name + " must be >= " + numText(lo) + ", got " + numText(v) + noteSuffix(d.BoundNote)}
-	}
-	if hi, ok := boundValue(d.Max); ok && v > hi {
-		return &directive.Error{Msg: name + " must be <= " + numText(hi) + ", got " + numText(v) + noteSuffix(d.BoundNote)}
 	}
 	*dst = v
 	return nil

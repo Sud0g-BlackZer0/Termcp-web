@@ -14,14 +14,15 @@ import (
 // therefore not a preference to clamp — clamping it would answer a request nobody made
 // while hiding that the request was refused.
 
-// TestOnlyTheWallThatIsRealIsRefused pins where the line sits.
+// TestNoCeilingIsRefusedOnAnythingTheCallerPaysFor pins where the line sits.
 //
-// Time is refused above its cap because the transport in front of the caller gives up
-// first, so a longer window loses the reply. Space is not: the caller pays for what lands
-// in its context and is the only party that can judge the trade, so a big window is
-// honoured (32 KiB is the size to stay under, published as such). One reply cannot be
-// both — a number refused here and a number accepted there must mean something different.
-func TestOnlyTheWallThatIsRealIsRefused(t *testing.T) {
+// Four numbers describe what one call may spend, and all four are the caller's to choose:
+// how long to wait and how much to read. Each one used to be a 400 above a value this
+// server picked. The caller is the party paying and the only one that knows the job, so
+// each is now a size to stay under, published as such and honoured above it — the reply
+// reports what actually happened (`Waited`, `Still-Running`, `Truncated`, `Content-Range`)
+// instead of a refusal standing in for a decision this server cannot make.
+func TestNoCeilingIsRefusedOnAnythingTheCallerPaysFor(t *testing.T) {
 	s := newTestServer(t)
 	got := s.Term(context.Background(), "ls", map[string]any{
 		"cmd":               "ls",
@@ -31,62 +32,49 @@ func TestOnlyTheWallThatIsRealIsRefused(t *testing.T) {
 		"total_bytes_limit": 99999,
 	}).Text()
 
-	if !strings.Contains(got, "timeout must be <= 60") {
-		t.Errorf("a wait that would lose the reply must be refused:\n%s", got)
-	}
-	for _, name := range []string{"bytes_limit", "lines_limit", "total_bytes_limit"} {
-		if strings.Contains(got, name+" must be") {
+	for _, name := range []string{"timeout", "bytes_limit", "lines_limit", "total_bytes_limit"} {
+		if strings.Contains(got, name+" must be <=") {
 			t.Errorf("%s is a cost the caller chose, and it was refused:\n%s", name, got)
 		}
 	}
 }
 
-// TestAnOutOfDomainWindowTeachesTheDesign pins the other half: the refusal carries the
-// reason, because the caller that sent `timeout: 320` was not asking for a typo to be
-// caught, it was asking to WAIT — and the answer it needs is that this window is not a
-// wait for completion.
-func TestAnOutOfDomainWindowTeachesTheDesign(t *testing.T) {
+// TestALongWaitIsHonouredAndTheDesignIsStillTaught pins both halves of the time rule.
+//
+// `timeout: 320` used to be a 400, and the refusal was written to teach: this window is a
+// bound on waiting, not a wait for completion, and the number 60 came from the transport in
+// front of the caller. The teaching was right and the refusal was not — the caller that
+// wants to wait 320 seconds is the one who will lose the reply, and it is the only party
+// that knows which client it is talking through. So the number is honoured, and the same
+// explanation now lives where the choice is made: in the argument's own description, which
+// is what a caller reads before sending anything.
+func TestALongWaitIsHonouredAndTheDesignIsStillTaught(t *testing.T) {
 	s := newTestServer(t)
 	got := s.Term(context.Background(), "ls", map[string]any{"cmd": "ls", "timeout": 320}).Text()
-
-	// The bound itself.
-	if !strings.Contains(got, "timeout must be <= 60") {
-		t.Fatalf("the bound is not stated:\n%s", got)
+	if strings.Contains(got, "400") || strings.Contains(got, "timeout must be") {
+		t.Fatalf("a long wait is the caller's own risk to take:\n%s", got)
 	}
-	// The design: bounded time AND bounded space, both for the caller's sake.
-	for _, want := range []string{
-		"how long a call may wait",
-		"how much it may bring into your context",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("the refusal must state the design it comes from (%q):\n%s", want, got)
+
+	// The recommendation, and the one ceiling that is real, are published where the
+	// caller reads them.
+	decl, ok := termArgDeclFor("timeout")
+	if !ok {
+		t.Fatal("no declaration for timeout")
+	}
+	for _, want := range []string{"wait to stay under", "transport", "--argv"} {
+		if !strings.Contains(decl.DocNote+decl.BoundNote, want) {
+			t.Errorf("the timeout documentation must say %q:\n%s\n%s", want, decl.DocNote, decl.BoundNote)
 		}
 	}
-	// The reason the number is 60 rather than a rounder larger one.
-	if !strings.Contains(got, "transport") {
-		t.Errorf("the refusal must say why the bound is where it is:\n%s", got)
-	}
-	// And what to do instead of waiting: work that outlives the call.
-	if !strings.Contains(got, "--argv") {
-		t.Errorf("the refusal must name the alternative for long work:\n%s", got)
-	}
 
-	// Space carries the same advice without the refusal: the recommendation lives in the
-	// schema the caller reads before choosing, which is where a hint can do any work.
-	//
-	// BOTH NUMBERS, because the per-slot budget and the whole-reply budget are the caller's
-	// two numbers and one has to cover the other: a 50 KiB slot under the default 32 KiB
-	// total is refused, and that refusal is not a size limit — it says which of the two
-	// numbers to raise.
-	space := s.Term(context.Background(), "ls", map[string]any{
-		"cmd": "ls", "bytes_limit": 50000, "total_bytes_limit": 50000,
-	}).Text()
-	if strings.Contains(space, "400") {
-		t.Errorf("a large byte window is the caller's own budget:\n%s", space)
-	}
-	decl, _ := termArgDeclFor("bytes_limit")
-	if !strings.Contains(decl.BoundNote, "--cursor") {
-		t.Errorf("the recommendation must name the way to read without one huge window:\n%s", decl.BoundNote)
+	// The floors are what is left, and a floor still teaches: a window narrower than one
+	// character can never return one, and the remedy is a cursor rather than a bigger
+	// window.
+	floor := s.Term(context.Background(), "ls", map[string]any{"cmd": "ls", "bytes_limit": 2}).Text()
+	for _, want := range []string{"smaller than one character", "--cursor"} {
+		if !strings.Contains(floor, want) {
+			t.Errorf("the floor refusal must say %q:\n%s", want, floor)
+		}
 	}
 }
 
