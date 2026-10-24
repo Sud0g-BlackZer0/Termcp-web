@@ -833,8 +833,10 @@ resumes exactly where this one stopped.
 
 --at PAGES INSIDE ONE FRAME, which is the other axis. A frame too big to inline is
 answered as a receipt naming its number; --offset starts that frame at a byte and
---bytes sets the page size (4 KB by default). Offsets are bytes, the reply reports
-Offset and Next-Offset, and a slice never ends in the middle of a character.
+--bytes sets the page size (4 KB by default). Offsets are bytes of the frame AS THE
+LOG HOLDS IT — the reply reports Bytes for that size and Decoded-Bytes for the same
+frame as text, then Offset and Next-Offset to continue. A slice never ends in the
+middle of a character or of a \uXXXX escape.
 
   read internal cdp:1 --at 57 --offset 0
   read internal cdp:1 --at 57 --offset 4096 --bytes 512

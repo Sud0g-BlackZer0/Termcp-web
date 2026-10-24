@@ -19,6 +19,7 @@
 - **`edit ext <name> --restart` 重建扩展会话（#181）**。扩展是个进程，而进程手里是它启动时读到的那个脚本——目标机上 `git pull` 换了文件内容，正在跑的扩展一无所知。`edit` 本来就会重建，但只在**会话模板**变了的时候（reconciler 比对指纹），而"路径没变、内容变了"恰好是指纹看不出来的那一种。这个动作 reconciler 叫 `retry`，MCP 工具和 admin API 都够得到，**唯独 agent 唯一能走的 DSL 够不到**——所以 agent 更新完扩展之后，没有任何办法说"重建它"。现在 `edit ext <name> --restart` 就是那个说法，`retry` 也接受。它不改任何配置，所以和别的 flag 同时出现会被**按名字拒绝**，而不是做一半还报成功。
 
 - **`kind=mcp` 不再自带 `npx -y example-mcp-server`**。一个 MCP 扩展就是"一个程序加它的 argv"，没有可猜的惯例——`npx -y <package>` 只是启动方式之一，`python server.py` 是另一种。那个默认值在两个方向上都错：**给了自己程序的创建会继承那串参数**（`--command cat` 实际执行 `cat -y example-mcp-server`，报 `cat: illegal option -- y`——既没说哪个 flag，也没说默认值从哪来），而**什么都不给的创建会得到一个能通过校验、永远跑不起来的模板**，看起来配好了，比报错更坏。现在 `--command`/`--args` 由调用方填满，漏了就在创建时被拒：`mode=pipe requires a command (a pipe channel has no fallback shell)`。预设仍然提供**确实算惯例**的东西：pipe 模式、能力白名单、驱动 stdio 服务器的 notes——程序名不算惯例。
+- **`read --at` 给的是文字，`--raw` 才给字节**。一帧超长时唯一的读法是分页，而分页恰好把对端写下的 `\uXXXX` 原样端出来——Chrome 把中文标题发成 `\u817e\u8baf\u4e91`，于是**大回包比小回包更难读**：小回包走内联，`frameReply` 早就调了 `encoding.UnescapeJSON`；分页那条路没调。现在两条路同一个渲染，`Served: decoded` 说明这一页给的是什么；`--raw` 回到原始字节——它以前在这条路上**被接受却没人读**，调用方要的是对端自己的字节，拿到的却是重新编码，且无从察觉。同一帧的尺寸也统一了：`Bytes` 在两个门上同义（日志里那份的大小，也就是 `--offset` 的坐标系），新加的 `Decoded-Bytes` 给同一帧作为文字的长度——回执报解码后、分页报存储量这种同名两义不再有。窗口末端也不再切在 `\uXXXX` 中间，`Next-Offset` 不会把 `17e` 这种十六进制残渣交给下一页；但它不退过窗口首字节，否则那一页为空、跟着 `Next-Offset` 走的调用方原地死循环。第一版自己写了套解码器，还带「窗口从字符串中间开始就一个都不解」的 bug——十个单测全过，真机一跑就露；`encoding.UnescapeJSON` 本来就在，删掉自己那套之后改动从约一百行降到四十行。
 
 ### 修复
 
