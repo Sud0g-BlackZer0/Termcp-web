@@ -35,7 +35,7 @@ import (
 // A stdio peer is just a line-oriented pipe: `run` writes the frame, `read` gets the
 // reply. That is the whole implementation, and it is why an MCP server needs no
 // registration ceremony — `pipe --argv` starts it, and this types at it.
-func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub string, handle string, rest []string) envelope.Slot {
+func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub string, handle string, rest []string, win termArgs) envelope.Slot {
 	headers := map[string]string{"Path": stmt.Path}
 	switch sub {
 	case "tools", "send", "call":
@@ -67,14 +67,31 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 		if _, fail := s.callTool(ctx, "shell_key", argsOf("shell_id", handle, "key", "enter")); fail != nil {
 			return s.slotFromFailure(ctx, stmt, fail)
 		}
-		// THE HINT NAMES THE VERB THAT EXISTS. `mcp recv` was a directive of its own until
-		// the surface became verbs over a tree; the reply kept telling callers to run it,
-		// so the one instruction this message gives would have answered "unknown
-		// directive". Frames are read with `--frame`, because a plain `read` of a channel
-		// is bytes — which is what a command's output usually is.
-		return envelope.Slot{Code: 202, Headers: headers, Body: "sent; read the reply with `read " + handle + " --frame`"}
+		// `call` WAITS FOR THE REPLY IT CAUSED; `send` DOES NOT.
+		//
+		// A URL peer's `call` already waits (peerChannel sets a deadline for it), while
+		// this stdio branch wrote the frame and returned at once — so the same verb
+		// behaved differently depending on how the peer had been started, and the caller
+		// could not see which it had. Every MCP round trip against a stdio server cost
+		// two calls, and the second one needed the caller to correlate replies by hand:
+		// replies arrive in completion order, so the second recv may answer the second
+		// request (issue #175).
+		//
+		// The correlation is here rather than in the caller's head because the id is
+		// already in the frame this function just wrote. A frame whose id does NOT match
+		// is still returned — it is a notification or another request's reply, and
+		// dropping it would be data loss — but the reply says which one it is, so the
+		// caller is never silently handed an answer to a question it did not ask.
+		if sub == "send" || boolFlag(stmt, "send") {
+			return envelope.Slot{Code: 202, Headers: headers, Body: "sent; read the reply with `read " + handle + " --frame`"}
+		}
+		if id := frameID(frame); id != "" {
+			return s.mcpAwaitReply(ctx, stmt, handle, id, win, headers)
+		}
+		// A notification has no answer to wait for, so waiting would be a lie.
+		return envelope.Slot{Code: 202, Headers: headers, Body: "sent (a notification has no reply); read frames with `read " + handle + " --frame`"}
 	case "recv":
-		return s.mcpRecvFrame(ctx, stmt, handle)
+		return s.mcpRecvFrame(ctx, stmt, handle, win)
 	case "close":
 		// The cursor has to go with the handle: handles are minted monotonically
 		// (jrpcHandleSeq), so a reopened channel never reuses this key and the map
@@ -107,7 +124,7 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 // frame that was returned. Bytes between frames (the newlines a line-delimited
 // peer writes) are skipped by the trim in firstJSONValue, and the offset advances
 // over them too, so a resumed read starts at the next '{'.
-func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, handle string) envelope.Slot {
+func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, handle string, win termArgs) envelope.Slot {
 	from := s.recvCursor(handle)
 	// A whole frame has to fit the window, or a single large reply could never be
 	// delivered: the window is a cap on what one recv will consider, not a
@@ -125,10 +142,20 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 	// The retry loop is here, with a bound, so one recv means one frame rather than
 	// one sample.
 	//
-	// The bound is the same window the directive exists inside: a caller that gets
-	// 204 after it has been told the frame is not coming yet, and the next recv
-	// resumes from the cursor this one left untouched.
-	deadline := time.Now().Add(recvPollBudget)
+	// THE BOUND IS THE CALLER'S WINDOW, not this file's constant.
+	//
+	// It used to be a hardcoded 2s, which made 204 unreadable: "nothing has arrived
+	// yet" and "the peer is slow" were the same answer, and an MCP server over stdio
+	// routinely takes longer than 2s for a tools/call that does real work. The caller
+	// was told "no complete frame yet" while the reply was in flight, so the only way
+	// to get it was to poll — and every poll is a whole assistant turn, which costs
+	// ~1000× what the call does (issue #174).
+	//
+	// The peer-call path right next door already answers to the caller
+	// (peerCallWindow); two waits in one file answering to different clocks was the
+	// bug. A caller that names no window still gets the old 2s, which is the default
+	// for a read and stays the default here.
+	deadline := time.Now().Add(peerCallWindow(win))
 	var doc map[string]any
 	var body string
 	for {
@@ -205,7 +232,7 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 			return *slot
 		}
 		// Answered and written back: read again, so this recv still delivers a frame.
-		return s.mcpRecvFrame(ctx, stmt, handle)
+		return s.mcpRecvFrame(ctx, stmt, handle, win)
 	}
 
 	return envelope.Slot{
@@ -213,6 +240,48 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 		Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.ContentRange(start, end-1, end)},
 		Body:    frame,
 	}
+}
+
+// mcpAwaitReply reads one frame for a `call` that has already been written, and says
+// whether that frame is the answer to it.
+//
+// The read is mcpRecvFrame, unchanged: it polls for the caller's window and advances
+// the same per-handle cursor, so `call` and `read --frame` share one position and a
+// frame is never delivered twice. What this adds is the one fact the caller cannot
+// recover from the bytes alone in the moment it matters — whether this frame answers
+// the id it just sent. Replies arrive in completion order, which is correct JSON-RPC
+// and means the frame that lands first may belong to an earlier request (issue #175).
+func (s *Server) mcpAwaitReply(ctx context.Context, stmt directive.Statement, handle, id string, win termArgs, headers map[string]string) envelope.Slot {
+	slot := s.mcpRecvFrame(ctx, stmt, handle, win)
+	if slot.Code >= 400 || slot.Body == "" {
+		return slot
+	}
+	if got := frameID(slot.Body); got == id {
+		return slot
+	} else if got == "" {
+		slot.Body += "\n\n[this frame has no id: it is a notification or an event, not the answer to id " + id + ". The answer is still on the channel — `read " + handle + " --frame` again.]"
+		return slot
+	} else {
+		slot.Body += "\n\n[this frame answers id " + got + ", not the id " + id + " you just sent: the peer replied in completion order. The answer to " + id + " is still on the channel — `read " + handle + " --frame` again.]"
+		return slot
+	}
+}
+
+// frameID returns the id of a JSON-RPC frame as its own spelling, or "" when the frame
+// carries none (a notification) or cannot be read.
+//
+// The raw text is compared rather than a decoded value on purpose: an id may be a
+// string or a number, and `"1"` and `1` are different spellings of different ids. A
+// comparison that normalised them would report a match for two frames the peer itself
+// considers distinct.
+func frameID(frame string) string {
+	var env struct {
+		ID *json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(frame), &env); err != nil || env.ID == nil {
+		return ""
+	}
+	return strings.TrimSpace(string(*env.ID))
 }
 
 // forwardSubMCPSampling answers an inbound `sampling/createMessage` from a sub-MCP
@@ -298,17 +367,12 @@ func (s *Server) replyToSubMCP(ctx context.Context, stmt directive.Statement, ha
 	return nil
 }
 
-// How long one recv keeps asking, and how often.
+// How often one recv looks again, while it waits.
 //
-// The pair is a compromise between the two callers that exist: an agent reading a
-// stdio MCP server's answer wants `mcp recv` to return the frame, not a 204 it has to
-// loop on, while the same call must still come back promptly when the answer really
-// has not been written. Two seconds is below the 6-9s an assistant turn costs and long enough
-// for a peer that has already been sent the request.
-const (
-	recvPollBudget   = 2 * time.Second
-	recvPollInterval = 25 * time.Millisecond
-)
+// The WAIT is the caller's window (see mcpRecvFrame); this is only the interval, so a
+// frame that arrives mid-window is handed over as soon as it lands rather than at the
+// next whole second.
+const recvPollInterval = 25 * time.Millisecond
 
 // minRecvWindow is the smallest window a recv will read with.
 //
@@ -392,6 +456,10 @@ func notAFrame(body string) string {
 // SO EVERY CANDIDATE IS TRIED, in the order the buffer holds them, and the first one
 // that decodes into a complete value wins. A candidate that is not JSON fails within
 // its first byte or two, which is what keeps the scan cheap.
+//
+// IN BUFFER ORDER, NOT GROUPED BY OPENER. Trying every '{' before any '[' looks
+// equivalent and is not: a batch array `[{...}]` starts with '[', so scanning '{'
+// first would return the object INSIDE the batch as if it were the frame.
 func firstJSONValue(raw string) (string, bool) {
 	for i := 0; i < len(raw); i++ {
 		if raw[i] != '{' && raw[i] != '[' {

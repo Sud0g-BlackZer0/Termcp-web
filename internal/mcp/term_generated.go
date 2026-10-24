@@ -666,6 +666,14 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	} else if slot, bad := stringFlags(args, stmt, [2]string{"mode", "mode"}); bad {
 		return slot
 	}
+	// --encoding IS THE SAME FLAG THE CHANNEL READ USES, and on a file read it names the
+	// interpretation of the file's bytes. It was declared for `read`, accepted on a file
+	// read, and never passed on — so a caller who named an encoding was handed a
+	// rendering of the bytes as if they were UTF-8, with no way to tell (issue #177: a
+	// PowerShell log is UTF-16LE with a BOM by default).
+	if slot, bad := stringFlags(args, stmt, [2]string{"encoding", "charset"}); bad {
+		return slot
+	}
 	if slot, bad := stringFlags(args, stmt,
 		[2]string{"target", "target"},
 		[2]string{"link-path", "link_path"},

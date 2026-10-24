@@ -752,25 +752,29 @@ func TestHandleReadOutput_InvalidTimeout(t *testing.T) {
 	m := parseResult(t, startResult)
 	shellID := m["shell_id"].(string)
 
-	for _, timeout := range []float64{-1, 61, 999} {
+	// ONLY A NEGATIVE TIMEOUT IS A MISTAKE. The window is the caller's bill to pay, so
+	// a large one is a request and not an error: `timeout: 61` and `timeout: 999` used
+	// to be refused by an upper bound the comment beside it already denied, and the
+	// message described the negative case while naming a positive number (issue #168).
+	// This test used to assert that refusal, which is what made the lie look intended.
+	for _, timeout := range []float64{61, 999, 0} {
 		req := makeRequest(map[string]any{
 			"shell_id": shellID,
 			"timeout":  timeout,
 		})
 		result, _ := s.handleReadOutput(context.Background(), req)
-		if !result.IsError {
-			t.Fatalf("expected error for timeout %v", timeout)
+		if result.IsError {
+			t.Fatalf("timeout %v is a window, not an error: %s", timeout, result.Content[0].(mcpgo.TextContent).Text)
 		}
 	}
 
-	// Zero is an explicit non-blocking read and must not require a retry.
-	zeroReq := makeRequest(map[string]any{
+	negReq := makeRequest(map[string]any{
 		"shell_id": shellID,
-		"timeout":  0.0,
+		"timeout":  -1.0,
 	})
-	zeroResult, _ := s.handleReadOutput(context.Background(), zeroReq)
-	if zeroResult.IsError {
-		t.Fatalf("timeout=0 should be accepted: %s", zeroResult.Content[0].(mcpgo.TextContent).Text)
+	negResult, _ := s.handleReadOutput(context.Background(), negReq)
+	if !negResult.IsError {
+		t.Fatal("a negative timeout is a typo, not a wish, and must be refused")
 	}
 }
 

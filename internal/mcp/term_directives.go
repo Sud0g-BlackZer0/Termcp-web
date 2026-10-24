@@ -718,6 +718,24 @@ func (s *Server) runOne(ctx context.Context, stmt directive.Statement, win termA
 		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, s.probeShell(stmt.Target), s))
 	}
 
+	// THE WINDOW IS CHECKED BEFORE ANYTHING IS TYPED, because a 400 must not be a lie.
+	//
+	// The window is validated where it is read — inside shell_output — and that read
+	// happens after this function has typed the line and pressed Enter. So a refusal
+	// about the window arrives after the command has already run (issue #179), and a 4xx
+	// reads as "nothing happened": the caller retries, and the command runs twice. On a
+	// mutating command the retry is the damage.
+	//
+	// The rule that made this reachable was the upper bound on `timeout`, which only
+	// the read validator had (issue #168): every other window number is checked at the
+	// entrance, before dispatch, so the tool could not show the lie. Removing that bound
+	// removes the trigger; this check removes the CLASS, because the next rule added to
+	// the read validator would otherwise arrive after the effect again. The same
+	// validator is called with the same numbers, just earlier — one rule, two callers.
+	if f := s.checkWindow(stmt, win); f != nil {
+		return s.slotFromFailure(ctx, stmt, f)
+	}
+
 	if _, fail := s.callTool(ctx, "shell_input", argsOf("shell_id", stmt.Target, "text", stmt.Payload)); fail != nil {
 		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, fail, s))
 	}
@@ -736,6 +754,24 @@ func (s *Server) runOne(ctx context.Context, stmt directive.Statement, win termA
 	}
 
 	return s.readSlotAfter(ctx, stmt, win, start)
+}
+
+// checkWindow validates the read window a command will be read with, before the
+// command runs.
+//
+// It builds the argument map readSlot would build and hands it to the same parser,
+// so the two cannot drift. `timeout` here is the caller's whole window rather than
+// what is left of it: the remainder is always smaller, so a window that passes here
+// cannot be refused later, and one refused here would have been refused there.
+func (s *Server) checkWindow(stmt directive.Statement, win termArgs) *toolFailure {
+	args := argsOf("shell_id", stmt.Target)
+	args["max_bytes"] = float64(win.BytesLimit)
+	args["max_lines"] = float64(win.LinesLimit)
+	args["timeout"] = win.TimeoutSeconds
+	if _, bad := parseReadParams(args); bad != nil {
+		return failureFromResult(bad)
+	}
+	return nil
 }
 
 // pipeClosedHint turns a bare write failure into something a caller can act on.
@@ -1926,7 +1962,7 @@ func (s *Server) peerChannel(ctx context.Context, stmt directive.Statement, win 
 		found, ok := jrpcChannels[stmt.Target]
 		jrpcChannelsMu.Unlock()
 		if !ok {
-			return []envelope.Slot{s.mcpStdio(ctx, stmt, sub, stmt.Target, []string{frame})}
+			return []envelope.Slot{s.mcpStdio(ctx, stmt, sub, stmt.Target, []string{frame}, win)}
 		}
 		h = found
 	}

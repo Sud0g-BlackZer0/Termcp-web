@@ -25,6 +25,11 @@ func (s *Server) handleFileRead(ctx context.Context, request mcpgo.CallToolReque
 	length := int64(getFloat64(args, "length", 0))
 	mode := getString(args, "mode", "text")
 	localPath := getString(args, "local_path", "")
+	// `--encoding` ON A FILE READ WAS ACCEPTED AND IGNORED, which is worse than refused:
+	// the caller named the interpretation and was handed a different one. A PowerShell
+	// 5.1 log is UTF-16LE with a BOM by default, so this was the ordinary case on
+	// Windows and not an edge one (issue #177).
+	charset := getString(args, "charset", "")
 
 	if remotePath == "" {
 		return toolError(CodeInvalidArgument, "%s", "remote_path required"), nil
@@ -72,7 +77,7 @@ func (s *Server) handleFileRead(ctx context.Context, request mcpgo.CallToolReque
 	}
 
 	defer sftpCli.Close()
-	result, err := sftpCli.ReadFile(remotePath, offset, length, mode, localPath)
+	result, err := sftpCli.ReadFile(remotePath, offset, length, mode, localPath, charset)
 	if err != nil {
 		return fileErr(err), nil
 	}

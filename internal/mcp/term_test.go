@@ -585,7 +585,7 @@ func TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt(t *testing.T) {
 	h := openPipe(t, s, "cat")
 
 	frame := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
-	if out := termText(t, s, map[string]any{"cmd": "call " + h + " " + frame}); !strings.Contains(out, "202") {
+	if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + frame}); !strings.Contains(out, "202") {
 		t.Fatalf("write did not accept the frame:\n%s", out)
 	}
 
@@ -647,7 +647,7 @@ func TestMCPRecvCursorUsesRawByteSpan(t *testing.T) {
 	h := openPipe(t, s, "cat")
 
 	frame := `{"jsonrpc":"2.0","id":7,"method":"ping"}`
-	if out := termText(t, s, map[string]any{"cmd": "call " + h + " " + frame}); !strings.Contains(out, "202") {
+	if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + frame}); !strings.Contains(out, "202") {
 		t.Fatalf("mcp send: %s", out)
 	}
 
@@ -695,7 +695,7 @@ func TestMCPRecvDrainsEveryQueuedFrame(t *testing.T) {
 		`{"jsonrpc":"2.0","id":3,"method":"notifications/initialized"}`,
 	}
 	for _, f := range frames {
-		if out := termText(t, s, map[string]any{"cmd": "call " + h + " " + f}); !strings.Contains(out, "202") {
+		if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + f}); !strings.Contains(out, "202") {
 			t.Fatalf("write did not accept %s:\n%s", f, out)
 		}
 	}

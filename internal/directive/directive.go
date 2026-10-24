@@ -755,7 +755,17 @@ decoded before anything else looks at them, so --grep matches characters rather
 than byte sequences and a JSON-RPC frame from an extension that prints GBK is
 readable at all. Content-Range still counts the bytes in the buffer, so paging by
 --cursor keeps working: gbk, gb18030, cp936, big5, shift_jis, euc-kr,
-windows-1252.
+windows-1252, utf-16 (utf-16le / utf-16be).
+
+UTF-16 IS NOT A CORNER CASE ON WINDOWS: PowerShell 5.1 redirects with it (a BOM and
+UTF-16LE) unless told otherwise, so a log produced by the redirection this tool
+recommends comes back as a BOM followed by every ASCII byte and a zero — mode: text,
+and unreadable (issue #177). utf-16 reads the BOM to decide the byte order, which is
+the form to prefer: the caller usually cannot see how the file was written, and the
+file says.
+The read names it for the caller too — a window of UTF-16 bytes that is not valid
+UTF-8 is refused with the charset its BOM confirms, so the flag is needed only to
+say "decode it", exactly as above.
 
 It also decides where a byte window may end: a window that cuts inside a
 character withholds those bytes (they stay unread, the next read delivers them

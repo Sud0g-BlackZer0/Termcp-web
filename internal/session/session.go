@@ -319,15 +319,35 @@ func (s *Session) watchTransport(es *sshclient.ExecSession) {
 	s.watchWG.Add(1)
 	go func() {
 		defer s.watchWG.Done()
+		// THE REASON IS LOGGED WHERE AN OPERATOR LOOKS.
+		//
+		// This line used to be Debug, which is BELOW the daemon's default level (Info),
+		// so on a normal run it was never written — and the one durable record of why a
+		// session disappeared was therefore off. The session itself is then gone from
+		// every surface, and the transcript message says the same sentence whether the
+		// network dropped, the far side closed, or something else ended the transport
+		// (issue #176). Four sessions were lost in one afternoon and ruling out the
+		// causes took four separate experiments; the error that would have answered it
+		// was in this discarded line.
+		//
+		// Warn rather than Info because a transport that ends with an error is not the
+		// session's ordinary exit: the caller may not have asked for it.
+		// THE TRANSCRIPT SAYS WHICH OF THE TWO IT WAS, because the caller reads the
+		// transcript and not the log. One sentence for both events ("SSH connection lost
+		// — network disconnected") claimed a cause nobody had established: the same text
+		// covered a dropped network, a closed far side and a restarted relay (issue
+		// #176). The error decides, and it is also in the log line above.
+		message := transportClosedMessage
 		if err := es.WaitTransport(); err != nil {
-			slog.Debug("session transport closed", "session_id", s.ID, "err", err)
+			slog.Warn("session transport lost", "session_id", s.ID, "err", err)
+			message = transportLostMessage
 		} else {
-			slog.Debug("session transport closed", "session_id", s.ID)
+			slog.Info("session transport closed", "session_id", s.ID)
 		}
 		// A deliberate close (Terminate, Disconnect, Delete) sets closing before it
 		// touches the transport, so markDeadWithMessage drops this notification
 		// instead of reporting an intentional teardown as a network loss.
-		s.markDeadWithMessage(transportLostMessage)
+		s.markDeadWithMessage(message)
 	}()
 }
 
@@ -492,6 +512,13 @@ func (s *Session) Terminate(force bool, gracePeriod time.Duration) {
 // watcher and the session-level transport watcher report the same event, so the
 // text lives here rather than at either call site.
 const transportLostMessage = "❌ SSH connection lost — network disconnected"
+
+// transportClosedMessage is the same event with NO error behind it: the transport
+// ended cleanly, which is what a far side that shut down on purpose looks like. It is
+// a separate sentence because the transcript is the only record the caller has, and
+// "network disconnected" is a diagnosis this code is not in a position to make from a
+// nil error.
+const transportClosedMessage = "❌ the session's transport closed"
 
 // normalizeOnExit maps anything that is not the explicit "close" to the default
 // behaviour. An unknown value must not silently end a user's connection: the
