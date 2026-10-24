@@ -934,6 +934,12 @@ for the stream to go STILL — half a second without a new byte ends the wait �
 falls back to timeout seconds (default 2) only while the command has printed
 nothing at all, where there is nothing else to watch.
 
+The reply says WHICH of the two happened, because the difference is the whole
+question: Completion: quiet means the stream went quiet (the ordinary ending — the
+command may have finished, or may be working without printing), and Still-Running:
+true means the window ran out while bytes were still arriving. Neither one claims
+the command finished, because a pty gives nothing to base that on.
+
 A reply that ends mid-output is not a lost command: the bytes are still in the
 stream. read has its own cursor and does not continue after the sample — it
 repeats what the sample already showed and then follows the stream, which is what

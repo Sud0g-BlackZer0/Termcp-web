@@ -981,12 +981,35 @@ func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, wi
 	// and without it the caller cannot tell a finished command from a window that ended
 	// (issue #161, P1-3).
 	windowExpired := false
+	waitedOnAPty := false
 	if wait := s.completionWait(stmt.Target); wait {
 		s.awaitExit(ctx, stmt.Target, win)
 	} else if s.ptyRunning(stmt.Target) {
+		waitedOnAPty = true
 		windowExpired = s.awaitWindow(ctx, stmt.Target, win, start)
 	}
 	slot := s.readSlot(ctx, stmt, win, args, time.Since(waitStarted))
+	if waitedOnAPty && !windowExpired && slot.Code < 400 {
+		// HOW THE WAIT ENDED IS A FACT, AND IT WAS THE ONE THING NOT SAID.
+		//
+		// A pty has no completion signal, so this wait ends one of two ways: the window
+		// runs out, or the stream goes quiet (ptyQuiet with no new byte). The second is
+		// the ordinary case — it is how a finished command looks — and it said NOTHING,
+		// so a command that merely went silent while it worked was indistinguishable from
+		// one that had finished. Three callers reading the same reply hit it the same way:
+		// "the output looks truncated, and nothing tells me whether it is".
+		//
+		// `Still-Running` is deliberately NOT reused: it means "the window expired while
+		// bytes were still arriving", which is evidence. A quiet stream is not evidence of
+		// anything — the command may have finished, or be sleeping — and a header that
+		// claimed either would be the kind of guess this server refuses to make about a
+		// pty. So it names the evidence instead, and `read` is how the caller finds out
+		// more.
+		if slot.Headers == nil {
+			slot.Headers = map[string]string{}
+		}
+		slot.Headers["Completion"] = "quiet"
+	}
 	if windowExpired && slot.Code < 400 && s.ptyRunning(stmt.Target) && slot.Headers["Still-Running"] == "" {
 		// Same header the pipe path uses, same meaning: the command was accepted and has
 		// not finished. It is set only when the window expired, so it does not become the
