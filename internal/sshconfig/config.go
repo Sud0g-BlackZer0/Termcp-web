@@ -181,6 +181,23 @@ func validateDialSpec(d *DialSpec, label string) error {
 	if _, err := sshclient.ParseProxyURL(d.Proxy); err != nil {
 		return fmt.Errorf("%s: %w", label, err)
 	}
+	// A TIMEOUT ABOVE THE CAP IS NOT A TIMEOUT, and a negative one is a typo. Zero stays
+	// legal and means "the default" (an entry written before this field existed has no value
+	// at all); anything else has to be inside the range the dialler honours, or the caller is
+	// setting a number that will be replaced without a word at dial time.
+	//
+	// A SHORT TIMEOUT IS LEGAL. The floor is 1 second, not the 30 second default: failing
+	// fast is a legitimate thing to ask for, and refusing it would leave a script with no way
+	// to bound a dial. The dialler owns the range (session.ClampDialTimeoutSeconds) and this
+	// asks it rather than restating the numbers — two copies of a bound drift apart, and the
+	// copy that drifts is always the one that is not enforcing anything.
+	if d.DialTimeoutSeconds < 0 ||
+		(d.DialTimeoutSeconds != 0 && session.ClampDialTimeoutSeconds(d.DialTimeoutSeconds) != d.DialTimeoutSeconds) {
+		return fmt.Errorf("%s dial_timeout_seconds must be 0 (the default, %ds) or between %d and %d, got %d: "+
+			"the dialler would replace it, so the value would be stored and then not used: %w",
+			label, session.DefaultDialTimeoutSeconds, session.MinDialTimeoutSeconds,
+			session.MaxDialTimeoutSeconds, d.DialTimeoutSeconds, ErrInvalid)
+	}
 	return nil
 }
 

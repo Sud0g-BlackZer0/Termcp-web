@@ -457,17 +457,29 @@ func applyEntryEdits(existing *sshconfig.Entry, args map[string]any) {
 	}
 }
 
-// applyJumpEdits overlays a bastion (ProxyJump) onto an existing profile. It is
-// separate from applyEntryEdits because a jump is all-or-nothing on its host:
-// without jump_host there is no bastion to fill in, and the remaining jump_*
-// arguments are ignored rather than silently creating one.
+// applyJumpEdits overlays a bastion (ProxyJump) onto an existing profile.
+//
+// CREATING A BASTION NEEDS ITS HOST; EDITING ONE DOES NOT. That distinction was
+// missing, and it made the rule "a jump is all-or-nothing" swallow real edits:
+// `edit host prod --jump-port 2201` on a profile that already has a bastion answered
+// 200 success and changed nothing, because the merge only ran when `jump_host` was
+// given again. The caller had to restate the host to change a port — and nothing in
+// the reply said so.
+//
+// So the remaining jump_* arguments apply when there is ALREADY a bastion to apply
+// them to. A stray `--jump-user` on a profile with no jump still does not conjure one:
+// that half of the original rule is what keeps a typo from inventing infrastructure.
 func applyJumpEdits(existing *sshconfig.Entry, args map[string]any) {
-	// Jump merge
 	if jh := getString(args, "jump_host", ""); jh != "" {
 		if existing.Jump == nil {
 			existing.Jump = &sshconfig.JumpSpec{}
 		}
 		existing.Jump.Host = strings.TrimSpace(jh)
+	}
+	if existing.Jump == nil {
+		return
+	}
+	{
 		if v := getString(args, "jump_user", ""); v != "" {
 			existing.Jump.User = strings.TrimSpace(v)
 		}

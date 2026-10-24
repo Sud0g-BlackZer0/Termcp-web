@@ -53,16 +53,38 @@ func remoteDialAddr(r *RemoteSSH) string {
 	return net.JoinHostPort(strings.TrimSpace(r.Host), strconv.Itoa(port))
 }
 
-// remoteDialTimeout clamps DialTimeoutSeconds to [30, 120] seconds.
+// The dial timeout's range, and they live here because this is where the clamp is.
+//
+// MinDialTimeoutSeconds is 1, NOT 30: 30 is the DEFAULT, and the two were confused once —
+// a comment here read "clamps DialTimeoutSeconds to [30, 120]", which described a floor the
+// code did not have (`toSec <= 0 { toSec = 30 }` is a default, and `5` was honoured as 5).
+// Reading that comment as the domain turned a fast-fail setting into a refusal, which is a
+// worse failure than the silent clamp it was meant to fix: a caller that wants a 5 second
+// dial so a script fails fast could no longer say so at all.
+const (
+	MinDialTimeoutSeconds     = 1
+	MaxDialTimeoutSeconds     = 120
+	DefaultDialTimeoutSeconds = 30
+)
+
+// ClampDialTimeoutSeconds brings a dial timeout into the range the dialler honours.
+//
+// It is exported because the config validator asks it instead of restating the bounds:
+// a second copy of a range drifts, and the copy that drifts is the one not enforcing
+// anything. Two things are clamped — an unset value becomes the default, and a value
+// written before the check existed is capped — and nothing else is touched.
+func ClampDialTimeoutSeconds(seconds int) int {
+	switch {
+	case seconds <= 0:
+		return DefaultDialTimeoutSeconds
+	case seconds > MaxDialTimeoutSeconds:
+		return MaxDialTimeoutSeconds
+	}
+	return seconds
+}
+
 func remoteDialTimeout(r *RemoteSSH) time.Duration {
-	toSec := r.DialTimeoutSeconds
-	if toSec <= 0 {
-		toSec = 30
-	}
-	if toSec > 120 {
-		toSec = 120
-	}
-	return time.Duration(toSec) * time.Second
+	return time.Duration(ClampDialTimeoutSeconds(r.DialTimeoutSeconds)) * time.Second
 }
 
 // remoteClientConfig builds the per-hop SSH client config.

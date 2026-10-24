@@ -295,13 +295,23 @@ func extensionConfigMap(ext *extensions.Extension) map[string]any {
 // at the reason.
 func extensionStatusWord(name string, st extensions.Status, enabled bool) (word, next string) {
 	word = statusOr(st, extensions.StatusUnavailable)
-	if word != extensions.StatusUnavailable || len(st.Failures) > 0 || st.SessionID != "" {
+	switch {
+	case word == extensions.StatusProbing:
+		// THE RECONCILER'S OWN TRANSITIONAL STATE, and it means the same thing to the
+		// caller as the fallback below: not up, nothing failed, look again. It used to
+		// fall into the early return and lose the hint — so the hint was present only in
+		// the window before the reconciler picked the template up, and vanished the
+		// moment it did (startProbe sets this state itself). That is backwards: the
+		// caller that just created a template is most likely to see `probing` set by the
+		// reconciler, because the create is what triggered the walk.
+	case word != extensions.StatusUnavailable || len(st.Failures) > 0 || st.SessionID != "":
 		return word, ""
-	}
-	if !enabled {
+	case !enabled:
 		return extensions.StatusDisabled, ""
+	default:
+		word = extensions.StatusProbing
 	}
-	return extensions.StatusProbing, "the reconciler is trying it now; `get ext " + name + "` reports how it went"
+	return word, "the reconciler is trying it now; `get ext " + name + "` reports how it went"
 }
 
 // extensionRuntimeFields writes the reconciler's half of an extension onto a
