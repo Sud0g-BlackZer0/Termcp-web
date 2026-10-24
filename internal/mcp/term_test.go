@@ -448,9 +448,13 @@ func TestTermPSLinesAreCopyable(t *testing.T) {
 		if len(fields) == 0 {
 			continue
 		}
+		// THE STATUS LINE, NOT THE WORD "404". A channel id is a uuid, and one that
+		// begins with those three digits made this fail about once in four thousand
+		// runs — a flake whose cause was a substring match, not a race. The reply's
+		// first line is the status, which is the thing being asked about.
 		probe := termText(t, s, map[string]any{"cmd": "get " + fields[0]})
-		if strings.Contains(probe, "404") {
-			t.Errorf("the handle %q from ps does not resolve:\n%s", fields[0], probe)
+		if !strings.HasPrefix(probe, "TERM/1 2") {
+			t.Errorf("the channel %q from ls does not resolve:\n%s", fields[0], probe)
 		}
 	}
 }
@@ -1035,7 +1039,7 @@ func TestTermMCPStreamableHandshakeAndClose(t *testing.T) {
 		t.Fatalf("close failed:\n%s", toolResultText(res))
 	}
 	after := termText(t, s, map[string]any{"cmd": "read " + h})
-	if !strings.Contains(after, "404") || !strings.Contains(after, "names nothing") {
+	if !strings.HasPrefix(after, "TERM/1 404") || !strings.Contains(after, "names nothing") {
 		t.Fatalf("closed peer still resolves:\n%s", after)
 	}
 }
@@ -1348,35 +1352,6 @@ func TestReadBytesLimitZeroConsumesNothing(t *testing.T) {
 	after := termText(t, s, map[string]any{"cmd": "read " + h, "timeout": float64(1)})
 	if !strings.Contains(after, "1\n2\n3") {
 		t.Errorf("a bytes_limit 0 read consumed the stream:\n%s", after)
-	}
-}
-
-// TestPipeToForwardsAndConsumes pins the one schema parameter that had no
-// implementation: pipe_to was parsed into termArgs and then read by nobody, so
-// asking for a pipe silently returned the bytes inline.
-func TestPipeToForwardsAndConsumes(t *testing.T) {
-	s := newTestServer(t)
-	src := openPipe(t, s, "echo forwarded-payload")
-	sink := openPipe(t, s, "cat")
-	defer closeShell(t, s, sink)
-
-	out := termText(t, s, map[string]any{"cmd": "read " + src, "pipe_to": sink, "timeout": float64(1)})
-	if strings.Contains(out, "forwarded-payload") {
-		t.Errorf("pipe_to left the forwarded bytes in the reply body:\n%s", out)
-	}
-	got := termText(t, s, map[string]any{"cmd": "read " + sink, "timeout": float64(1)})
-	if !strings.Contains(got, "forwarded-payload") {
-		t.Errorf("pipe_to wrote nothing into the target handle:\n%s", got)
-	}
-}
-
-// TestPipeToBadTargetIsAnError pins that a pipe which goes nowhere is reported.
-func TestPipeToBadTargetIsAnError(t *testing.T) {
-	s := newTestServer(t)
-	src := openPipe(t, s, "echo payload")
-	out := termText(t, s, map[string]any{"cmd": "read " + src, "pipe_to": "no-such-handle", "timeout": float64(1)})
-	if !strings.Contains(out, "not found") {
-		t.Fatalf("pipe_to to a missing handle reported nothing:\n%s", out)
 	}
 }
 

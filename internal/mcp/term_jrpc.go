@@ -239,7 +239,7 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 		// error about "1" — the one instruction this reply gives was wrong, and it was
 		// wrong in the same reply that explains why the next call matters.
 		body += "\nNext: `ls " + handle + "` lists the tabs. Attach one with `open " + handle +
-			" --target <targetId>`, then call through the handle it returns.\n"
+			" --target <targetId>`, then call through the channel it returns.\n"
 		body += "Events are kept: record the number from `get " + handle + "`, act, then `read " + handle + " --since <n>`.\n"
 	}
 	if op == "mcp" {
@@ -270,7 +270,7 @@ func (s *Server) jrpcOpen(ctx context.Context, stmt directive.Statement, op, ses
 					"a version mismatch means the peer does not speak this protocol. Nothing was opened."}
 			}
 			body += "\nprotocol: the MCP handshake failed" + discover + ", so tool calls cannot work until\n" +
-				"something answers there. The handle still addresses the channel — `close " + handle + "` frees it.\n"
+				"something answers there. The address still names the channel — `close " + handle + "` frees it.\n"
 		}
 	}
 	return envelope.Slot{
@@ -428,7 +428,7 @@ func devtoolsSocket(ctx context.Context, rawURL string, dial jrpc.DialFunc) (str
 // stdio form, so an unknown handle there is an error rather than a fallback.
 func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win termArgs, op, sub string, rest []string) envelope.Slot {
 	if len(rest) == 0 {
-		return badRequest(stmt, op+" "+sub+" needs a handle (the one "+op+" open returned)")
+		return badRequest(stmt, op+" "+sub+" needs a channel address (the one "+op+" open returned)")
 	}
 	handle := rest[0]
 	jrpcChannelsMu.Lock()
@@ -444,7 +444,7 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 			return s.mcpStdio(ctx, stmt, sub, handle, rest[1:])
 		}
 		return envelope.Slot{Code: 404, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "not_found"},
-			Body: "no open channel named " + handle + " (copy a handle from " + op + " open, or from ps for a shell)"}
+			Body: "no open channel named " + handle + " (copy a channel address from " + op + " open, or from ps for a shell)"}
 	}
 	if sub == "close" {
 		_ = h.ch.Close()
@@ -585,7 +585,7 @@ func (s *Server) jrpcReady(ctx context.Context, h *jrpcHandle) error {
 func parseJRPCFrame(stmt directive.Statement, rest []string) (map[string]any, *envelope.Slot) {
 	payload := unquoteWord(strings.TrimSpace(strings.Join(rest, " ")))
 	if payload == "" {
-		return nil, ptrSlot(badRequest(stmt, "needs a JSON-RPC frame, e.g. call <handle> '{\"method\":\"…\"}'"))
+		return nil, ptrSlot(badRequest(stmt, "needs a JSON-RPC frame, e.g. call <channel> '{\"method\":\"…\"}'"))
 	}
 	var frame map[string]any
 	if err := json.Unmarshal([]byte(payload), &frame); err != nil {

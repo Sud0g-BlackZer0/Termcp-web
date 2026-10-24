@@ -577,11 +577,10 @@ func TestEscapeHeaderKeepsCarriageReturns(t *testing.T) {
 // reply, two projections, one answer.
 func TestHeaderAndBodyAgreeOnAPathWithCR(t *testing.T) {
 	s := newTestServer(t)
-	// allow_escapes, because the raw-byte gate refuses a CR in cmd whoever it is
-	// meant for: it cannot know that this one ends up in a Path rather than in a
-	// terminal, and a gate that guessed would be the one that let the dangerous
-	// case through. The switch is how a caller says "not a terminal this time".
-	rec := postTerm(t, s, `{"cmd": "get \"a\rb\"", "allow_escapes": true}`)
+	// No switch needed: the raw-byte gate reads parsed statements and only the
+	// regions a terminal receives, so a CR headed for a Path is data and arrives as
+	// written.
+	rec := postTerm(t, s, `{"cmd": "get \"a\rb\""}`)
 	slots := termSlots(t, rec)
 	bodyPath, _ := slots[0]["Path"].(string)
 	if !strings.Contains(bodyPath, "\r") {
