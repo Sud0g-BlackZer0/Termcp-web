@@ -1771,7 +1771,9 @@ func TestEveryFlagIsDiscoverableFromHelp(t *testing.T) {
 			continue
 		}
 		body := termText(t, s, map[string]any{"cmd": "help " + op.Name})
-		for _, f := range op.Flags {
+		// The NAMES, not the declarations: `help` renders what a caller can pass, and
+		// `--offset:number` is the table's annotation of `--offset`.
+		for _, f := range op.FlagNames() {
 			if !strings.Contains(body, "--"+f) {
 				t.Errorf("help %s does not mention --%s", op.Name, f)
 			}

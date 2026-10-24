@@ -13,8 +13,10 @@ import (
 func TestHelpSummaryIsCheaperThanThePage(t *testing.T) {
 	s := newTestServer(t)
 
-	summary := termText(t, s, map[string]any{"cmd": "help read", "bytes_limit": 32768})
-	page := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 32768})
+	// Both windows are raised: the page is over the default lines_limit of 200, and a
+	// cut page is not the price the summary quotes.
+	summary := termText(t, s, map[string]any{"cmd": "help read", "bytes_limit": 32768, "lines_limit": 100000})
+	page := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 32768, "lines_limit": 100000})
 
 	if len(summary) >= len(page)/2 {
 		t.Errorf("summary is %d bytes and the page is %d: not a smaller question", len(summary), len(page))
@@ -57,7 +59,7 @@ func TestEveryDeclaredFlagOfAMigratedVerbHasALine(t *testing.T) {
 	if !directive.HasSummaries("read") {
 		t.Fatal("read should be migrated")
 	}
-	for _, flag := range op.Flags {
+	for _, flag := range op.FlagNames() {
 		if _, ok := directive.FlagSummary("read", flag); !ok {
 			t.Errorf("--%s is declared by read but has no summary line", flag)
 		}
@@ -69,8 +71,10 @@ func TestEveryDeclaredFlagOfAMigratedVerbHasALine(t *testing.T) {
 func TestSummaryQuotesTheRealPageSize(t *testing.T) {
 	s := newTestServer(t)
 
-	summary := termText(t, s, map[string]any{"cmd": "help read", "bytes_limit": 32768})
-	page := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 32768})
+	// Both windows are raised: the page is over the default lines_limit of 200, and a
+	// cut page is not the price the summary quotes.
+	summary := termText(t, s, map[string]any{"cmd": "help read", "bytes_limit": 32768, "lines_limit": 100000})
+	page := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 32768, "lines_limit": 100000})
 
 	const marker = "The full page is "
 	i := strings.Index(summary, marker)
@@ -90,5 +94,36 @@ func TestSummaryQuotesTheRealPageSize(t *testing.T) {
 	}
 	if got := fmt.Sprintf("%d", len(page)); got != quoted {
 		t.Errorf("summary quotes %s bytes but `--all` returns %s", quoted, got)
+	}
+}
+
+// TestNoSurfaceRendersADeclaration pins the boundary between the table and the caller.
+//
+// A flag's value domain is written into the flag's own entry (`offset:number`), which is
+// what keeps one list true instead of two — and it is the table's business, not the
+// caller's. Every surface that prints a flag name walks that same list, so the
+// annotation leaked: `help read` rendered a column of `--cursor:number`, and the summary
+// table — keyed by name — had nothing to put beside it. Two upstream tests caught the
+// consequence (an empty description, a name `help` never mentioned); this one names the
+// cause, so the next surface that walks op.Flags fails here instead of in the reply.
+func TestNoSurfaceRendersADeclaration(t *testing.T) {
+	s := newTestServer(t)
+	for _, op := range directive.Ops() {
+		for _, f := range op.Flags {
+			name, domain, ok := strings.Cut(f, ":")
+			if !ok || domain == "" {
+				continue
+			}
+			// Only the line window is raised. bytes_limit has to stay under
+			// total_bytes_limit (the cap for the whole reply), and the default byte
+			// window is already larger than any page this walks.
+			body := termText(t, s, map[string]any{"cmd": "help " + op.Name, "lines_limit": 100000})
+			if strings.Contains(body, "--"+f) {
+				t.Errorf("help %s renders the declaration --%s; the caller can only pass --%s", op.Name, f, name)
+			}
+			if !strings.Contains(body, "--"+name) {
+				t.Errorf("help %s does not mention --%s", op.Name, name)
+			}
+		}
 	}
 }

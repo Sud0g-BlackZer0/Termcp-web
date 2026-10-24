@@ -811,7 +811,9 @@ func TestEveryFlagHasAValueRule(t *testing.T) {
 	for _, op := range Ops() {
 		valueless := make(map[string]bool, len(op.Valueless))
 		for _, v := range op.Valueless {
-			if !slices.Contains(op.Flags, v) {
+			// By NAME: a valueless flag has no value domain to declare, and comparing
+			// against the raw entries would make one added later look undeclared.
+			if !slices.Contains(op.FlagNames(), v) {
 				t.Errorf("%s: %q is Valueless but not declared in Flags", op.Name, v)
 			}
 			if valueless[v] {
@@ -834,7 +836,7 @@ func TestEveryFlagHasAValueRule(t *testing.T) {
 func TestValuelessFlagsAreReal(t *testing.T) {
 	for _, op := range Ops() {
 		for _, v := range op.Valueless {
-			if !slices.Contains(op.Flags, v) {
+			if !slices.Contains(op.FlagNames(), v) {
 				t.Errorf("%s: %q is Valueless but not in Flags", op.Name, v)
 			}
 		}

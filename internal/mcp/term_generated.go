@@ -1125,6 +1125,12 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 			// The page is what the template, the flag list and the detail render to —
 			// measured from the body BEFORE the table is appended, or the summary
 			// quotes a price that includes itself.
+			//
+			// BOTH "+ 1"s ARE THE NEWLINES: the page is the template, a newline, the detail
+			// and a final newline, and dropping either one quotes a price one byte off the
+			// bill. The test only catches this when the reply under test is WHOLE — under the
+			// default lines_limit it is cut, and then the quoted size and the delivered
+			// body differ by the cut, which looks like the same off-by-one and is not.
 			pageSize := len(body) + 1 + len(op.Detail) + 1
 			body += "\n" + table
 			if example, ok := directive.SummaryExample(op.Name); ok {
@@ -1811,12 +1817,15 @@ func flagList(op directive.Op) string {
 	if len(op.Flags) == 0 {
 		return ""
 	}
+	// The names, not the declarations: the domain annotation is how the table records
+	// what a flag accepts, and `--cursor:number` is not a flag a caller can pass.
+	names := op.FlagNames()
 	valueless := make(map[string]bool, len(op.Valueless))
 	for _, v := range op.Valueless {
 		valueless[v] = true
 	}
-	w := make([]string, 0, len(op.Flags))
-	for _, f := range op.Flags {
+	w := make([]string, 0, len(names))
+	for _, f := range names {
 		if valueless[f] {
 			w = append(w, "--"+f)
 			continue
@@ -1852,16 +1861,19 @@ func flagTable(op directive.Op) string {
 		}
 		return "--" + f + " <value>"
 	}
+	// The names, not the declarations: the summary map is keyed by the name, so the raw
+	// entries would render a column of `--cursor:number` with nothing beside it.
+	names := op.FlagNames()
 	// The column is measured, not guessed: a fixed width misaligns the moment a flag
 	// spelling outgrows it, which is how `--from-line <value>` pushed its line out.
 	width := 0
-	for _, f := range op.Flags {
+	for _, f := range names {
 		if n := len(spellingOf(f)); n > width {
 			width = n
 		}
 	}
-	w := make([]string, 0, len(op.Flags))
-	for _, f := range op.Flags {
+	w := make([]string, 0, len(names))
+	for _, f := range names {
 		line, _ := directive.FlagSummary(op.Name, f)
 		w = append(w, fmt.Sprintf("  %-*s  %s", width, spellingOf(f), line))
 	}

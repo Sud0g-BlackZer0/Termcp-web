@@ -3344,6 +3344,23 @@ func allowedFlag(op Op, key string) bool {
 // reference, so the shell line arrives as a VALUE.
 const PayloadVar = "var"
 
+// FlagNames returns the declared flags with their value-domain annotation stripped.
+//
+// THE ANNOTATION IS PART OF THE DECLARATION, NOT PART OF THE NAME. Writing the domain
+// into the flag's own entry ("offset:number") is what keeps one list true instead of
+// two, but `offset:number` is not a flag anybody can pass — and every surface that
+// renders a flag name reads this table. Rendering the raw entries put `--cursor:number`
+// in `help read` with an empty description beside it, because the summary table is keyed
+// by the name. So the annotation is stripped at the one place names leave this package.
+func (op Op) FlagNames() []string {
+	out := make([]string, 0, len(op.Flags))
+	for _, f := range op.Flags {
+		base, _, _ := strings.Cut(f, ":")
+		out = append(out, base)
+	}
+	return out
+}
+
 // flagDomain finds a declared flag and returns its name, its domain and whether it is
 // declared at all. The domain is written into the flag's own entry ("offset:number"),
 // so there is one list to keep true rather than two.

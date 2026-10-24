@@ -17,7 +17,11 @@ import (
 func TestGeneratedReplyReportsItsFullSize(t *testing.T) {
 	s := newTestServer(t)
 
-	full := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 32768})
+	// BOTH WINDOWS ARE RAISED: the default lines_limit is 200, and `read`'s page has
+	// grown past it. The subject here is the size report, so the reply under test has to
+	// be the whole reply — with the default line window this is a CUT reply, and the
+	// body it delivers is not the number the header promises.
+	full := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 32768, "lines_limit": 100000})
 	if got, ok := headerValue(t, full, "Content-Range"); ok {
 		t.Errorf("a reply delivered whole carries no range, got %q", got)
 	}

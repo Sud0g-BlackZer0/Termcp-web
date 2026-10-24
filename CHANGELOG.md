@@ -29,10 +29,7 @@
 
 ### 新增
 
-- **`run`/`input` 的 payload 现在必须是恰好一个变量引用**（`$1`、`${10}` 或 `$NAME`），命令行走 `args` 值。以前 payload 是「行尾全部」，于是同一段文本被两个语言同时读：`run h:1 ls | write h:2 file /x` 对远端 shell 是「把 ls 的输出管给一个叫 write 的程序」（Linux 上真有这个程序，是给别人终端发消息的），对 termcp 是一条管道；`run h:1 echo a; b` 是两条指令。现在只有一种读法，`|` 也只剩 termcp 一个含义。**随之消失的写法**（把整行放进 `args` 即可）：`run h:1 $1 | wc -l`、`run h:1 echo $1`（变量旁有字）、heredoc 正文里放变量、算术里的变量。payload 里的 `&`/`;`/`&&`/`|` 仍是 termcp 的语句运算符，shell 自己的那些写进值里。
-- **参数类型声明**：指令表现在声明每个 flag 的值域（`"offset:number"`、`"stream:enum=o,e,all"`、`"size:geometry"`），并新增 `Op.PayloadType`；校验在**任何 handler 运行之前**发生。顺手修掉三个静默：`--stream nonsense` 以前静默等于 stdout，`--on-exit nonsense` 同理，`--size nonsense` 以前静默用默认尺寸（`fmt.Sscanf` 解析失败返回 0，调用方再把 0 跳过）。
 
-- **`read … | write …`：把字节从一个节点搬到另一个节点，不经过调用方上下文**。左侧是 channel 或文件（`--cursor`/`--offset`/`--from-line`/`--tail`/`--stream` 照旧由调用方指定），右侧只能是 `write <session> file <path>`。两端直接对接（两个 SFTP 端用 `io.Pipe` 相连，都是 `io.Copy`），中间**不落盘、不缓冲**；只有「channel → 文件」这一侧因为 transcript 没有增量读取器而先把跨度读成一段字节。空间窗默认不参与（拷贝是整段），调用方显式给了 `bytes_limit` 才截。回复是 202 + 任务回执（`Kind: copy`），`get task` 等待并报进度。拷贝是**原始字节**，与 `read` 默认渲染成终端画面相反。`|` 出现在其他任何组合上一律拒绝并说明「payload 里的 `|` 属于远端 shell」，而在此之前右侧是**静默丢弃**的。
 
 - **`open <session> mcp <url>` 握手失败时不再假装打开成功**。以前回 200、交出 handle，只在正文里写一句「握手失败」，于是那次已经知道的事实被推给下一次调用：`call` 回 500 `connection_failed`——把「URL 写错了」报成「传输坏了」。现在 `open` 回 502 并说清这个 URL 不是 MCP 端点，同时释放通道、不交 handle。连不上与服务端拒绝仍是两件事：HTTP 通道第一帧才拨号，所以「端口还没起来」仍算打开成功。
 
