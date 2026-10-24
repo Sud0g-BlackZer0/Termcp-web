@@ -309,3 +309,15 @@ func domainSamples(domain string) (good, bad string) {
 		return "3", "not-a-number"
 	}
 }
+
+// isValueless reports whether a flag is declared as taking no value, so a probe can skip
+// it: `--sticky` and `--json` are switches, and "what does its value become" has no
+// answer for them.
+func isValueless(op Op, name string) bool {
+	for _, v := range op.Valueless {
+		if v == name {
+			return true
+		}
+	}
+	return false
+}

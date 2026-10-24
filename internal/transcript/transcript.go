@@ -76,14 +76,36 @@ func (o *Source) SourceName() string {
 }
 
 // Len returns the total raw stream length in bytes.
+//
+// THE LOG IS THE RECORD AND THE BUFFER IS A CACHE OF IT, so a live source's length is
+// the LARGER of the two. shell_output.go appends to the log first and writes the buffer
+// second, and the reason for that order is crash safety — but it also means that
+// between those two lines the same channel answers two different lengths depending on
+// which record the caller's flag happens to read: `--from-line` reads the log,
+// `--tail` and `--offset` read the buffer. With the gap widened to 1.5s on Linux,
+// `read <ch> --from-line 1` returned the bytes while `read <ch> --tail 20` answered
+// `204` with `Content-Range: bytes */0` — a false fact about a channel that had them,
+// and the reason a GBK test failed on one CI runner and not another.
 func (o *Source) Len() (int64, error) {
+	n := int64(0)
 	if o.Live != nil {
-		return o.Live.BufferLen(), nil
+		n = o.Live.BufferLen()
 	}
 	if o.MsgMgr == nil {
-		return 0, nil
+		return n, nil
 	}
-	return o.MsgMgr.OutputSize(o.SessID, o.ShellID)
+	m, err := o.MsgMgr.OutputSize(o.SessID, o.ShellID)
+	if err != nil {
+		// A log that cannot be read is not a reason to refuse a buffer that works.
+		if o.Live != nil {
+			return n, nil
+		}
+		return 0, err
+	}
+	if m > n {
+		return m, nil
+	}
+	return n, nil
 }
 
 // ByteRange copies raw bytes [start, start+max) of the stream. No cursors or
@@ -91,7 +113,23 @@ func (o *Source) Len() (int64, error) {
 // readers and for DEAD sessions alike.
 func (o *Source) ByteRange(start int64, max int) ([]byte, int64, error) {
 	if o.Live != nil {
-		return o.Live.OutputByteRange(start, max)
+		data, total, err := o.Live.OutputByteRange(start, max)
+		if o.MsgMgr == nil || (err == nil && len(data) >= max) {
+			return data, total, err
+		}
+		// THE BUFFER HAS NOT CAUGHT UP WITH THE LOG YET (see Len). Fill the rest from
+		// the log rather than reporting a short window, so a positional read sees the
+		// same bytes whichever record it reads them from.
+		rest, logTotal, lerr := o.MsgMgr.OutputByteRange(o.SessID, o.ShellID, start+int64(len(data)), max-len(data))
+		if lerr != nil {
+			// Nothing else can answer, so the buffer's own result stands — including its
+			// error, which is what a caller with no log at all has always seen.
+			return data, total, err
+		}
+		if logTotal > total {
+			total = logTotal
+		}
+		return append(data, rest...), total, nil
 	}
 	if o.MsgMgr == nil {
 		return nil, 0, nil
