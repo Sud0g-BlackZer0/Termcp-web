@@ -1107,7 +1107,26 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 		if flags := flagList(op); flags != "" {
 			body += "\n" + flags + "\n"
 		}
-		if op.Detail != "" {
+		// THE PAGE IS OPT-IN. `help read` was 10683 bytes with no smaller question to
+		// ask, so a caller who wanted to know what `--grep` takes paid for the essay —
+		// and the verbs with the longest pages are the ones with the most flags to ask
+		// about. The summary answers "which flag does what" and names the page,
+		// including its size, so spending it is a decision rather than a discovery.
+		if table := flagTable(op); table != "" && !boolFlag(stmt, "all") {
+			// The page is what the template, the flag list and the detail render to —
+			// measured from the body BEFORE the table is appended, or the summary
+			// quotes a price that includes itself.
+			pageSize := len(body) + 1 + len(op.Detail) + 1
+			body += "\n" + table
+			if example, ok := directive.SummaryExample(op.Name); ok {
+				body += "\n" + example + "\n"
+			}
+			// The number is the size `--all` will actually return, not the length of
+			// op.Detail: the page is the template, the flag list and the detail, and a
+			// caller deciding whether to spend a window is being quoted a price that has
+			// to match the bill. The test asserts exactly this.
+			body += fmt.Sprintf("\nThe full page is %d bytes: `help %s --all`.\n", pageSize, op.Name)
+		} else if op.Detail != "" {
 			// The detail is a page, so it follows the one-line template instead of
 			// replacing it: the template is what a caller scans, the page is what it
 			// reads once it has decided to produce the thing.
@@ -1797,6 +1816,48 @@ func flagList(op directive.Op) string {
 	}
 	sort.Strings(w)
 	return "Flags: " + strings.Join(w, "  ")
+}
+
+// flagTable renders one line per declared flag: what it takes, and what happens if
+// you get it wrong.
+//
+// It walks op.Flags rather than the summary map, for the reason flagList is derived
+// too: a hand-kept list drifts the moment a flag is added, and the drift is silent —
+// the flag simply stops being mentioned. Walking the declaration makes the table
+// complete by construction.
+//
+// A verb with no summaries renders nothing, which is how it keeps its full page: the
+// surface migrates one verb at a time, and a verb that has not migrated behaves
+// exactly as it did before this existed.
+func flagTable(op directive.Op) string {
+	if !directive.HasSummaries(op.Name) {
+		return ""
+	}
+	valueless := make(map[string]bool, len(op.Valueless))
+	for _, v := range op.Valueless {
+		valueless[v] = true
+	}
+	spellingOf := func(f string) string {
+		if valueless[f] {
+			return "--" + f
+		}
+		return "--" + f + " <value>"
+	}
+	// The column is measured, not guessed: a fixed width misaligns the moment a flag
+	// spelling outgrows it, which is how `--from-line <value>` pushed its line out.
+	width := 0
+	for _, f := range op.Flags {
+		if n := len(spellingOf(f)); n > width {
+			width = n
+		}
+	}
+	w := make([]string, 0, len(op.Flags))
+	for _, f := range op.Flags {
+		line, _ := directive.FlagSummary(op.Name, f)
+		w = append(w, fmt.Sprintf("  %-*s  %s", width, spellingOf(f), line))
+	}
+	sort.Strings(w)
+	return strings.Join(w, "\n") + "\n"
 }
 
 // peerLines renders the open peers of the sessions in a listing.

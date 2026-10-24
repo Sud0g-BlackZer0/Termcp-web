@@ -510,7 +510,13 @@ var ops = []Op{
 		Usage:  "notify [--level info|success|warn|error] [--sticky] [--on <session>] [--title T] <body>",
 		Detail: notifyDetail},
 	{Name: "help", Core: true, Kind: KindFlags,
-		Usage: "help [verb]"},
+		// --all asks for the page instead of the summary. The summary is what a
+		// caller wants most of the time (which flag does what), and the page is what
+		// it wants once it has decided to produce the thing — so the cheap question
+		// gets a cheap answer and the expensive one stays one word away.
+		Flags:     []string{"all"},
+		Valueless: []string{"all"},
+		Usage:     "help [verb] [--all]"},
 }
 
 // spanDetail decodes the one-letter statuses, which are terse by design (they are

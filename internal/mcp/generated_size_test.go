@@ -17,7 +17,7 @@ import (
 func TestGeneratedReplyReportsItsFullSize(t *testing.T) {
 	s := newTestServer(t)
 
-	full := termText(t, s, map[string]any{"cmd": "help read", "bytes_limit": 32768})
+	full := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 32768})
 	if got, ok := headerValue(t, full, "Content-Range"); ok {
 		t.Errorf("a reply delivered whole carries no range, got %q", got)
 	}
@@ -31,7 +31,7 @@ func TestGeneratedReplyReportsItsFullSize(t *testing.T) {
 
 	// The documented cheap form: "the channel only, no bytes". Its whole purpose is
 	// to let a caller look before spending, so it has to answer with the size.
-	zero := termText(t, s, map[string]any{"cmd": "help read", "bytes_limit": 0})
+	zero := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 0})
 	gotZero, ok := headerValue(t, zero, "Content-Range")
 	if !ok {
 		t.Fatal("bytes_limit 0 must report the size; it is the only form that can ask for free")
@@ -42,7 +42,7 @@ func TestGeneratedReplyReportsItsFullSize(t *testing.T) {
 
 	// A window that cuts says the same number: the size is a property of the reply,
 	// not of the window that sampled it.
-	cut := termText(t, s, map[string]any{"cmd": "help read", "bytes_limit": 2000})
+	cut := termText(t, s, map[string]any{"cmd": "help read --all", "bytes_limit": 2000})
 	gotCut, ok := headerValue(t, cut, "Content-Range")
 	if !ok {
 		t.Fatal("a cut generated reply must report its full size")
