@@ -11,6 +11,8 @@
 - **`help ext` 说出了那个动作**。动词表仍然是从 usage 行派生的（手写列表迟早漂），但"能用 flag 表达、没有自己动词"的能力派生不出来——`ext` 恰好有这么一个，于是 `help ext` 列了五个动词、没有一个能重建扩展。现在末尾补一段，并且刻意只写这一段：注释里写明，哪天它长成一段话，那就是这个节点该有自己的动词的信号。
 - **`edit ext <name> --restart` 重建扩展会话（#181）**。扩展是个进程，而进程手里是它启动时读到的那个脚本——目标机上 `git pull` 换了文件内容，正在跑的扩展一无所知。`edit` 本来就会重建，但只在**会话模板**变了的时候（reconciler 比对指纹），而"路径没变、内容变了"恰好是指纹看不出来的那一种。这个动作 reconciler 叫 `retry`，MCP 工具和 admin API 都够得到，**唯独 agent 唯一能走的 DSL 够不到**——所以 agent 更新完扩展之后，没有任何办法说"重建它"。现在 `edit ext <name> --restart` 就是那个说法，`retry` 也接受。它不改任何配置，所以和别的 flag 同时出现会被**按名字拒绝**，而不是做一半还报成功。
 
+- **`kind=mcp` 不再自带 `npx -y example-mcp-server`**。一个 MCP 扩展就是"一个程序加它的 argv"，没有可猜的惯例——`npx -y <package>` 只是启动方式之一，`python server.py` 是另一种。那个默认值在两个方向上都错：**给了自己程序的创建会继承那串参数**（`--command cat` 实际执行 `cat -y example-mcp-server`，报 `cat: illegal option -- y`——既没说哪个 flag，也没说默认值从哪来），而**什么都不给的创建会得到一个能通过校验、永远跑不起来的模板**，看起来配好了，比报错更坏。现在 `--command`/`--args` 由调用方填满，漏了就在创建时被拒：`mode=pipe requires a command (a pipe channel has no fallback shell)`。预设仍然提供**确实算惯例**的东西：pipe 模式、能力白名单、驱动 stdio 服务器的 notes——程序名不算惯例。
+
 ## v0.2.8-rc.5 — 2026-10-24
 
 ### 新增
