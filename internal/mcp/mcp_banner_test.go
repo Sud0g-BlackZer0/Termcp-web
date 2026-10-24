@@ -91,23 +91,6 @@ func TestRecvSaysWhenTheBytesInFrontAreNotAFrame(t *testing.T) {
 	}
 }
 
-// A HALF-ARRIVED VALUE IS STILL "NOT YET", and saying anything else would be wrong
-// in the other direction: the caller should wait, and there is nothing to explain.
-func TestRecvKeepsThePlainNotYetAnswerForAPartialFrame(t *testing.T) {
-	s := newTestServer(t)
-	// An opening brace and nothing else: the frame is still being written.
-	h := openPipe(t, s, `sh -c 'printf "{\"jsonrpc\":"; sleep 5'`)
-	defer termText(t, s, map[string]any{"cmd": "close " + h})
-
-	got := termText(t, s, map[string]any{"cmd": "read " + h + " --frame"})
-	if !strings.Contains(got, "no complete frame") {
-		t.Fatalf("expected the not-yet answer, got:\n%s", got)
-	}
-	if strings.Contains(got, "not a frame") {
-		t.Errorf("a half-arrived value was reported as noise:\n%s", got)
-	}
-}
-
 // THE SCAN TRIES EVERY CANDIDATE, not just the first bracket. A banner can hold
 // several, and only one of them is the frame.
 func TestFirstJSONValueTriesEveryCandidate(t *testing.T) {
@@ -120,6 +103,11 @@ func TestFirstJSONValueTriesEveryCandidate(t *testing.T) {
 		{"an array frame is a frame too", `[warn] [1,2,3]`, `[1,2,3]`},
 		{"noise with braces that never close", `{oops {"a":1}`, `{"a":1}`},
 		{"nothing but noise", `[warn] nothing here`, ""},
+		// A HALF-ARRIVED VALUE IS STILL "NOT YET", and saying anything else would be
+		// wrong in the other direction: the caller should wait, and there is nothing
+		// to explain. notAFrame is what decides that, so it is pinned here rather
+		// than through a two-second wait on the door.
+		{"a partial frame at the front", `{"a":`, ""},
 		{"a partial frame at the end", `[warn] {"a":`, ""},
 		{"the value comes first", `{"a":1} trailing`, `{"a":1}`},
 	}
@@ -137,6 +125,41 @@ func TestFirstJSONValueTriesEveryCandidate(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("firstJSONValue(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// WHAT THE 204 SAYS. "no complete frame yet" is the same sentence for a peer that is
+// slow and a peer whose bytes will never parse, and only one of them is worth waiting
+// on — a caller that retries a banner retries for ever.
+func TestNotAFrameNamesTheUnparseablePrefix(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"a banner", "just a banner, no frame\n", "just a banner, no frame"},
+		{"only the first line is quoted", "banner line\nmore noise\n", "banner line"},
+		{"a value that is merely unfinished", `{"jsonrpc":`, ""},
+		{"an array that is merely unfinished", `[{"a":1},`, ""},
+		{"nothing at all", "", ""},
+		{"whitespace only", "   \n  ", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := notAFrame(tc.in)
+			if tc.want == "" {
+				if got != "" {
+					t.Errorf("notAFrame(%q) = %q, want nothing", tc.in, got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("notAFrame(%q) = %q, want it to name %q", tc.in, got, tc.want)
+			}
+			if !strings.Contains(got, "not a frame") {
+				t.Errorf("notAFrame(%q) = %q, which does not say what the problem is", tc.in, got)
 			}
 		})
 	}
