@@ -327,6 +327,9 @@ func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
 		collect(&directive.Error{Msg: fmt.Sprintf("unknown argument %s; term takes %s",
 			strings.Join(unknown, ", "), strings.Join(names, ", "))})
 	}
+	if _, given := args["timeout"]; given {
+		w.TimeoutSet = true
+	}
 	collect(readNumberArg(args, "timeout", &w.TimeoutSeconds))
 	var bytesLimit, linesLimit, totalLimit float64
 	collect(readNumberArg(args, "bytes_limit", &bytesLimit))

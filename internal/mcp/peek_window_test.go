@@ -35,15 +35,28 @@ func TestAFullWindowEndsTheWait(t *testing.T) {
 	})
 	elapsed := time.Since(start)
 
-	// THE WINDOW FILLED, which is what a 200-byte peek promises. Asserting a particular
-	// line cannot work here and never could: 200 bytes is the echo of this command plus a
-	// few bytes, and the marker that used to stand in for this ("the reply contains
-	// `line`") was satisfied by the echo itself.
-	if replyBody(got) == "" {
-		t.Fatalf("the peek returned nothing:\n%s", got)
+	// THE WINDOW FILLED, and the way to see that is the RANGE, not the body. Two earlier
+	// versions of this assertion were both wrong for the same reason — they looked for
+	// text — and neither could work:
+	//
+	//   - "the reply contains `line`" was satisfied by the ECHO of the command line, so it
+	//     passed whatever happened to the command.
+	//   - "the body is not empty" fails when the 200 bytes land inside a burst of terminal
+	//     control sequences: PowerShell's line editor redraws as the command is typed, and
+	//     a window of pure cursor movement renders to nothing while being 200 real bytes.
+	//
+	// The 206 and a range spanning bytes_limit say the thing being tested: the peek stopped
+	// because its own window filled, not because the stream ended.
+	if !strings.Contains(got, "206") {
+		t.Fatalf("a window cut short by its own size is a partial reply:\n%s", got)
 	}
-	// 200 bytes fills in well under a second; 10s is the caller's window, not a target.
-	if elapsed > 3*time.Second {
+	if !strings.Contains(got, "Content-Range: bytes ") {
+		t.Fatalf("a partial reply has to say which bytes it covered:\n%s", got)
+	}
+	// The wait has to end on the WINDOW, not on the clock. 10s is the caller's window; a
+	// full 200 bytes arrives in about a second. The bound is 7s rather than 3s because a
+	// loaded runner spent 3.0s here once, which is the machine and not the behaviour.
+	if elapsed > 7*time.Second {
 		t.Errorf("a full byte window should end the wait; waited %v of a 10s window", elapsed)
 	}
 	// And the caller has to be told the command is not done, or "here is a slice" and

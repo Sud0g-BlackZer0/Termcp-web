@@ -2243,10 +2243,18 @@ func taskProgress(v task.View) string {
 // Defaults to 15s: short enough that a 30s host watchdog never kills the call
 // from outside, long enough for any ordinary peer operation (a CDP evaluate, an
 // MCP tool list).
+//
+// IT HAS TO ASK WHETHER THE CALLER SPOKE, not what the value came out as. `timeout` has a
+// default of its own (2s, the read window), so `win.TimeoutSeconds` is never zero and the
+// 15s branch below was unreachable from the term door: every peer call was bounded by 2
+// seconds, which a cold tunnel through the internal SSH server can exceed — CI caught it
+// as a 504 on an ordinary LSP frame. An explicit `timeout` still wins, including one
+// shorter than the default; an explicit 0 means "do not wait", which is not a deadline a
+// request/response call can use, so it falls back to the peer default.
 const defaultPeerWindow = 15 * time.Second
 
 func peerCallWindow(win termArgs) time.Duration {
-	if win.TimeoutSeconds > 0 {
+	if win.TimeoutSet && win.TimeoutSeconds > 0 {
 		return time.Duration(win.TimeoutSeconds * float64(time.Second))
 	}
 	return defaultPeerWindow

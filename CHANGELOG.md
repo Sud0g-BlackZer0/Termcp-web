@@ -76,6 +76,8 @@
 
 ### 修复
 
+- **`call` 的 peer 默认窗口重新生效（15 秒）**。`timeout` 有自己的默认值（2 秒，读窗口），所以 term 参数里的值**永远不是零**——于是「调用方点名要 2 秒」和「没人点名」看起来一样，peer 的 15 秒默认成了死代码，经过 term 门的每一次 `call` 都被 2 秒卡住。冷启动的隧道（走内建 SSH server）有时超过 2 秒，CI 上表现成一条普通 LSP 帧的 504。现在判断的是**调用方有没有开口**，不是它最终拿到什么值；显式给的 `timeout` 仍然优先，显式的 `0` 回落到 peer 默认（请求/响应调用用不了「不等」）。
+
 - **过滤读会把掠过的字节说出来了（`Omitted` 头）**。`read --stream o/e` 按窗口跨度推进游标（否则轮询会永远重读同一批字节），于是另一个流的字节就这样离开游标、一次都没显示，而没有任何一行提到它们。最糟的一种不是正文缺一块：只写 stdout 的通道用 `--stream e` 读会回 200 + **空正文** + `Content-Range: bytes 0-7/8`——「这里有 8 个字节」然后一个都不给——紧接着的普通读是 204，8 个字节被一条什么都没显示的回复吃掉了。现在每个过滤读都带 `Omitted: N bytes … went past unseen; read --stream e (or --stream all) shows them`。
 
 - **`edit host` 不再静默丢掉 bastion 的三个字段**。`--jump-port`、`--jump-user`、`--jump-private-key` 在 `edit` 上被无声丢弃：合并只在同时给了 `--jump-host` 时才跑。给已有 bastion 改一个端口，调用方必须先复述主机名，否则回 200 success、什么都没变。现在「已经有 bastion」也构成合并的前提；没有 bastion 时一个孤零零的 `--jump-user` 仍然不会凭空造出一台机器。

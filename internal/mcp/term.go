@@ -89,7 +89,15 @@ const (
 // can READ), and they never reach the shell — bytes sent to a shell are shaped by
 // the shell, not by this protocol.
 type termArgs struct {
-	TimeoutSeconds  float64
+	TimeoutSeconds float64
+	// TimeoutSet says the caller NAMED a timeout, which is not the same as the value it
+	// ended up with. `timeout` has a default (2s), so every reply carries a number whether
+	// or not anyone asked for one — and a subsystem that must fall back to its own default
+	// (a peer call waits 15s: short enough for a 30s host watchdog, long enough for an
+	// ordinary CDP evaluate) cannot tell "the caller asked for 2 seconds" from "nobody
+	// asked". It read the second as the first, so the 15s default was dead code and every
+	// peer call through the term door was bounded by 2 seconds instead.
+	TimeoutSet      bool
 	BytesLimit      int
 	LinesLimit      int
 	TotalBytesLimit int
