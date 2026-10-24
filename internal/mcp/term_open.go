@@ -118,10 +118,19 @@ func (s *Server) directiveOpen(ctx context.Context, stmt directive.Statement, wi
 	// Nothing reports that: `run` answers 200 and the command simply never happens, on
 	// every channel of that session, forever.
 	//
-	// So a pty open waits for the shell to speak before answering. The prompt is the
-	// only signal a shell gives that it is reading, and the wait is a bound rather than
-	// a claim: a shell that never prints anything (an empty PS1) is handed over when the
-	// budget runs out, because a silent shell is not a broken one.
+	// So a pty open waits for the shell to speak before answering, and the wait is a bound
+	// rather than a claim: a shell that never prints anything (an empty PS1) is handed
+	// over when the budget runs out, because a silent shell is not a broken one.
+	//
+	// WAITING FOR THE SHELL TO GO QUIET WAS TRIED AND REJECTED. It reads like the better
+	// signal — a shell that has stopped talking has finished its startup files — and it
+	// is not: measured on a themed PowerShell, startup pauses for longer than any quiet
+	// threshold short enough to afford (a second wait after the open returned still found
+	// the shell talking, 505ms later), while every open paid 1.8s instead of 0.1s. It made
+	// the terminal slower for everyone and left the same gap, so the honest state is that
+	// this is a heuristic with a ceiling — see issue #162, S1, which is the part a human
+	// has to decide: the only reliable readiness probe is a round trip, and a round trip
+	// writes a line into the caller's transcript.
 	//
 	// PIPE opens do not wait: their bytes go into the process's own stdin, which the OS
 	// buffers, and `--argv sleep 30` prints nothing for thirty seconds by design.

@@ -302,6 +302,7 @@ func TestTermRunOnPtyReadsTheWindow(t *testing.T) {
 func TestTermPtyRunWaitsTheWindow(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
+	awaitPtyReady(t, s, h)
 	text := termText(t, s, map[string]any{
 		"cmd":     "run " + h + " $1",
 		"args":    []any{"sleep 1 && echo LATE"},
@@ -317,30 +318,33 @@ func TestTermPtyRunWaitsTheWindow(t *testing.T) {
 func TestTermRunStartsAtItsOwnOffset(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
-	termText(t, s, map[string]any{"cmd": "run " + h + " seq 1 500", "timeout": float64(2), "bytes_limit": float64(64)})
-
-	// LET seq FINISH PRODUCING before the next command.
+	awaitPtyReady(t, s, h)
+	// THE MARKER IS HOW "seq FINISHED" IS KNOWN, and a quiet heuristic is not.
 	//
 	// The 64-byte window deliberately leaves most of seq's output unread — that is the
-	// point of the test — but the WRITER is still going when this call returns. Sending
-	// the next command immediately made the two interleave differently on a CI runner
-	// than on a workstation, and the assertion below then saw "1\n2\n3" in the second
-	// body because seq was still writing it, not because run replayed anything.
+	// point of the test — but the WRITER is still going when this call returns. The wait
+	// used to be "the buffer has not grown for 50ms", which a chunked writer satisfies in
+	// the middle of its own output: the second body then carried seq's remaining lines,
+	// and this test reported them as a replay. A marker printed AFTER seq is an end, not a
+	// pause.
+	// TWO THINGS HAVE TO TRAVEL AS THE VALUE, and both are about the marker meaning what
+	// it says.
 	//
-	// Waiting for the shell to go quiet (not for it to exit — it is a pty and stays
-	// up) is what separates "unread tail exists" from "output is still arriving".
-	shellID := shellIDFromHandle(t, s, h)
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		before := s.sessMgr.GetChildShell(shellID).BufferLen()
-		time.Sleep(50 * time.Millisecond)
-		if s.sessMgr.GetChildShell(shellID).BufferLen() == before {
-			break // the producer stopped adding bytes
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("seq never stopped writing")
-		}
-	}
+	// The `;` is the DSL's statement separator, so the same text written into cmd is two
+	// statements and the second is not a directive.
+	//
+	// And the marker is BUILT by the command (`seq-finished-$(echo marker)`) rather than
+	// written in it: a wait that greps the transcript for a literal string matches the
+	// ECHO of the line that contains it, which returns before the command has run — the
+	// wait would then be measuring nothing, which is how this test spent a while passing
+	// for the wrong reason.
+	termText(t, s, map[string]any{
+		"cmd":         "run " + h + " $1",
+		"args":        []any{"seq 1 60; echo seq-finished-$(echo marker)"},
+		"timeout":     float64(2),
+		"bytes_limit": float64(64),
+	})
+	waitForContent(t, s, h, "seq-finished-marker")
 
 	second := termText(t, s, map[string]any{"cmd": "run " + h + " echo SECOND", "timeout": float64(2)})
 	if !strings.Contains(second, "SECOND") {
@@ -1156,6 +1160,59 @@ func openPipe(t *testing.T, s *Server, argv string) string {
 		t.Fatalf("connect --argv %s failed:\n%s", argv, text)
 	}
 	return handleFrom(t, text)
+}
+
+// awaitPtyReady types a marker into a fresh pty and waits for it to come back.
+//
+// THE ROUND TRIP IS THE ONLY RELIABLE READINESS SIGNAL, which is why this is a test
+// helper and not something the open does: it writes a line into the transcript, and a
+// caller's transcript is not the server's to write into. `open` waits for the shell's
+// first byte, which is a heuristic with a ceiling — a themed PowerShell draws its banner
+// over more than a second, and its line editor installs at the end of that, so input
+// arriving in between is discarded (issue #156, and the open-half of #162 S1).
+//
+// A test that types immediately and then asserts on the output is testing the cursor, or
+// the fold, or the still-running header — not the shell's startup — so it establishes the
+// precondition first. Waiting for the stream to go quiet does NOT establish it: startup
+// pauses for longer than any affordable quiet threshold, measured.
+func awaitPtyReady(t *testing.T, s *Server, handle string) {
+	t.Helper()
+	marker := "pty-ready-probe"
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		// THE MARKER IS BUILT BY THE SHELL, not written in the line: a probe that greps
+		// the transcript for a literal matches the ECHO of the line containing it, so it
+		// reports "ready" for a shell that discarded the input entirely — which is the
+		// exact failure this probe exists to rule out.
+		termText(t, s, map[string]any{
+			"cmd":     "run " + handle + " $1",
+			"args":    []any{"echo pty-ready-$(echo probe)"},
+			"timeout": 3,
+		})
+		if strings.Contains(termText(t, s, map[string]any{"cmd": "read " + handle + " --from-line 1", "timeout": 0}), marker) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the pty never accepted a line: %s is not reading", handle)
+		}
+	}
+}
+
+// noisyCommand is a command that keeps printing for several seconds, in the syntax of
+// whichever shell a pty open actually gives us.
+//
+// IT HAS TO BE THE RIGHT SYNTAX, and two tests typed bash's. On Windows the pty runs
+// PowerShell, which answers `for i in 1 2 3; do …` with a ParserError — and both tests
+// still passed, because they looked for their marker with strings.Contains over the whole
+// reply, and the ECHO of the typed line contains the marker too. So the loop never ran and
+// nothing said so: an assertion that was matching the command instead of its output. The
+// number is printed with each line (`tick 3`), which the command text cannot contain, so a
+// caller's assertion can only be satisfied by output.
+func noisyCommand(marker string) string {
+	if runtime.GOOS == "windows" {
+		return "1..40 | ForEach-Object { '" + marker + " ' + $_; Start-Sleep -Milliseconds 200 }"
+	}
+	return "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo " + marker + " $i; sleep 0.2; done"
 }
 
 // openPty starts a pty channel (a login shell) and returns its handle.

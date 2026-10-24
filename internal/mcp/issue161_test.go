@@ -48,16 +48,19 @@ func TestAWindowThatRanOutSaysSo(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
+	awaitPtyReady(t, s, h)
 
 	// A command that keeps printing for longer than the window: the stream never goes
 	// quiet, so the wait can only end because the deadline arrived.
-	long := "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo tick $i; sleep 0.2; done"
+	long := noisyCommand("tick")
 	got := termText(t, s, map[string]any{
 		"cmd":     "run " + h + " $1",
 		"args":    []any{long},
 		"timeout": 1,
 	})
-	if !strings.Contains(got, "tick") {
+	// "tick 1", not "tick": the second is in the echo of the command line, so a reply
+	// carrying nothing but the echoed line and a parse error used to satisfy it.
+	if !strings.Contains(got, "tick 1") {
 		t.Fatalf("the window should have caught some output:\n%s", got)
 	}
 	if !strings.Contains(got, "Still-Running: true") {

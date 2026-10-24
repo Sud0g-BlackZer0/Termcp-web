@@ -22,9 +22,10 @@ func TestAFullWindowEndsTheWait(t *testing.T) {
 	s := newTestServer(t)
 	h := openPty(t, s)
 	defer termText(t, s, map[string]any{"cmd": "close " + h})
+	awaitPtyReady(t, s, h)
 
 	// Prints steadily for longer than the window: never quiet, never done.
-	noisy := "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo line $i; sleep 0.2; done"
+	noisy := noisyCommand("line")
 	start := time.Now()
 	got := termText(t, s, map[string]any{
 		"cmd":         "run " + h + " $1",
@@ -34,8 +35,12 @@ func TestAFullWindowEndsTheWait(t *testing.T) {
 	})
 	elapsed := time.Since(start)
 
-	if !strings.Contains(got, "line") {
-		t.Fatalf("the peek should have caught output:\n%s", got)
+	// THE WINDOW FILLED, which is what a 200-byte peek promises. Asserting a particular
+	// line cannot work here and never could: 200 bytes is the echo of this command plus a
+	// few bytes, and the marker that used to stand in for this ("the reply contains
+	// `line`") was satisfied by the echo itself.
+	if replyBody(got) == "" {
+		t.Fatalf("the peek returned nothing:\n%s", got)
 	}
 	// 200 bytes fills in well under a second; 10s is the caller's window, not a target.
 	if elapsed > 3*time.Second {
