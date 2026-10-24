@@ -617,10 +617,17 @@ func windowResult(w transcript.Window, src *transcript.Source) map[string]any {
 		"end_offset":         w.End,
 		"total_bytes":        w.Total,
 		"partial_tail_bytes": w.PartialTail,
-		"source":             src.SourceName(),
-		"session_id":         src.SessID,
-		"shell_id":           src.ShellID,
-		"session_status":     string(src.Status),
+		// Non-zero only when the window was rolled back to avoid ending inside a
+		// character. The bytes are still in the stream (the window stops before them),
+		// so this is a count, not a loss.
+		"trimmed_bytes": w.Trimmed,
+		// Bytes inside the range that a stream filter passed over. Non-zero means the
+		// cursor moved past bytes this reply did not show.
+		"stream_omitted_bytes": w.StreamOmitted,
+		"source":               src.SourceName(),
+		"session_id":           src.SessID,
+		"shell_id":             src.ShellID,
+		"session_status":       string(src.Status),
 	}
 	if w.TotalLines > 0 {
 		result["total_lines"] = w.TotalLines

@@ -813,7 +813,7 @@ func (s *Server) directiveRead(ctx context.Context, stmt directive.Statement, wi
 
 // directiveReadOne reads one channel.
 func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	// bytes_limit 0 means "hand back the handle, consume nothing". readSlotAfter
+	// bytes_limit 0 means "hand back the channel, consume nothing". readSlotAfter
 	// honours it; this path has to as well, or the one directive whose whole point
 	// is reading would be the one place the caller cannot decline to read.
 	// The offset is the stream's current end, so the reply still says where the
@@ -881,7 +881,7 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 // `timeout` bounds both and defaults to two seconds.
 func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, win termArgs, start int64) envelope.Slot {
 	args := argsOf("shell_id", stmt.Target, "offset", float64(start))
-	// A byte limit of 0 means "hand back the handle, consume nothing": the
+	// A byte limit of 0 means "hand back the channel, consume nothing": the
 	// directive must not even read, or a JSON-RPC frame destined for `mcp recv`
 	// would be eaten by the envelope.
 	if win.BytesLimit == 0 {
@@ -912,7 +912,67 @@ func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, wi
 		}
 		slot.Headers["Still-Running"] = "true"
 	}
+	// A WINDOW I SHOWED IS A WINDOW I READ. The read above is positional (it names an
+	// offset), and a positional read moves no cursor — so `read <channel>`'s documented
+	// default, "the new bytes since the last read", was false for the flow callers
+	// actually use: after three `run`s the first plain read replayed the channel from
+	// byte zero (issue #162, S2). The caller had seen those bytes; the cursor had not.
+	//
+	// Only when bytes were actually handed over: `fold` and `bytes_limit: 0` reply
+	// without showing anything, and advancing past bytes the caller never saw would
+	// turn a withheld window into a skipped one.
+	if slot.Code < 400 && slot.Body != "" {
+		if end, ok := envelope.RangeEnd(slot.Headers["Content-Range"]); ok {
+			if cs, bad := s.requireShell(stmt.Target); bad == nil {
+				cs.AdvanceDefaultReader(end)
+			}
+		}
+	}
 	return slot
+}
+
+// humanTyped reports whether bytes entered this channel through the non-MCP entrance
+// since start.
+//
+// THIS IS THE ONE FACT ABOUT "WHO IS ON THE OTHER END" THAT TERMCP ACTUALLY HAS.
+// The tempting question — "is something in the foreground waiting for input?" — cannot
+// be answered from here (the process group lives on the far side of the SSH connection,
+// and a Windows terminal has no such notion), and guessing it from the byte stream is
+// impossible: a program blocked at a prompt and a finished command are byte-identical.
+//
+// But the transcript already records who typed. Every input span carries a status —
+// `i` the HTTP/WebSocket surface, `a` an agent through MCP — because the log has to be
+// replayable and auditable. So "someone else is writing here" is a recorded fact, not an
+// inference, and a caller about to type into a shared channel deserves to know first.
+//
+// The value reported is therefore the entrance (`api`), not a guess about who is behind
+// it: a browser and a script driving /api/term are the same status in the log, and
+// claiming "human" for both would be wrong for one of them.
+//
+// The question asked is "at or after the start of this window", and the answer comes from
+// the store's sparse seek table (MarksWindow) rather than the whole index: a reader that
+// needs one screen of a long log should not pay for the log.
+func (s *Server) humanTyped(handle string, start, end int64) bool {
+	cs, bad := s.requireShell(handle)
+	if bad != nil {
+		return false
+	}
+	if end < start {
+		end = start
+	}
+	marks, _, err := s.sessMgr.MarksWindow(cs.ParentSessionID(), cs.ID, start, end)
+	if err != nil {
+		return false
+	}
+	for _, m := range marks {
+		if m.Offset < start {
+			continue
+		}
+		if m.Status == api.LogAPIInput {
+			return true
+		}
+	}
+	return false
 }
 
 // ptyRunning reports whether the handle is a live pty channel. The handle may
@@ -977,18 +1037,30 @@ func (s *Server) awaitWindow(ctx context.Context, handle string, win termArgs, s
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-ticker.C:
 		}
 		now, ok := s.outputSizeFor(handle)
 		if !ok {
 			// The channel went away under the wait; the read that follows reports it
 			// in the caller's own vocabulary instead of "nothing arrived".
-			return
+			return false
 		}
 		switch {
 		case now != last:
 			last, still = now, time.Time{}
+			// THE REPLY CANNOT GROW, SO WAITING BUYS NOTHING.
+			//
+			// The space window is a limit on how much enters the caller's context, so once
+			// the byte window is full every further byte is discarded: the wait would sit
+			// there for the rest of the window to collect output the reply cannot carry.
+			// A noisy command (a scan, a brute force) never goes quiet, so this was the
+			// only thing that could end the wait early — the reporting caller's 320s
+			// window over a command that filled the reply in its first second is exactly
+			// this case (issue #161, P1-3).
+			if win.BytesLimit > 0 && now-start >= int64(win.BytesLimit) {
+				return true
+			}
 		case now <= start:
 			// Nothing has been said yet. Silence before the first byte is not
 			// completion, it is a command that has not started talking; only the
@@ -997,7 +1069,7 @@ func (s *Server) awaitWindow(ctx context.Context, handle string, win termArgs, s
 			if still.IsZero() {
 				still = time.Now()
 			} else if time.Since(still) >= ptyQuiet {
-				return
+				return false
 			}
 		}
 		if !time.Now().Before(deadline) {
@@ -1084,7 +1156,14 @@ func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win ter
 	if !ok {
 		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
 	}
-	return s.windowSlot(stmt, win, doc, time.Since(started))
+	// WAITED IS THE WHOLE CALL, not just this read.
+	//
+	// The header exists to tell "I waited and heard nothing" from "I did not wait" —
+	// the distinction that keeps an empty reply from looking like a broken channel. It
+	// was measured from the READ, so the wait before it (where the window is actually
+	// spent) was missing: a call that sat on a 1s window answered `Waited: 0ms`, and the
+	// reporting caller read that as "the window never happened" (issue #161, P1-3).
+	return s.windowSlot(stmt, win, doc, waited+time.Since(started))
 }
 
 // remaining is the part of the caller's window that the wait did not spend.
@@ -1112,6 +1191,82 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 	total := int64(getFloatAny(doc, "total_bytes", 0))
 	body := getString(doc, "output", "")
 	headers := map[string]string{"Path": stmt.Path}
+
+	// A WINDOW THAT ROLLED BACK SAYS SO.
+	//
+	// The rule is that a window never ends inside a character, so the bytes that would
+	// have been cut are withheld and the next read delivers them whole. That is lossless
+	// and the Content-Range already says where the window stopped — but "I got fewer
+	// bytes than bytes_limit" and "a character straddled the end" are the same bytes on
+	// the wire, and a caller paging by its own arithmetic (offset += bytes_limit) would
+	// skip the withheld bytes and then land INSIDE a character on the next read, where
+	// the reply is a 400 naming a charset the session does not write. One header turns
+	// that into a fact the caller can act on.
+	if n := int64(getFloatAny(doc, "trimmed_bytes", 0)); n > 0 {
+		// TWO CASES, because the remedy differs and only one of them has one.
+		//
+		// Mid-stream, the withheld bytes are simply early: the next read starts at them
+		// and gets them whole. At the END of the stream there is no next read that can
+		// complete them — they are a fragment of a character that the writer never
+		// finished — so promising "read --cursor A continues there" would send the caller
+		// into a loop that returns nothing forever. Say which one it is.
+		//
+		// Both are said in terms of the CHARSET, because that is what decided the cut:
+		// the boundary came from the encoding, not from the size limit the caller passed.
+		if end+n >= total {
+			headers["Trimmed"] = fmt.Sprintf("bytes %d-%d withheld: they are the end of the stream and do not form a character in this encoding, so no read returns them as text",
+				end, end+n-1)
+		} else {
+			headers["Trimmed"] = fmt.Sprintf("bytes %d-%d withheld: the window end fell inside a character in this encoding; read --cursor %d continues there",
+				end, end+n-1, end)
+		}
+	}
+
+	// A FILTERED READ SAYS WHAT IT PASSED OVER.
+	//
+	// `--stream o` answers "stdout only" by selecting a subset of the span the window
+	// covers, and the span still runs to End — the cursor has to move by the range, or a
+	// poll loop would re-read the same bytes forever. So the bytes of the other stream
+	// leave the caller's cursor without ever being shown, and nothing used to say so.
+	// The worst case was not a partial body: `--stream e` on a stdout-only channel
+	// answered 200 with an EMPTY body and `Content-Range: bytes 0-7/8` — "eight bytes
+	// here" and zero delivered — and the plain read that followed returned 204, so eight
+	// bytes of output were consumed by a reply that displayed nothing at all.
+	//
+	// The count and the flag that shows them turn that into a fact the caller can act on.
+	// It is deliberately NOT a refusal and NOT a rewind: the caller asked for a view, and
+	// the bytes are still in the channel for whoever asks for the other view.
+	if n := int64(getFloatAny(doc, "stream_omitted_bytes", 0)); n > 0 {
+		// The stream is a flag on the statement, not a window parameter: the filter runs
+		// inside the read, and only the statement knows which side was asked for.
+		want, _ := stmt.Flag("stream")
+		other := "e"
+		if want == "e" {
+			other = "o"
+		}
+		headers["Omitted"] = fmt.Sprintf("%d bytes in this range are not in stream %s and went past unseen; read --stream %s (or --stream all) shows them, and --offset reaches back",
+			n, want, other)
+	}
+
+	// WHO ELSE IS TYPING. The reply can say that a person wrote into this channel,
+	// because the transcript records the source of every input span (`i` human through
+	// the HTTP/WebSocket surface, `a` an agent through MCP) — the log has to be
+	// replayable, so the attribution is a recorded fact rather than an inference. It is
+	// the one part of "this channel's state is not mine alone" that termcp can prove: a
+	// program blocked at a prompt and a finished command are byte-identical, so the
+	// foreground question is unanswerable here, but "a human typed" is in the index.
+	//
+	// Only when it is at or after this window's start: a person who typed before the
+	// bytes being shown is history the caller has already accounted for.
+	if s.humanTyped(stmt.Target, start, total) {
+		// "api", NOT "human". The transcript records which ENTRANCE the bytes came
+		// through (`i` the HTTP/WebSocket surface, `a` MCP), and the HTTP surface is used
+		// by a person in a browser AND by any script that drives /api/term directly. An
+		// agent calling the REST entrance was being told "a human typed" about its own
+		// command — the header has to name the fact termcp holds, not the one it is
+		// guessing at.
+		headers["Typed-By"] = "api"
+	}
 
 	// THE HANDLER ALREADY APPLIED THE LIMITS, so this pass must decide from
 	// has_more, not from the body's size.

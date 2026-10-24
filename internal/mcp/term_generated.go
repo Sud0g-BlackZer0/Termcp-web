@@ -117,7 +117,8 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 	// A generated reply is capped by the same window as a byte stream: a listing is
 	// exactly as capable of flooding a context as a log is, and the directives with
 	// no stream to continue are the ones with no other protection.
-	body, code := capGenerated(body, win)
+	body, code, cut := capGeneratedCounted(body, win)
+	noteTruncated(headers, cut, win)
 	return envelope.Slot{Code: code, Headers: headers, Body: body}
 }
 
@@ -160,8 +161,10 @@ func (s *Server) directiveInfo(ctx context.Context, stmt directive.Statement, wi
 		writeKV(&b, "shell", fmt.Sprintf("%s %s %s %s",
 			handleOf(info.ID, sh.Index), sh.Status, dash(string(sh.Mode)), dash(sh.Name)))
 	}
-	body, code := capGenerated(b.String(), win)
-	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: body}
+	body, code, cut := capGeneratedCounted(b.String(), win)
+	headers := map[string]string{"Path": stmt.Path}
+	noteTruncated(headers, cut, win)
+	return envelope.Slot{Code: code, Headers: headers, Body: body}
 }
 
 // channelSlot renders one channel's own state.
@@ -194,8 +197,10 @@ func (s *Server) channelSlot(stmt directive.Statement, win termArgs, cs *session
 	}
 	writeKV(&b, "bytes", fmt.Sprint(cs.BufferLen()))
 	writeKV(&b, "created", ageOf(info.CreatedAt))
-	body, code := capGenerated(b.String(), win)
-	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: body}
+	body, code, cut := capGeneratedCounted(b.String(), win)
+	headers := map[string]string{"Path": stmt.Path}
+	noteTruncated(headers, cut, win)
+	return envelope.Slot{Code: code, Headers: headers, Body: body}
 }
 
 // channelSummary names the channels a session does have, for a 404 that has to say
@@ -475,7 +480,9 @@ func (s *Server) directiveSpan(ctx context.Context, stmt directive.Statement, wi
 			int64(getFloatAny(span, "from_line", 0)), int64(getFloatAny(span, "to_line", 0)),
 			lineStartCell))
 	}
-	return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: b.String()}
+	// One line per span, and a busy channel has thousands of them: this is the reply
+	// most able to flood a context, so it obeys the same window as everything else.
+	return generatedSlot(stmt, win, b.String())
 }
 
 // directiveReader registers or drops an output reader.
@@ -494,7 +501,7 @@ func (s *Server) directiveReader(ctx context.Context, stmt directive.Statement, 
 	case directive.FlagAbsent:
 		// fall through to register below
 	case directive.FlagNoValue:
-		return badRequest(stmt, "reader --drop needs a reader id: `reader <handle> --drop <id>`")
+		return badRequest(stmt, "reader --drop needs a reader id: `reader <channel> --drop <id>`")
 	default:
 		v, _ := stmt.Flag("drop")
 		readerID, err := flagNumber(v)
@@ -887,7 +894,12 @@ func (s *Server) directiveHost(ctx context.Context, stmt directive.Statement, wi
 	if action == "list" {
 		// The profile listing is a set of names, one per line: copy-pasteable into
 		// the next `pty`/`pipe`.
-		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: listFromDoc(res, "ssh_configs", "name")}
+		//
+		// THROUGH THE WINDOW, like every other generated reply. It used to build its own
+		// slot, so `bytes_limit: 60` on a six-entry table answered 200 with the whole
+		// thing: a parameter accepted and then not applied, which is the same failure as
+		// a flag with no effect.
+		return generatedSlot(stmt, win, listFromDoc(res, "ssh_configs", "name"))
 	}
 	doc, _ := toolResultMap(res)
 	return generatedSlot(stmt, win, compactDocument(doc))
@@ -980,8 +992,9 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	}
 	if action == "list" {
 		// The boot manifest: one extension per line, with its state and handle, so
-		// a caller that lost its context gets its toolset back in one call.
-		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: s.extensionListing(res)}
+		// a caller that lost its context gets its toolset back in one call. Capped like
+		// the rest: a host with twenty installed extensions is a reply, not a receipt.
+		return generatedSlot(stmt, win, s.extensionListing(res))
 	}
 	doc, _ := toolResultMap(res)
 	return generatedSlot(stmt, win, compactDocument(doc))
@@ -1100,16 +1113,20 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 			// reads once it has decided to produce the thing.
 			body += "\n" + op.Detail + "\n"
 		}
-		capped, code := capGenerated(body, win)
-		return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: capped}
+		capped, code, cut := capGeneratedCounted(body, win)
+		headers := map[string]string{"Path": stmt.Path}
+		noteTruncated(headers, cut, win)
+		return envelope.Slot{Code: code, Headers: headers, Body: capped}
 	}
 	var b strings.Builder
 	for _, op := range directive.Ops() {
 		b.WriteString(op.Usage)
 		b.WriteByte('\n')
 	}
-	capped, code := capGenerated(b.String(), win)
-	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: capped}
+	capped, code, cut := capGeneratedCounted(b.String(), win)
+	headers := map[string]string{"Path": stmt.Path}
+	noteTruncated(headers, cut, win)
+	return envelope.Slot{Code: code, Headers: headers, Body: capped}
 }
 
 // termGuide is the empty-call answer: where am I, what can I do, and what is here.
@@ -1130,8 +1147,14 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	// grammar arrives; everything below is for the second visit.
 	b.WriteString("SHORTEST PATH — `run` does the whole loop, one call:\n")
 	b.WriteString("  ls host                      what is there (local and ssh, in columns)\n")
-	b.WriteString("  connect <host>               opens a channel, answers its handle (a1f3:1)\n")
+	b.WriteString("  connect <host>               opens a channel, answers its channel (a1f3:1)\n")
 	b.WriteString("  run a1f3:1 $1                types the line, presses Enter, reads what came back\n")
+	// THE ONE LINE THAT PREVENTS THE WHOLE CLASS OF `run` MISREADING: the bytes go to
+	// whoever owns the channel's input, not to a queue. A caller that thinks it is
+	// submitting a job reads an eaten command as a successful one.
+	b.WriteString("                               into the TERMINAL: whoever owns the input reads it\n")
+	b.WriteString("                               (a program waiting for an answer TAKES your line).\n")
+	b.WriteString("                               `help run` has what that means for the reply.\n")
 	b.WriteString("  args: [\"make && test\"]\n")
 	b.WriteString("  input/key/read are the same three steps taken separately, for a TUI or a\n")
 	b.WriteString("  long-running command you want to watch between calls.\n\n")
@@ -1159,13 +1182,30 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	b.WriteString("           session's network, so localhost means the host's localhost.\n")
 	b.WriteString("  Copy addresses from `ls`; never spell one.\n\n")
 
-	b.WriteString("TWO CENTRES:\n")
-	b.WriteString("  ls ext  CAPABILITY HUB — start here. Lists resident, capability-trimmed\n")
-	b.WriteString("          extensions: mcp servers, skills (read-only SFTP), prompts.\n")
-	b.WriteString("          Notes inside an extension are its operating manual.\n")
-	b.WriteString("  ls      SSH STATE & LIFECYCLE — every link, channel, forward and peer.\n")
-	b.WriteString("          Pass learn_mode:true and it expands the verbs that take the\n")
-	b.WriteString("          addresses it just printed.\n\n")
+	// THE POINTER IS CONDITIONAL, and that is the fix a first-time caller asked for:
+	// the guide used to open this section with "`ls ext` CAPABILITY HUB — start here",
+	// so the loudest instruction in the whole reply led to "(no extensions installed)"
+	// on an instance that has none. A recommendation that reads as "start here" has to
+	// be true on the instance answering, and this function already looks up live state
+	// (the `ls` block below), so it can look this up too.
+	ext := s.directiveExtension(ctx, directive.Statement{Op: "ls", Kind: "ext", Target: "ext", Path: "ls ext"}, win)
+	if ext.Code >= 200 && ext.Code < 300 && !strings.Contains(ext.Body, "no extensions") {
+		b.WriteString("TWO CENTRES:\n")
+		b.WriteString("  ls ext  CAPABILITY HUB — start here. Lists resident, capability-trimmed\n")
+		b.WriteString("          extensions: mcp servers, skills (read-only SFTP), prompts.\n")
+		b.WriteString("          Notes inside an extension are its operating manual.\n")
+		b.WriteString("  ls      SSH STATE & LIFECYCLE — every link, channel, forward and peer.\n")
+		b.WriteString("          Pass learn_mode:true and it expands the verbs that take the\n")
+		b.WriteString("          addresses it just printed.\n\n")
+	} else {
+		b.WriteString("WHERE TO LOOK:\n")
+		b.WriteString("  ls host  every saved connection target.\n")
+		b.WriteString("  ls       SSH STATE & LIFECYCLE — every link, channel, forward and peer.\n")
+		b.WriteString("           Pass learn_mode:true and it expands the verbs that take the\n")
+		b.WriteString("           addresses it just printed.\n")
+		b.WriteString("  ls ext   extensions (mcp servers, skills, prompts). None are installed\n")
+		b.WriteString("           on this instance, so there is nothing to start with there.\n\n")
+	}
 
 	b.WriteString("ACTIONS:\n")
 	for _, op := range directive.Ops() {
@@ -1189,8 +1229,10 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 			b.WriteString("  " + line + "\n")
 		}
 	}
-	body, code := capGenerated(b.String(), win)
-	return termReply{win: win, slots: []envelope.Slot{{Code: code, Body: body}}}
+	body, code, cut := capGeneratedCounted(b.String(), win)
+	headers := map[string]string{}
+	noteTruncated(headers, cut, win)
+	return termReply{win: win, slots: []envelope.Slot{{Code: code, Headers: headers, Body: body}}}
 }
 
 // usageLinesNaming returns every usage line that names word as a word, or "".
@@ -1456,28 +1498,67 @@ func (s *Server) addressOf(sessionID, shellID string) string {
 // generatedSlot renders a generated body through the caller's window: the same
 // three axes that bound a stream bound a listing or a document.
 func generatedSlot(stmt directive.Statement, win termArgs, body string) envelope.Slot {
-	capped, code := capGenerated(body, win)
-	return envelope.Slot{Code: code, Headers: map[string]string{"Path": stmt.Path}, Body: capped}
+	capped, code, cut := capGeneratedCounted(body, win)
+	headers := map[string]string{"Path": stmt.Path}
+	noteTruncated(headers, cut, win)
+	return envelope.Slot{Code: code, Headers: headers, Body: capped}
+}
+
+// noteTruncated adds the header a cut generated reply carries, and nothing when
+// nothing was cut: a header that is always present is a header nobody reads.
+func noteTruncated(headers map[string]string, cut int, win termArgs) {
+	if cut <= 0 {
+		return
+	}
+	headers["Truncated"] = fmt.Sprintf("%d bytes withheld by this call's window (bytes_limit %d, lines_limit %d); raise the window to see the rest — a generated reply has no cursor to continue from",
+		cut, win.BytesLimit, win.LinesLimit)
 }
 
 func capGenerated(body string, win termArgs) (string, int) {
+	capped, code, _ := capGeneratedCounted(body, win)
+	return capped, code
+}
+
+// capGeneratedCounted is capGenerated plus HOW MUCH IT TOOK, because a listing cut by
+// the caller's own byte window used to be indistinguishable from a complete one.
+//
+// A generated reply has no stream, so there is no cursor to page it with and no
+// Content-Range to say where it stopped: `ls host` under `bytes_limit: 60` answered 200
+// with three of six entries, and the only hint was that the reply was shorter than the
+// limit — which a caller reading a table it has never seen cannot notice. The count is
+// what a header can be built from.
+//
+// The unit is bytes, not entries: a fold ("too big, ask for less") withholds the whole
+// body, and reporting a count there would suggest a partial answer that does not exist.
+// foldOrTruncate already appends its own notice to a truncated body; this number is for
+// the reply's headers, which is where a caller looks before reading the body at all.
+func capGeneratedCounted(body string, win termArgs) (string, int, int) {
 	if win.BytesLimit == 0 {
 		// The schema's zero-byte window: streamed replies hand back a handle and
 		// consume nothing; a generated reply has no stream, so it is simply empty.
-		return "", 204
+		return "", 204, 0
 	}
 	code := 200
+	cut := 0
 	if win.BytesLimit > 0 && len(body) > win.BytesLimit {
+		before := len(body)
 		body = foldOrTruncate(body, win.BytesLimit, win.OnBytesOverflow)
 		code = 206
+		if len(body) < before {
+			cut = before - len(body)
+		}
 	}
 	if win.LinesLimit > 0 {
 		if lines := strings.Count(body, "\n"); lines > win.LinesLimit {
+			before := len(body)
 			body = foldOrTruncateLines(body, win.LinesLimit, win.OnLinesOverflow)
 			code = 206
+			if len(body) < before {
+				cut += before - len(body)
+			}
 		}
 	}
-	return body, code
+	return body, code, cut
 }
 
 // setFlagString copies a string flag into a handler argument.

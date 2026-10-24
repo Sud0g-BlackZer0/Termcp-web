@@ -35,7 +35,6 @@ func TestWindowArgumentTypesAreRefused(t *testing.T) {
 		{"bytes_limit string", map[string]any{"bytes_limit": "many"}, "bytes_limit must be a number"},
 		{"lines_limit array", map[string]any{"lines_limit": []any{1}}, "lines_limit must be a number"},
 		{"learn_mode string", map[string]any{"learn_mode": "yes"}, "learn_mode must be true or false"},
-		{"pipe_to number", map[string]any{"pipe_to": 3}, "pipe_to must be a string"},
 		{"overflow typo", map[string]any{"on_bytes_overflow": "trunc"}, "must be one of truncate, fold"},
 		{"overflow wrong type", map[string]any{"on_time_overflow": 1}, "must be a string"},
 	}
@@ -57,6 +56,13 @@ func TestWindowArgumentTypesAreRefused(t *testing.T) {
 }
 
 // Out-of-range numbers are refused with the bound, not clamped.
+//
+// THE BOUNDS THAT ARE LEFT ARE THE ONES THAT BREAK SOMETHING. A timeout above the cap
+// loses the reply to the transport in front of the caller, and a window narrower than one
+// character can never return one — those are refused. The space recommendations
+// (bytes_limit above 32 KiB, a longer tail, a bigger reply budget) are NOT refused: the
+// caller pays for what lands in its own context, so the reply is its call to make, and the
+// numbers are published as sizes to stay under (TestTheSchemaSaysWhichWindowSizesAreRecommended).
 func TestWindowArgumentBoundsAreRefused(t *testing.T) {
 	s := newTestServer(t)
 	cases := []struct {
@@ -64,10 +70,13 @@ func TestWindowArgumentBoundsAreRefused(t *testing.T) {
 		want string
 	}{
 		{map[string]any{"timeout": -1}, "timeout must be >= 0"},
-		{map[string]any{"timeout": 99999}, "timeout must be <= 3600"},
+		{map[string]any{"timeout": 99999}, "timeout must be <= 60"},
 		{map[string]any{"bytes_limit": -5}, "bytes_limit must be >= 0"},
 		{map[string]any{"lines_limit": -5}, "lines_limit must be >= 0"},
 		{map[string]any{"total_bytes_limit": 0}, "total_bytes_limit must be >= 1"},
+		// The floor, not a ceiling: a window too small to hold one character withholds the
+		// same bytes on every call and advances nothing.
+		{map[string]any{"bytes_limit": 2}, "smaller than one character"},
 	}
 	for _, tc := range cases {
 		args := map[string]any{"cmd": "ls"}
@@ -78,6 +87,37 @@ func TestWindowArgumentBoundsAreRefused(t *testing.T) {
 		if !strings.Contains(got, "400") || !strings.Contains(got, tc.want) {
 			t.Errorf("%v must be refused with %q:\n%s", tc.args, tc.want, got)
 		}
+	}
+}
+
+// TestTheSchemaSaysWhichWindowSizesAreRecommended is where the hint lives.
+//
+// A size that is not enforced has to be stated, or it is not a hint — it is a number in a
+// comment. The caller reads the argument description before choosing, so the recommendation
+// belongs there, in the words that say what it is for.
+func TestTheSchemaSaysWhichWindowSizesAreRecommended(t *testing.T) {
+	for name, want := range map[string]string{
+		"bytes_limit":       "stay under",
+		"lines_limit":       "stay under",
+		"total_bytes_limit": "stay under",
+	} {
+		decl, ok := termArgDeclFor(name)
+		if !ok {
+			t.Fatalf("no declaration for %s", name)
+		}
+		if !strings.Contains(decl.DocNote, want) {
+			t.Errorf("%s does not say it is a size to %q: %s", name, want, decl.DocNote)
+		}
+	}
+	// And the text the model actually reads is rendered from the same declaration, so a
+	// recommendation that lived only in this struct would never reach a caller.
+	var rendered strings.Builder
+	for _, d := range termArgDecls {
+		rendered.WriteString(d.Desc)
+		rendered.WriteString(d.DocNote)
+	}
+	if !strings.Contains(rendered.String(), "stay under") {
+		t.Error("the rendered schema text does not carry the recommendation")
 	}
 }
 

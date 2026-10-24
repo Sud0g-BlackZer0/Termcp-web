@@ -368,7 +368,7 @@ func TestURLTemplateAvailableWithoutAnExternalBinary(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
-			out, _, _, err := shell.ReadTerminalStream(context.Background(), reader, time.Second, true, 0, 0)
+			out, _, _, err := shell.ReadTerminalStream(context.Background(), reader, time.Second, true, 0, 0, nil)
 			if err == nil && strings.Contains(out, id) {
 				return out
 			}
