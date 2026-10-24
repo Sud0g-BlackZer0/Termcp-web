@@ -28,6 +28,7 @@ package directive
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -524,7 +525,21 @@ read <session> <index> --from-line <line> starts exactly there, while --cursor o
 range start lands mid-line.
 
 status: o output (the shell's own bytes), a AI input, i human input, q approval
-asked, A approved input. i/q mean a person operated; a means the agent did.`
+asked, A approved input. i/q mean a person operated; a means the agent did.
+
+THIS IS THE RECORD OF WHO PUT WHICH BYTES HERE. Every span carries the moment it
+began, its byte range, its line range, where that line starts, and the status
+above — so the span directive answers "who typed this, and when" for the whole life
+of the channel, including the parts you have already read past. It is the only
+answer to that question termcp has: the foreground process cannot be seen from
+here (that process group lives on the far side of the SSH connection, and a
+Windows terminal has no such notion), but the source of every input line is
+recorded because the transcript has to be replayable.
+
+A session SHARED WITH A HUMAN is normal, not an anomaly: a person can type into
+the same channel between your calls, from the Web UI, at any time. Read the index
+when "whose state is this?" matters; run and read also lift the same fact into a
+Typed-By: api header for the window they just returned.`
 
 const notifyDetail = `Toasts + a system notification on every open Web UI page; --on highlights that
 session's card. Call it BEFORE asking the human for anything — password, sudo,
@@ -558,11 +573,34 @@ closed one alike. --stream o keeps stdout only, e keeps stderr only; the default
 keeps both. --cursor N is a byte offset (end+1 from Content-Range), --from-line N
 a complete line, --tail N the last N lines.
 
+Typed-By: api ON A REPLY says bytes entered this channel at or after the start of
+the window you were just shown through the HTTP/WebSocket surface — a person in a
+browser, or any script driving that entrance. The transcript records the ENTRANCE
+of every input span (i that surface, a MCP) because it has to be replayable, and
+the value names the entrance rather than guessing who was behind it: an agent
+calling /api/term directly gets the same status as a person in the browser, so
+"human" would be a claim the log does not support. See help span for the index.
+
+IT IS NOT A CLEANLINESS GUARANTEE, and it must not be read as one. Something else
+may write to this channel at any time, and nothing makes it announce itself: the
+header can only ever ADD a fact, never certify that the channel is yours alone.
+Absence means only "no non-MCP input line starts at or after that offset" — a line
+someone is still typing is not in the index yet, because a span begins when a line
+is submitted.
+
 READ IS A CURSOR. A plain read CONSUMES what it returns: the next plain read of
 an unchanged channel is legitimately empty, which is not data loss and not an
 error. To see the whole log again, ask for it by position (--from-line 1, or
 offset 0); to peek without consuming, use bytes_limit 0 on the call (it returns
 the handle and the range it would have read).
+
+run ADVANCES THIS CURSOR TOO, and it has to: a run reply IS a read — it hands you
+the bytes the command produced — so a cursor that ignored it made the default
+above false for the most common flow there is. run; run; run; read used to replay
+the channel from byte zero, which is the whole scrollback and not "since the last
+read". run reads positionally, at the offset the command was submitted, so it
+never touched this cursor; now it moves it to the end of the window it showed
+you, and only when it showed you something (a folded window advances nothing).
 
 A CLOSED CHANNEL IS A CURSOR TOO, and it was not always: with no live reader to
 hold a position, the default read answered with the TAIL of the history — the same
@@ -578,16 +616,74 @@ matches (default 200) and the reply reports the true total when it truncates.
 --tail and lines_limit then apply to the MATCHES, so tail 5 means the last
 five matching lines.
 
---encoding NAMES THE SESSION'S CHARSET WHEN IT IS NOT UTF-8, and on a terminal
-that is not a corner case: a zh-CN Windows console writes GBK, so every path and
-every diagnostic arrives as bytes that are not UTF-8. Without the flag the read
-refuses the window (a JSON reply would replace those bytes with U+FFFD and shift
-every offset after them) and names the charset the bytes confirm by round trip.
-With it, the bytes are decoded before anything else looks at them, so --grep
-matches characters rather than byte sequences and a JSON-RPC frame from an
-extension that prints GBK is readable at all. Content-Range still counts the
-bytes in the buffer, so paging by --cursor keeps working: gbk, gb18030, cp936,
-big5, shift_jis, euc-kr, windows-1252.
+--encoding NAMES THE CHARSET THESE BYTES ARE IN, AND IT GOES ON EVERY READ. It is a
+property of the ROW, not of the channel: termcp cannot see the remote locale and
+the bytes do not say (GBK, GB18030, Big5 and shift_jis all round-trip the same
+four bytes — decoding one as another gives plausible, wrong characters), so the
+caller states it and the read then verifies it. On a terminal that is not a
+corner case: a zh-CN Windows console writes GBK, so every path and every
+diagnostic arrives as bytes that are not UTF-8. Without the flag the read refuses
+the window (a JSON reply would replace those bytes with U+FFFD and shift every
+offset after them) and names the charset the bytes confirm by round trip — so
+the flag is not needed to FIND OUT, only to say "decode it". With it the bytes are
+decoded before anything else looks at them, so --grep matches characters rather
+than byte sequences and a JSON-RPC frame from an extension that prints GBK is
+readable at all. Content-Range still counts the bytes in the buffer, so paging by
+--cursor keeps working: gbk, gb18030, cp936, big5, shift_jis, euc-kr,
+windows-1252.
+
+It also decides where a byte window may end: a window that cuts inside a
+character withholds those bytes (they stay unread, the next read delivers them
+whole) instead of handing back half a sequence — which is what made a plain
+UTF-8 session answer 400 naming shift_jis, and what made a declared-charset read
+return a replacement character with no error at all. The rule belongs to the
+charset, which is why it lives on this flag rather than on a fixed UTF-8
+assumption somewhere deeper.
+
+AND IT IS WHY A WINDOW NARROWER THAN ONE CHARACTER IS REFUSED. Withholding the
+bytes that would have been cut has no answer for a window too small to hold one
+whole character: the same bytes are withheld on every call and the cursor never
+moves, so a caller paging one byte at a time gets the same empty reply forever —
+which is exactly what "no data" looks like. bytes_limit is therefore 0 (the
+channel only) or at least 4, the widest character any accepted charset produces.
+
+AND THE ROLLBACK IS ANNOUNCED, because a cut made by the ENCODING is not a cut
+made by your limit: Trimmed: bytes A-B withheld. The two cases say different
+things, since only one of them has a remedy:
+
+  ...the window end fell inside a character in this encoding; read --cursor A
+  continues there          — the bytes are merely early; one more read gets them
+  ...they are the end of the stream and do not form a character in this encoding,
+  so no read returns them as text  — a character the writer never finished
+
+A FILTERED READ SAYS WHAT IT PASSED OVER. --stream o answers "stdout only" by
+selecting a subset of the span the window covers, and the span still runs to the
+end of the range: the cursor has to move by the range, or a poll loop would
+re-read the same bytes forever. So the bytes of the other stream leave your
+cursor without ever being shown, and nothing used to say so. The worst case was
+not a partial body -- --stream e on a channel that only ever wrote stdout
+answered 200 with an EMPTY body under "Content-Range: bytes 0-7/8", eight bytes
+"here" and none delivered, and the plain read that followed returned 204. Eight
+bytes of output were consumed by a reply that displayed nothing.
+
+  Omitted: N bytes in this range are not in stream o and went past unseen;
+  read --stream e (or --stream all) shows them, and --offset reaches back
+
+It is not a refusal and not a rewind: you asked for a view, the bytes are still
+in the channel, and the other view is one flag away. The count is in the units of
+your cursor (raw bytes) and is NOT derivable from the rest of the reply --
+bytes_returned is the RENDERED length, so a stripped byte and a filtered-out byte
+look the same there.
+
+WHY WITHHOLD AND NOT HAND THE FRAGMENT OVER. Half of a multi-byte character is not
+information: it cannot be read, and you cannot join it to the next window's bytes
+because you do not assemble bytes. In a JSON reply the invalid sequence would be
+replaced with U+FFFD — silently, and every offset after it would shift, which is
+the failure this whole rule exists to prevent. So the fragment is never spliced
+into a reply, never substituted, and never counted as returned: the window simply
+stops before it, and the header names it. If you need bytes rather than text,
+this is the wrong surface — file reads have a hex mode and peer frames page with
+--bytes; a channel is a terminal, and a terminal is text.
 
 This is a directive and not a tool parameter on purpose: lines_limit answers "how
 much reply will I get" while a pattern answers "which lines do I want". Folded
@@ -654,7 +750,68 @@ clock every other directive uses.`
 // is the answer for a command that thinks before it prints; a reply that stopped
 // mid-output is followed by `read`, which repeats the sample and continues from
 // there.
-const runDetail = `SENDING SEVERAL SHELL COMMANDS. The payload is ONE line, and a semicolon in cmd
+// The completion answer comes FIRST, and that ordering is the fix: a first-time caller
+// read this whole page looking for "will it block?" and found it in the last paragraph,
+// after two sections about `$1` they did not need yet. The question every caller has
+// BEFORE their first `run` is whether the call comes back, so that is the first thing
+// the page says; the substitution rules are what you read once you are already running.
+const runDetail = `THIS TYPES INTO A TERMINAL. IT DOES NOT SUBMIT A JOB. That distinction is the
+one to hold: the bytes go to whatever currently OWNS THE CHANNEL'S INPUT, and on a
+terminal that is the foreground process — a shell at a prompt, or the program the
+shell is running. A program waiting for input (a password prompt, sqlite3, an
+interactive installer, a REPL) takes your line as its ANSWER, and the line is not
+executed. The channel cannot be asked to prevent this and is not going to: a human
+at the same terminal is doing exactly the same thing, and the tool cannot see who is
+in the foreground (that process group lives on the far side of the SSH connection,
+and a Windows terminal has no such notion at all).
+
+What it can do is show you. The reply is the terminal's own bytes, so a line that was
+eaten comes back with the prompt's output around it instead of the command's: if you
+see your own text answered by the other program, it was input, not a command. Check
+the echo when a reply makes no sense, and send the matching key (key <channel>
+ctrl-c, ctrl-d) or write the answer deliberately.
+
+SOMEONE ELSE MAY BE USING THIS CHANNEL. That is normal, not a fault: the same
+channel is open in the Web UI, and a person (or a script on the HTTP entrance) can
+type into it between your calls. Nothing ever promises you the channel is yours
+alone, and termcp does not try to make it so.
+
+What it does instead is record which ENTRANCE the bytes came through. Every input
+span carries its source, so the reply can say Typed-By: api when input arrived at
+or after the first byte of the window you were just shown — treat that as "the
+state moved under me": the bytes around yours may be someone else's, and a program
+may already be answering them. The value names the entrance, not the species: an
+agent driving /api/term is recorded the same way as a person in the browser. The
+header only ever ADDS that fact; its absence proves nothing, because a line
+someone is still typing is not in the index yet. help span reads the whole record,
+which is the authoritative answer to "who has been typing here".
+
+THE SAME IS TRUE OF A PIPE. Its stdin is a real stdin: whoever holds the other end —
+a person, a supervisor, another tool — can type into it between your calls. So
+"nothing came back" never means "nothing is running", on either kind of channel.
+
+WHEN THIS CALL RETURNS. A pipe channel reports its process exiting, so run returns
+as soon as it does. A pty does not: whatever runs inside it is the shell's child,
+and a terminal has no "the command finished" signal. run on a pty therefore waits
+for the stream to go STILL — half a second without a new byte ends the wait — and
+falls back to timeout seconds (default 2) only while the command has printed
+nothing at all, where there is nothing else to watch.
+
+A reply that ends mid-output is not a lost command: the bytes are still in the
+stream. read has its own cursor and does not continue after the sample — it
+repeats what the sample already showed and then follows the stream, which is what
+makes "raise timeout" and "read again" two different answers. An empty reply
+means nothing arrived inside the window at all.
+
+Content-Range on this reply numbers the CHANNEL's stream, not the reply: bytes
+399-639/640 means the sample is the last 241 bytes of a 640-byte stream, not that
+399 bytes were dropped. The number is where the sample sits, so it stays stable
+across reads and tells you whether you are behind.
+
+For a program whose output you need in full, prefer pipe (--argv) on the same
+entry — its exit IS observable, so a read after it returns the whole output.
+
+SENDING SEVERAL SHELL COMMANDS. The payload is ONE line, and a semicolon in cmd
 separates DIRECTIVES, not shell commands: run h:1 pwd; whoami is two termcp
 statements, and the second one is an unknown directive called whoami. Pass the
 shell text through the args argument instead:
@@ -686,21 +843,14 @@ $0 is refused (args is 1-based), and ${N} is the unambiguous spelling at 10 or
 more. Named values are a different channel: vars substitutes $NAME as one quoted
 word of DATA, which is right for a flag value and wrong for a command line.
 
-COMPLETION. A pipe channel reports its process exiting, so run returns as soon as
-it does. A pty does not: whatever runs inside it is the shell's child, and a
-terminal has no "the command finished" signal. run on a pty therefore waits for
-the stream to go STILL — half a second without a new byte ends the wait — and
-falls back to timeout seconds (default 2) only while the command has printed
-nothing at all, where there is nothing else to watch.
-
-A reply that ends mid-output is not a lost command: the bytes are still in the
-stream. read has its own cursor and does not continue after the sample — it
-repeats what the sample already showed and then follows the stream, which is what
-makes "raise timeout" and "read again" two different answers. An empty reply
-means nothing arrived inside the window at all.
-
-For a program whose output you need in full, prefer pipe (--argv) on the same
-entry — its exit IS observable, so a read after it returns the whole output.`
+EVERY VALUE YOU PASS HAS TO BE NAMED SOMEWHERE IN cmd, and this is checked before
+anything runs. A value nothing references is refused rather than dropped: the
+other direction was already an error (a $NAME with no value is "vars does not
+define $X"), and a table that is wrong by one entry is invisible if the extra
+value simply never arrives. The cost is that a table shared across several calls
+has to be trimmed per call — the cheaper mistake, since a refused call says which
+value it never found a use for and nothing has run yet.
+`
 
 const openDetail = `Add a child to a session you already have: a channel, a forward, or a peer.
 
@@ -1225,7 +1375,7 @@ whole argv in one pair of quotes makes it ONE program name
 ends the session when its last SHELL exits, which is what makes a one-shot job leave
 no tile behind.
 
-"Last shell" means exactly that: channels only. A port forward (fwd), an SFTP handle
+"Last shell" means exactly that: channels only. A port forward (fwd), an SFTP connection
 or a jrpc/mcp/cdp connection does not keep the session alive, because none of them
 is a shell. So 'pipe internal --on-exit close --argv make' plus a 'fwd' gives you a
 port that lives for as long as the build and disappears with it — usually what you
@@ -1382,6 +1532,46 @@ func Parse(src string) (*File, error) {
 	return ParseWithSubst(src, Subst{})
 }
 
+// unusedNames lists the caller's values that cmd never referenced, sorted.
+func unusedNames(sub Subst, used usage) []string {
+	var names []string
+	for i := range sub.Pos {
+		if !used.Pos[i+1] {
+			names = append(names, "$"+strconv.Itoa(i+1))
+		}
+	}
+	for name := range sub.Named {
+		if !used.Named[name] {
+			names = append(names, "$"+name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// unusedMessage explains a refusal whose mirror image this check has always made:
+// `vars does not define $X` fires when a `$` has no value, and this fires when a value
+// has no `$`. Both are reported before anything runs, because a command that has already
+// executed cannot be un-run and the caller has already acted on a table it believed had
+// been applied.
+func unusedMessage(sub Subst, names []string, emptyCmd bool) string {
+	kind := "args and vars"
+	switch {
+	case len(sub.Named) == 0:
+		kind = "args"
+	case len(sub.Pos) == 0:
+		kind = "vars"
+	}
+	lead := "cmd never references "
+	if emptyCmd {
+		lead = "cmd is empty, so it cannot reference "
+	}
+	return lead + strings.Join(names, ", ") + " -- the " + kind +
+		" you passed hold values nothing names, and a value nothing names is dropped without a trace. " +
+		"args and vars are substituted only where the grammar reports a reference, so pass exactly the values cmd names " +
+		"(a table shared across several calls has to be trimmed per call), or reference this one"
+}
+
 // ParseWithSubst reads cmd into statements, with the caller's values filled in at
 // the two places they can appear: shell syntax, and the directive's own arguments.
 //
@@ -1408,11 +1598,22 @@ func Parse(src string) (*File, error) {
 // package rests on — the payload is still a slice of the source the caller wrote,
 // only with the named holes filled in.
 //
-// A name the caller supplies that does not appear in cmd is not an error: cmd and
-// the table are two independent inputs, and a caller may share one table across
-// several calls.
+// AN UNUSED VALUE IS REFUSED, and that is a change of policy. It used to be allowed
+// on the grounds that cmd and the table are two independent inputs and a caller may
+// share one table across several calls — but the caller cannot see the difference:
+// values it passed and never referenced are dropped in silence, so "I sent three and
+// one arrived" and "all three arrived" produce the same reply. The other direction was
+// already an error (`vars does not define $X`), and a rule that only fires one way is
+// how a table that is wrong by one entry stays wrong.
+//
+// The cost is that a shared table has to be trimmed per call. That is the cheaper
+// mistake: a caller that notices an unused value learns which one it never referenced,
+// and nothing has run yet when it is told.
 func ParseWithSubst(src string, sub Subst) (*File, error) {
 	if strings.TrimSpace(src) == "" {
+		if names := unusedNames(sub, usage{}); len(names) > 0 {
+			return nil, &Error{Msg: unusedMessage(sub, names, true)}
+		}
 		return &File{Empty: true}, nil
 	}
 	// RAW IS A PROPERTY OF THE PARSE, SO IT NEEDS A FIRST PASS. Which `$N` sits
@@ -1427,9 +1628,12 @@ func ParseWithSubst(src string, sub Subst) (*File, error) {
 	// Running two parses over the same source text only introduced the possibility of
 	// them seeing different things.
 	raw, refs := analyzeSource(src)
-	substituted, sentinels, err := substitute(src, sub, raw, refs)
+	substituted, sentinels, used, err := substitute(src, sub, raw, refs)
 	if err != nil {
 		return nil, &Error{Msg: "cannot parse cmd: " + err.Error()}
+	}
+	if names := unusedNames(sub, used); len(names) > 0 {
+		return nil, &Error{Msg: unusedMessage(sub, names, false)}
 	}
 	src = substituted
 	parser := syntax.NewParser()
@@ -2309,7 +2513,7 @@ func checkTargetKind(op Op, target string) *Error {
 // takes a channel and stops it, `rm` takes a session and erases the record.
 func SessionTargetProblem(op Op, target string) string {
 	return op.Name + " needs a SESSION, not the channel \"" + target + "\". " +
-		"A channel handle names one shell inside a session; this directive acts on the " +
+		"A channel address names one shell inside a session; this directive acts on the " +
 		"container. To stop a single channel use `close " + target + "`; to erase the " +
 		"whole session use its id without the `:N` suffix (`ps` prints it in the first column)."
 }
@@ -2322,7 +2526,7 @@ func SessionTargetProblem(op Op, target string) string {
 // shape rather than just rejecting, because "which channel" is answerable in one
 // line and an error that only refuses leaves the caller to work it out.
 func ChannelTargetProblem(op Op, target string) string {
-	return op.Name + " needs a CHANNEL, not \"" + target + "\". Run `ps` and use the handle it prints (`<session>:N`); a session is the container, and which of its channels to use is not something this directive will guess."
+	return op.Name + " needs a CHANNEL, not \"" + target + "\". Run `ls` and use the channel it prints (`<session>:N`); a session is the container, and which of its channels to use is not something this directive will guess."
 }
 
 // NamesAChannel reports whether a target explicitly names channels, one per entry.

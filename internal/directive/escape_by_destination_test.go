@@ -50,18 +50,11 @@ func TestEscapingFollowsTheDestination(t *testing.T) {
 			why:  "a flag value arrives as the bytes between the flags",
 		},
 		{
-			name: "a quoted shell payload IS escaped",
-			cmd:  `run h:1 cat "$1"`,
+			name: "an unquoted shell payload is the statement itself",
+			cmd:  "run h:1 $1",
 			read: func(st Statement) string { return st.Payload },
-			want: `cat "/tmp/a\"b\$c.txt"`,
-			why:  "the shell reads these quotes and takes them off, so the value must survive it",
-		},
-		{
-			name: "an unquoted shell payload is one quoted word",
-			cmd:  "run h:1 cat $1",
-			read: func(st Statement) string { return st.Payload },
-			want: `cat '/tmp/a"b$c.txt'`,
-			why:  "the value is data for the shell, so it becomes exactly one word",
+			want: `/tmp/a"b$c.txt`,
+			why:  "the value IS the shell line, so it is inserted as written",
 		},
 	}
 	for _, tc := range cases {

@@ -29,9 +29,7 @@ func TestAPayloadBeforeASeparatorIsStillTheCommandLine(t *testing.T) {
 		{"separator", `run h:1 $1 ; ls host`, []string{"echo D"}, []string{"echo D ", ""}},
 		{"and chain", `run h:1 $1 && run h:1 $2`, []string{"echo A", "echo B"}, []string{"echo A", "echo B"}},
 		{"or chain", `run h:1 $1 || run h:1 $2`, []string{"echo A", "echo B"}, []string{"echo A", "echo B"}},
-		// The narrowing that must survive: a reference with a word BEFORE it is a word
-		// in a line the caller wrote, and quoting is right there.
-		{"word before it", `run h:1 echo $1`, []string{"a; b"}, []string{"echo 'a; b'"}},
+
 		// A pipeline head and a redirect target are still the caller's command line:
 		// the payload words of `$1 | wc -l` are `$1`, so `$1` IS the payload and the
 		// pipeline tail is the line it is part of. Before the region came from the AST
@@ -40,6 +38,15 @@ func TestAPayloadBeforeASeparatorIsStillTheCommandLine(t *testing.T) {
 		{"pipeline head", `run h:1 $1 | wc -l`, []string{"echo C"}, []string{"echo C | wc -l"}},
 		{"redirect", `run h:1 $1 > /tmp/out`, []string{"echo C"}, []string{"echo C > /tmp/out"}},
 	}
+	// A reference with a word BEFORE it is refused: the shell line is a VALUE, so it is
+	// the whole payload or it is not the shell line at all. This case used to sit in the
+	// table as "quoted as data", which is the insertion the refusal exists to replace.
+	t.Run("word before it is refused", func(t *testing.T) {
+		if _, err := ParseWithSubst(`run h:1 echo $1`, Subst{Pos: []string{"a; b"}}); err == nil {
+			t.Fatal("a reference beside shell text was accepted; DSL and shell are not mixed")
+		}
+	})
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f, err := ParseWithSubst(tc.cmd, Subst{Pos: tc.args})

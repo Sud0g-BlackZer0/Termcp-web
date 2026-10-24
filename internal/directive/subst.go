@@ -12,21 +12,25 @@ import (
 // Subst is the caller's substitution table: named values from `vars`, positional
 // values from `args`.
 //
-// THE TWO ARE ONE ENGINE WITH TWO ROLES, and the role is what decides how a value
-// is inserted:
+// THE TWO ARE ONE MECHANISM WITH TWO SPELLINGS — a named variable and an indexed
+// variable — and they are inserted by the SAME rule. What decides how a value is
+// inserted is WHO READS IT, never which spelling named it:
 //
-//	vars  ($NAME, ${NAME})  the DATA channel — the value becomes one shell word
-//	args  ($1,   ${1})      the SYNTAX channel — inside a payload the value is
-//	                        spliced in verbatim, because it IS a command line
+//	a whole payload          the value IS the line, spliced verbatim (semicolons are
+//	                         syntax, because a command line is what the caller sent)
+//	anywhere inside a payload one quoted shell word (the value is data)
+//	a destination no shell   the caller's own bytes, unquoted (a flag value, a frame:
+//	reads                  nothing would take quotes off, so quotes would be bytes
+//	                         the caller never sent)
 //
-// That asymmetry is the whole point. A caller wanting to send `pwd; whoami` to a
-// terminal is not sending data with a semicolon in it, it is sending two commands;
-// forcing that through the data channel quoted the value into one word and the
-// shell answered "command not found: pwd; whoami". A caller filling `--data` is the
-// opposite case, and quoting is exactly right there.
+// So `run h:1 $1` and `run h:1 $CMD` are the same request, and a caller wanting one
+// word asks for one word the way it would in a shell: `run h:1 "$CMD"`.
 //
-// Positional references OUTSIDE a payload (a flag value, a target) are the data
-// channel too: only the payload region is shell syntax.
+// They used to differ in exactly the whole-payload case — `$1` spliced, `$CMD` quoted
+// — which made identical text behave differently depending on which table it came
+// from, with nothing to say so. The asymmetry was justified as a data channel versus a
+// syntax channel; it is really one channel with two names for the same slot, and the
+// position already says which of the three rules applies.
 type Subst struct {
 	Named map[string]string
 	Pos   []string
@@ -189,16 +193,16 @@ type occ struct {
 // The data channel needs no sentinel: a value quoted as a single shell word is
 // already a word the parser can read, and quoting it early is what keeps a value
 // with a quote in it from escaping into the surrounding syntax.
-func substitute(src string, sub Subst, spans []span, refs []ref) (string, *sentinelTable, error) {
+func substitute(src string, sub Subst, spans []span, refs []ref) (string, *sentinelTable, usage, error) {
 	if sub.empty() {
-		return src, nil, nil
+		return src, nil, usage{}, nil
 	}
-	occs, err := resolve(src, sub, spans, refs)
+	occs, used, err := resolve(src, sub, spans, refs)
 	if err != nil {
-		return "", nil, err
+		return "", nil, usage{}, err
 	}
 	if len(occs) == 0 {
-		return src, nil, nil
+		return src, nil, used, nil
 	}
 	table := &sentinelTable{prefix: sentinelPrefix(src)}
 	var b strings.Builder
@@ -216,7 +220,7 @@ func substitute(src string, sub Subst, spans []span, refs []ref) (string, *senti
 		last = o.end
 	}
 	b.WriteString(src[last:])
-	return b.String(), table, nil
+	return b.String(), table, used, nil
 }
 
 // ref is one parameter expansion the PARSER reported, with the quoting context read off
@@ -253,25 +257,40 @@ type ref struct {
 // (its text is one field of the node), and that blindness is correct — for shell. The scan
 // is confined to the regions where quoting means nothing, so it has no quote state to get
 // wrong.
-func resolve(src string, sub Subst, spans []span, refs []ref) ([]occ, error) {
-	r := resolver{src: src, sub: sub, spans: spans, seen: map[string]bool{}, reported: map[int]bool{}}
+func resolve(src string, sub Subst, spans []span, refs []ref) ([]occ, usage, error) {
+	r := resolver{
+		src: src, sub: sub, spans: spans,
+		seen: map[string]bool{}, reported: map[int]bool{},
+		usedPos: map[int]bool{}, usedNamed: map[string]bool{},
+	}
 	for _, ref := range refs {
 		r.reported[ref.start] = true
 		if err := r.one(ref.start, ref.end, ref.name, ref.positional, ref.dq); err != nil {
-			return nil, err
+			return nil, usage{}, err
 		}
 	}
 	// The references the grammar cannot see, everywhere a shell will not read.
 	r.blind()
 	if r.failed != nil {
-		return nil, r.failed
+		return nil, usage{}, r.failed
 	}
 	if len(r.missing) > 0 {
-		return nil, fmt.Errorf("vars does not define %s; pass it in the `vars` argument, or drop the $ so the shell expands it",
+		return nil, usage{}, fmt.Errorf("vars does not define %s; pass it in the `vars` argument, or drop the $ so the shell expands it",
 			"$"+strings.Join(r.missing, ", $"))
 	}
 	sort.Slice(r.occs, func(i, j int) bool { return r.occs[i].start < r.occs[j].start })
-	return r.occs, nil
+	return r.occs, usage{Pos: r.usedPos, Named: r.usedNamed}, nil
+}
+
+// usage records WHICH of the caller's values the payload actually referenced.
+//
+// It exists because the other direction was already an error and this one was silent: a
+// `$NAME` with no value in vars is refused ("vars does not define $X"), while a value with
+// no `$` naming it was accepted and dropped. A caller — or a model — that passes three
+// values and references one believes all three arrived, and the reply says nothing.
+type usage struct {
+	Pos   map[int]bool
+	Named map[string]bool
 }
 
 // resolver is the state one pass needs: the inputs, and what has been reported.
@@ -284,6 +303,9 @@ type resolver struct {
 	seen     map[string]bool
 	reported map[int]bool
 	failed   error
+	// What the payload referenced, so the caller can be told what it did not.
+	usedPos   map[int]bool
+	usedNamed map[string]bool
 }
 
 // blind reads the one kind of region the grammar does not read at all: an OPAQUE PAYLOAD.
@@ -336,6 +358,27 @@ func (r *resolver) one(start, end int, name string, positional, dq bool) error {
 	// else — a frame, a target, a flag value, a heredoc body — is bytes.
 	shell := mode == spanCommandLine || mode == spanWords
 
+	// DSL AND SHELL ARE NEVER MIXED.
+	//
+	// The shell line is a VALUE that fills a hole; it is not written around the hole. So a
+	// variable that sits BESIDE shell text in a payload (`run h:1 cat $1`) is refused,
+	// because there is no honest way to insert it: as data it becomes one quoted word and
+	// the caller's statement is quietly changed, as syntax it turns the caller's DATA into
+	// commands. Both answers are wrong, and the caller is writing a shape the protocol does
+	// not have.
+	//
+	// `--argv` is not this case. Its word list is a DSL flag's value, not a shell line: a
+	// reference there is one word of an argv, which is exactly what a variable is for.
+	// The distinction is the REGION, not the spelling — which is why this reads `mode`
+	// rather than testing the text for a `$`.
+	if mode == spanCommandLine && !raw {
+		return fmt.Errorf("a variable cannot sit inside a shell line: %s is mixed with other shell text. "+
+			"termcp keeps DSL and shell apart — the whole shell command is a VALUE, so put it in the variable and "+
+			"leave the reference alone in cmd:\n"+
+			"  cmd: \"run <channel> $1\"   args: [\"cat /etc/hosts | head -5\"]\n"+
+			"If the line is literal (no values), write it directly: cmd: \"run <channel> cat /etc/hosts\"", name)
+	}
+
 	// ESCAPING IS A PROPERTY OF THE DESTINATION, NOT OF THE QUOTES.
 	//
 	// `dq` says the reference sat inside double quotes in cmd, which is a fact about the
@@ -376,6 +419,7 @@ func (r *resolver) one(start, end int, name string, positional, dq bool) error {
 			return fmt.Errorf("cmd references $%s but args has %d element(s); "+
 				"args is 1-based and has no trailing sentinel slot", name, len(r.sub.Pos))
 		}
+		r.usedPos[n] = true
 		r.occs = append(r.occs, occ{
 			start: start, end: end,
 			value: r.sub.Pos[n-1],
@@ -403,20 +447,26 @@ func (r *resolver) one(start, end int, name string, positional, dq bool) error {
 		}
 		return nil
 	}
+	r.usedNamed[name] = true
 	r.occs = append(r.occs, occ{
 		start: start, end: end,
 		value: value,
-		// A NAMED VALUE IS DATA BY DEFAULT, and only a NON-SHELL region changes that. A
-		// command line does not, even when the reference is the whole payload: `run h:1
-		// $CMD` names the data channel, and splicing it unquoted would turn its semicolons
-		// into syntax.
-		// Quoting is what makes a value one word for a shell; a frame is not read by a
-		// shell, so the same quoting corrupts it (`{"e":"'2+3'"}`).
+		// A NAMED VALUE FOLLOWS THE SAME RULE AS A POSITIONAL ONE.
 		//
-		// A command-line payload does NOT relax it, even when the reference is the whole
-		// payload: `run h:1 $CMD` is a whole payload, but the caller chose the data channel
-		// and splicing it unquoted would turn its semicolons into syntax.
-		raw: !shell,
+		// `vars` and `args` are one mechanism with two spellings: a named variable and an
+		// indexed variable. They used to differ in exactly one case — a reference that IS
+		// the whole payload — where `$1` was spliced verbatim and `$CMD` was quoted into a
+		// single word. Two spellings of the same thing behaved differently, so a caller
+		// that moved a value from `args` to `vars` (or back) got a different command line
+		// from identical text, and nothing said so.
+		//
+		// The rule is now one rule: WHO READS THE VALUE decides how it is inserted. A
+		// whole payload is a command line, so the value is the line; anywhere inside a
+		// payload it is one quoted word; a destination no shell reads (a flag value, a
+		// frame) gets the caller's bytes. Quoting something as a single word is a thing
+		// the caller asks for with quotes (`run h:1 "$CMD"`), the same way it would in a
+		// shell — not something the choice of variable spelling decides.
+		raw: raw || !shell,
 		dq:  escapes,
 	})
 	return nil

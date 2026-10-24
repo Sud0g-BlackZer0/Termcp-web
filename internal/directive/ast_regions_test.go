@@ -18,10 +18,11 @@ import (
 func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 	bs := string(rune(92))
 	cases := []struct {
-		name string
-		src  string
-		sub  Subst
-		want string
+		name    string
+		src     string
+		sub     Subst
+		want    string
+		wantErr string
 	}{
 		{
 			// Stmt.Semicolon is documented as "position of ';', '&', or '|&'", and trimming
@@ -65,10 +66,14 @@ func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 			// answers accordingly: no nodes inside the body, so no references, so the text
 			// arrives as written. The same rule as everywhere else in this pass rather than a
 			// heredoc special case — which is what makes it predictable.
-			name: "a quoted delimiter leaves the body alone",
-			src:  "run s1:1 cat <<'EOF'\n$1\nEOF\n",
-			sub:  Subst{Pos: []string{"echo C"}},
-			want: "cat <<'EOF'\n$1\nEOF",
+			// "NO REFERENCE" IS NOW PROVED BY THE CHECK THAT EXISTS FOR IT: the value the
+			// caller passed is reported unused, which is the same fact the old `want` asserted
+			// (nothing was substituted) stated by the rule that a value nothing names is
+			// refused rather than dropped.
+			name:    "a quoted delimiter leaves the body alone",
+			src:     "run s1:1 cat <<'EOF'\n$1\nEOF\n",
+			sub:     Subst{Pos: []string{"echo C"}},
+			wantErr: "never references $1",
 		},
 		{
 			name: "the tab-stripping form too",
@@ -77,40 +82,51 @@ func TestRegionsTheParserAlreadyKnows(t *testing.T) {
 			want: "cat <<-EOF\n\techo C\n\tEOF",
 		},
 		{
-			// The narrowing that must not be lost: a reference beside a word is one quoted
-			// word, and a `$` the caller kept from the parser is the caller's literal.
-			name: "a reference beside a word is still quoted",
-			src:  "run s1:1 echo $1",
-			sub:  Subst{Pos: []string{"a; b"}},
-			want: "echo 'a; b'",
+			// A VARIABLE IS A HOLE IN THE DSL, NOT AN OPERAND OF A SHELL LINE. Writing a
+			// shell statement around it is the one shape the protocol does not have: as data
+			// the value becomes one quoted word and the caller's statement changes, as
+			// syntax the caller's DATA becomes commands. Refusing says so; both insertions
+			// would have been a quiet guess about which the caller meant.
+			name:    "a reference beside a word in a shell line is refused",
+			src:     "run s1:1 echo $1",
+			sub:     Subst{Pos: []string{"a; b"}},
+			wantErr: "cannot sit inside a shell line",
 		},
 		{
-			name: "an escaped dollar is not a reference",
-			src:  "run s1:1 echo $" + bs + "1",
-			sub:  Subst{Pos: []string{"a; b"}},
-			want: "echo $" + bs + "1",
+			name:    "an escaped dollar is not a reference",
+			src:     "run s1:1 echo $" + bs + "1",
+			sub:     Subst{Pos: []string{"a; b"}},
+			wantErr: "never references $1",
 		},
 		{
-			name: "a single-quoted dollar is not a reference either",
-			src:  "run s1:1 echo '$1'",
-			sub:  Subst{Pos: []string{"a; b"}},
-			want: "echo '$1'",
+			name:    "a single-quoted dollar is not a reference either",
+			src:     "run s1:1 echo '$1'",
+			sub:     Subst{Pos: []string{"a; b"}},
+			wantErr: "never references $1",
 		},
 		{
-			// A redirect target is inside the command line but outside the payload words, so
-			// it is shell (quoted as data) rather than a flag value (bare). One number used to
-			// answer both questions, and `> $1` arrived bare in a redirect — a syntax error
-			// for any value with a space in it.
-			name: "a redirect target is shell, and quoted as data",
-			src:  "run s1:1 echo hi > $1",
-			sub:  Subst{Pos: []string{"/tmp/a b"}},
-			want: "echo hi > '/tmp/a b'",
+			// A REDIRECT TARGET IS PART OF THE SHELL LINE, so a reference there is mixing
+			// too — the value would be a filename, not a statement. Put the redirect inside
+			// the value: cmd `run s1:1 $1`, args ["echo hi > '/tmp/a b'"].
+			name:    "a reference in a redirect target is refused",
+			src:     "run s1:1 echo hi > $1",
+			sub:     Subst{Pos: []string{"/tmp/a b"}},
+			wantErr: "cannot sit inside a shell line",
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f, err := ParseWithSubst(c.src, c.sub)
+			if c.wantErr != "" {
+				if err == nil {
+					t.Fatalf("ParseWithSubst(%q) was accepted; it mixes DSL and shell", c.src)
+				}
+				if !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("ParseWithSubst(%q) failed with %v, want %q", c.src, err, c.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("ParseWithSubst(%q): %v", c.src, err)
 			}

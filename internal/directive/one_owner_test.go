@@ -39,7 +39,7 @@ func TestEveryRegionStatesHowItTakesAValue(t *testing.T) {
 		want string
 		flag string // when set, the assertion is about this flag's value instead
 	}{
-		{"a command line quotes it", `run s1:1 echo $1`, Subst{Pos: []string{"a b"}}, `echo 'a b'`, ""},
+		{"a shell line takes it whole", `run s1:1 $1`, Subst{Pos: []string{"a b"}}, `a b`, ""},
 		{"the whole payload is the caller's line", `run s1:1 $1`, Subst{Pos: []string{"a b"}}, `a b`, ""},
 		{"a frame is verbatim", `call s1:1 cdp '{"e":"$1"}'`, Subst{Pos: []string{"2+3"}}, `'{"e":"2+3"}'`, ""},
 		{"an arithmetic expression is bare", `run s1:1 echo $(( $1 + 1 ))`, Subst{Pos: []string{"2"}}, `echo $(( 2 + 1 ))`, ""},
@@ -51,12 +51,20 @@ func TestEveryRegionStatesHowItTakesAValue(t *testing.T) {
 		// it — `--data "a b"` and `--data $1` both arrive as `a b`).
 		{"a flag value is inserted bare", `write s1 file /tmp/x --data "$1"`, Subst{Pos: []string{"a b"}}, "", "data"},
 		{"and unquoted too", `write s1 file /tmp/x --data $1`, Subst{Pos: []string{"a b"}}, "", "data"},
-		{"but a single-quoted one is the caller's literal", `write s1 file /tmp/x --data '$1'`, Subst{Pos: []string{"a b"}}, "", "data-literal"},
+		// The value is the caller's literal here, so the arg it passed is never referenced —
+		// which the unused-value check now refuses rather than dropping.
+		{"but a single-quoted one is the caller's literal", `write s1 file /tmp/x --data '$1'`, Subst{Pos: []string{"a b"}}, "never references $1", "data-literal"},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f, err := ParseWithSubst(c.src, c.sub)
+			if c.want == "never references $1" {
+				if err == nil || !strings.Contains(err.Error(), c.want) {
+					t.Fatalf("ParseWithSubst(%q) should be refused as an unused value, got %v", c.src, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("ParseWithSubst(%q): %v", c.src, err)
 			}
@@ -89,33 +97,49 @@ func TestWhatCountsAsAReference(t *testing.T) {
 		// err is the text the refusal must contain, when the line is refused.
 		err string
 	}{
-		{name: "a positional reference is substituted", src: `run s1:1 echo $1`,
-			sub: Subst{Pos: []string{"a b"}}, want: `echo 'a b'`},
-		{name: "a braced one too", src: `run s1:1 echo ${1}`,
-			sub: Subst{Pos: []string{"a b"}}, want: `echo 'a b'`},
-		{name: "a named one", src: `run s1:1 echo $N`,
-			sub: Subst{Named: map[string]string{"N": "a b"}}, want: `echo 'a b'`},
-		{name: "a reference glued to a word is still one", src: `run s1:1 echo x$N`,
-			sub: Subst{Named: map[string]string{"N": "a"}}, want: `echo x'a'`},
+		{name: "the whole payload is the statement", src: `run s1:1 $1`,
+			sub: Subst{Pos: []string{"a b"}}, want: `a b`},
+		{name: "a braced reference is the same hole", src: `run s1:1 ${1}`,
+			sub: Subst{Pos: []string{"a b"}}, want: `a b`},
+		{name: "and a named one", src: `run s1:1 $N`,
+			sub: Subst{Named: map[string]string{"N": "a b"}}, want: `a b`},
 
 		// THE SHELL'S OWN CONSTRUCTS ARE NOT REFERENCES. Rewriting a construct whose
 		// meaning depends on a variable this daemon never sees would be a guess.
+		// "THE SHELL'S, NOT A REFERENCE" IS PROVED BY THE UNUSED-VALUE REFUSAL: a value
+		// nothing names is refused before anything runs, so a caller that passed one and got
+		// its command through would have been the silent drop this check exists to stop.
 		{name: "the positional list is the shell's", src: `run s1:1 echo $@`,
-			sub: Subst{Pos: []string{"a"}}, want: `echo $@`},
+			sub: Subst{Pos: []string{"a"}}, err: "never references $1"},
 		{name: "a default value is the shell's", src: `run s1:1 echo ${N:-x}`,
-			sub: Subst{Named: map[string]string{"N": "a"}}, want: `echo ${N:-x}`},
+			sub: Subst{Named: map[string]string{"N": "a"}}, err: "never references $N"},
 		{name: "a length is the shell's", src: `run s1:1 echo ${#N}`,
-			sub: Subst{Named: map[string]string{"N": "a"}}, want: `echo ${#N}`},
+			sub: Subst{Named: map[string]string{"N": "a"}}, err: "never references $N"},
 		{name: "a command substitution is the shell's", src: `run s1:1 echo $(date)`,
-			sub: Subst{Named: map[string]string{"N": "a"}}, want: `echo $(date)`},
-		{name: "an undefined name is left for the shell when vars is empty", src: `run s1:1 echo $N`,
-			want: `echo $N`},
-		{name: "and named as a mistake when vars is in use", src: `run s1:1 echo $NOPE`,
+			sub: Subst{Named: map[string]string{"N": "a"}}, err: "never references $N"},
+		{name: "an undefined name is left for the shell when vars is empty", src: `run s1:1 $N`,
+			want: `$N`},
+		{name: "and named as a mistake when vars is in use", src: `run s1:1 $NOPE`,
 			sub: Subst{Named: map[string]string{"N": "a"}}, err: "vars does not define $NOPE"},
-		{name: "an out-of-range positional is refused", src: `run s1:1 echo $3`,
+		{name: "an out-of-range positional is refused", src: `run s1:1 $3`,
 			sub: Subst{Pos: []string{"a"}}, err: "args has 1 element"},
-		{name: "$0 has no argument to name", src: `run s1:1 echo $0`,
+		{name: "$0 has no argument to name", src: `run s1:1 $0`,
 			sub: Subst{Pos: []string{"a"}}, err: "args is 1-based"},
+
+		// THE MIXED SHAPES. A reference beside shell text is refused before any of the
+		// guards above can answer, because the shape itself is the mistake: there is no
+		// insertion that leaves the caller's statement intact. The refusal names the shape
+		// to write instead, so the next attempt gets the real answer.
+		{name: "a reference beside a word is refused", src: `run s1:1 echo $1`,
+			sub: Subst{Pos: []string{"a"}}, err: "cannot sit inside a shell line"},
+		{name: "a braced one too", src: `run s1:1 echo ${1}`,
+			sub: Subst{Pos: []string{"a"}}, err: "cannot sit inside a shell line"},
+		{name: "and a named one", src: `run s1:1 echo $N`,
+			sub: Subst{Named: map[string]string{"N": "a"}}, err: "cannot sit inside a shell line"},
+		{name: "even glued to a word", src: `run s1:1 echo x$N`,
+			sub: Subst{Named: map[string]string{"N": "a"}}, err: "cannot sit inside a shell line"},
+		{name: "a reference in a redirect is refused too", src: `run s1:1 echo hi > $1`,
+			sub: Subst{Pos: []string{"/tmp/x"}}, err: "cannot sit inside a shell line"},
 
 		// A SINGLE-QUOTED DOLLAR IN A SHELL REGION IS THE SHELL'S LITERAL, and that is the
 		// answer rather than a special case: the parser reports no node there, so there is no
@@ -123,9 +147,9 @@ func TestWhatCountsAsAReference(t *testing.T) {
 		// rebuilding the quoting around a value that is arbitrary text; passing it through
 		// unchanged is what the grammar already said.
 		{name: "a quoted dollar in a command line is the shell's", src: `run s1:1 echo '$1'`,
-			sub: Subst{Pos: []string{"a"}}, want: `echo '$1'`},
+			sub: Subst{Pos: []string{"a"}}, err: "never references $1"},
 		{name: "and a quoted name too", src: `run s1:1 echo '$N'`,
-			sub: Subst{Named: map[string]string{"N": "a"}}, want: `echo '$N'`},
+			sub: Subst{Named: map[string]string{"N": "a"}}, err: "never references $N"},
 	}
 
 	for _, c := range cases {
