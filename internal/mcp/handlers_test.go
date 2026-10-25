@@ -135,6 +135,22 @@ func testShellIdleArgs() []any {
 
 func testReadOutputUntil(t *testing.T, s *Server, shellID, marker string, timeout time.Duration) string {
 	t.Helper()
+	return testReadOutputUntilCount(t, s, shellID, marker, 1, timeout)
+}
+
+// testReadOutputUntilCount waits until the marker has been seen want times, and
+// returns everything it accumulated.
+//
+// THE COUNT MATTERS BECAUSE AN ECHO IS NOT AN ANSWER. A terminal echoes the line it
+// was given before the shell runs it, so a marker appears twice for one command, and a
+// caller that stops at the first occurrence has not waited for the command at all. A
+// test that then compares two snapshots of the transcript is comparing two photographs
+// of a moving thing (issue #189).
+//
+// The reads CONSUME (no offset), so each call sees only the bytes that arrived since
+// the last one — which is why the count has to be accumulated across them.
+func testReadOutputUntilCount(t *testing.T, s *Server, shellID, marker string, want int, timeout time.Duration) string {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var output string
 	for time.Now().Before(deadline) {
@@ -151,7 +167,7 @@ func testReadOutputUntil(t *testing.T, s *Server, shellID, marker string, timeou
 		}
 		readM := parseResult(t, readResult)
 		output += readM["output"].(string)
-		if strings.Contains(output, marker) {
+		if strings.Count(output, marker) >= want {
 			break
 		}
 	}
