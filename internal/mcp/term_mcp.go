@@ -153,9 +153,11 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 	//
 	// The peer-call path right next door already answers to the caller
 	// (peerCallWindow); two waits in one file answering to different clocks was the
-	// bug. A caller that names no window still gets the old 2s, which is the default
-	// for a read and stays the default here.
-	deadline := time.Now().Add(peerCallWindow(win))
+	// bug. Only the fallback differs from a peer call, and only because the verbs
+	// differ: a caller that names no window gets the READ default (recvWindow), not
+	// the peer default — fifteen seconds of silence is not what reading a channel
+	// means, and it is not what this directive did before.
+	deadline := time.Now().Add(recvWindow(win))
 	var doc map[string]any
 	var body string
 	for {
@@ -203,7 +205,7 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 		return envelope.Slot{Code: 204, Headers: map[string]string{
 			"Path":          stmt.Path,
 			"Content-Range": envelope.ContentRange(from, from+rawLen-1, total),
-		}, Body: "no complete frame yet" + notAFrame(body)}
+		}, Body: "no complete frame yet" + recvHint(win) + notAFrame(body)}
 	}
 	start := from + int64(strings.Index(body, frame))
 	end := start + int64(len(frame))
@@ -374,6 +376,28 @@ func (s *Server) replyToSubMCP(ctx context.Context, stmt directive.Statement, ha
 // next whole second.
 const recvPollInterval = 25 * time.Millisecond
 
+// defaultRecvWindow is how long a recv waits when the caller named no window.
+//
+// TWO SECONDS: the read default, and what this directive has always used. Not the
+// fifteen a peer call falls back to — the two verbs answer different questions. A peer
+// call is a request/response, while a recv that finds nothing is a read that found
+// nothing, and a silent channel is not a peer that is thinking.
+const defaultRecvWindow = 2 * time.Second
+
+// recvWindow is how long one recv waits for a frame.
+//
+// IT ASKS WHETHER THE CALLER SPOKE, for the reason peerCallWindow does: `timeout` has a
+// default, so the value alone cannot tell "the caller asked for two seconds" from
+// "nobody asked". A window the caller named is used as given, including one longer than
+// any default here — capping it would be this server deciding how long the caller may
+// wait, which is the decision the bug was made of (#174).
+func recvWindow(win termArgs) time.Duration {
+	if win.TimeoutSet && win.TimeoutSeconds > 0 {
+		return time.Duration(win.TimeoutSeconds * float64(time.Second))
+	}
+	return defaultRecvWindow
+}
+
 // minRecvWindow is the smallest window a recv will read with.
 //
 // defaultBytesLimit is the tool's default for a READ, where a caller usually wants
@@ -412,6 +436,17 @@ func (s *Server) setRecvCursor(handle string, at int64) {
 // notAFrame says what the buffer holds when nothing in it parsed as a value, so a
 // caller can tell a peer that writes a banner from a peer that is merely slow.
 //
+// recvHint names the knob, because a caller told "not yet" has no way to learn that the
+// wait was this server's choice rather than its own. Silent when the caller already
+// named a window: it then knows how long it asked for, and repeating the number back
+// adds nothing.
+func recvHint(win termArgs) string {
+	if win.TimeoutSet {
+		return ""
+	}
+	return " (this recv waited " + recvWindow(win).String() + "; name `timeout` to wait longer)"
+}
+
 // "no complete frame yet" is the same sentence for both, and only one of them is
 // worth waiting on. A caller that retries a banner retries for ever.
 func notAFrame(body string) string {
