@@ -1223,6 +1223,11 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	b.WriteString("cmd = the DSL.  sh = a shell command.\n")
 	b.WriteString("cmd holds directives only. sh never appears in cmd — it enters as a value through\n")
 	b.WriteString("args ($1, $2) or vars ($NAME). cmd supports &&, ||, ;, and &.\n")
+	// A CREDENTIAL HAS TO HAVE SOMEWHERE TO GO THAT IS NOT THE LOG, and the caller has to
+	// know it exists before it types the password into args. One line, where the two
+	// other value channels are named.
+	b.WriteString("A value that must not be written to the server log goes in secrets ($NAME too);\n")
+	b.WriteString("the remote shell still echoes what it runs — that is the channel's transcript.\n")
 	b.WriteString("  run a1f3:1 $1   args: [\"make && test\"]   one sh line, operators live\n")
 	b.WriteString("  run a1f3:1 $1 && notify done             two cmd directives\n\n")
 

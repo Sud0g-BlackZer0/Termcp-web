@@ -136,6 +136,23 @@ type termArgs struct {
 	// would be wrong in all three places.
 	Vars map[string]string
 
+	// Secrets holds named values that expand exactly like Vars and are NOT written to
+	// the server log.
+	//
+	// IT IS A RECORDING DECISION, NOT A SUBSTITUTION ONE. The two tables are merged
+	// before cmd is parsed, so `$NAME` resolves the same whichever one named it, and a
+	// name in both is refused. What differs is the log: Vars is written verbatim — it is
+	// what makes the log a faithful record of the call — and Secrets contributes only
+	// its NAMES. That is the whole mechanism, and it is deliberately not pattern
+	// matching: a redactor that knows `-p` and misses `--password` reports a safety it
+	// does not have, and it would silently rewrite legitimate text on the way in. The
+	// caller says what must not be written down, by where it puts the value.
+	//
+	// It protects the SERVER's record, and nothing else. A secret expanded into a
+	// command line is still echoed back by the remote shell, and that echo belongs to
+	// the channel's own transcript: the terminal cannot be asked to hide what it printed.
+	Secrets map[string]string
+
 	// Args holds positional values substituted into cmd as $1, $2, … (1-based).
 	//
 	// IT IS THE OPPOSITE CHANNEL TO VARS, and the difference is the whole reason it
@@ -759,7 +776,12 @@ func (s *Server) callTool(ctx context.Context, tool string, args map[string]any)
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = tool
 	req.Params.Arguments = args
-	res, err := withLogging(tool, h, s)(ctx, req)
+	// THE PAYLOAD OF AN INNER CALL IS NOT LOGGED. It is a copy of the line the outer
+	// `term` call already recorded in full, and one of those copies can hold a value the
+	// caller declared secret — which is exactly how the secret got into the log the first
+	// time: the outer call logged `secrets=PW (values not logged)` and the shell_input it
+	// made wrote the expanded line under `text`.
+	res, err := withLogging(tool, h, s)(withInnerCall(ctx), req)
 	if err != nil {
 		return nil, &toolFailure{code: CodeOperationFailed, msg: err.Error()}
 	}
