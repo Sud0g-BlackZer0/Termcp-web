@@ -141,3 +141,36 @@ func TestAnUnusedSecretIsRefused(t *testing.T) {
 		t.Fatalf("an unreferenced secret was accepted:\n%s", got)
 	}
 }
+
+// THE FIRST SCREEN HAS TO NAME THE PASSWORD, NOT JUST THE MECHANISM.
+//
+// "A value that must not be written to the server log goes in secrets" is true and does
+// not say the thing a caller is about to do: type a password. The rule is only useful if
+// it arrives BEFORE the value does — a caller that learns about `secrets` after putting
+// the password in `args` has already written it down.
+//
+// The negative half matters as much: `cmd` is not a safe carrier just because it is the
+// DSL. A payload (`run h:1 <the whole line>`) and a flag value (`--data …`) are part of
+// the command line and are logged with it, so the guide says where a password must NOT
+// be typed as well as where it must.
+func TestTheGuideSaysWhereAPasswordGoes(t *testing.T) {
+	s := newTestServer(t)
+	out := termText(t, s, map[string]any{})
+
+	if !strings.Contains(out, "secrets") {
+		t.Fatalf("the guide never names secrets, so a caller learns about it after the "+
+			"password is already in args:\n%s", out)
+	}
+	if !strings.Contains(out, "password belongs there") {
+		t.Errorf("the guide does not say a password belongs in secrets:\n%s", out)
+	}
+	if !strings.Contains(out, "never typed into cmd or args") {
+		t.Errorf("the guide does not say where a password must NOT be typed, and cmd looks "+
+			"safe because it is the DSL:\n%s", out)
+	}
+	// And the limitation, on the same screen: the terminal echoes what it runs.
+	if !strings.Contains(out, "echoes what it runs") {
+		t.Errorf("the guide does not say the remote shell echoes the line, which is the one "+
+			"thing secrets does not protect:\n%s", out)
+	}
+}

@@ -1227,7 +1227,8 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	// know it exists before it types the password into args. One line, where the two
 	// other value channels are named.
 	b.WriteString("A value that must not be written to the server log goes in secrets ($NAME too);\n")
-	b.WriteString("the remote shell still echoes what it runs — that is the channel's transcript.\n")
+	b.WriteString("a password belongs there, never typed into cmd or args. The remote shell still\n")
+	b.WriteString("echoes what it runs — that is the channel's transcript.\n")
 	b.WriteString("  run a1f3:1 $1   args: [\"make && test\"]   one sh line, operators live\n")
 	b.WriteString("  run a1f3:1 $1 && notify done             two cmd directives\n\n")
 
