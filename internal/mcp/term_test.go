@@ -134,7 +134,11 @@ func TestTermHelp(t *testing.T) {
 	if _, rest, ok := strings.Cut(single, "\n\n"); ok {
 		body = rest // skip the envelope: status line and headers
 	}
-	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <channel> $1") {
+	// The prefix, not the whole line: the invariant is that the USAGE TEMPLATE comes first,
+	// and the template's own spelling is pinned by the generated-docs test. Pinning it here
+	// too made this test fail on a flag being added to `run` — a change it has nothing to
+	// say about.
+	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <channel>") {
 		t.Errorf("the body does not open with the usage template:\n%s", single)
 	}
 }
