@@ -1157,7 +1157,17 @@ THE NOUN IS PART OF THE ADDRESS, not a separate flag: what hangs off a session i
 addressed <session> <kind> <key>. Omitting the kind means channels, whose key is the
 index — so a1f3:1 and a1f3 1 are the same node.
 
-` + "`ls <peer>` asks the peer, not a cache: a tab list one navigation stale would\nhand out target ids that no longer attach."
+` + "`ls <peer>` asks the peer, not a cache: a tab list one navigation stale would\nhand out target ids that no longer attach." + lsChannelsNote
+
+const lsChannelsNote = `
+
+FINISHED CHANNELS ARE FOLDED, and the listing says how many. open --argv per
+command is an ordinary way to work and each one leaves a channel behind that stays
+readable, so ls --shells grows into a wall the caller has to read past to find the
+one it is using. They are not gone: ls --all lists them, their addresses still read,
+and the last line of a folded listing names the count — a listing that dropped them in
+silence would read as "those channels are gone" and the caller would stop looking for
+output it still has.`
 
 const getDetail = `Describe one node: a session, one of its channels, or a peer.
 

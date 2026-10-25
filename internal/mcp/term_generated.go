@@ -55,6 +55,19 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 	}
 
 	var b strings.Builder
+	// A FINISHED CHANNEL IS NOT THE DEFAULT VIEW (issue #193).
+	//
+	// `open --argv` per command is an ordinary way to work, and each of those leaves a
+	// channel behind that stays addressable for reading — so a session ends up with one
+	// live channel and thirty-eight dead ones, and `ls --shells` becomes a wall the
+	// caller has to read past to find the one it is using. Measured in the report: 42
+	// rows, 38 of them exited pipes.
+	//
+	// Folding is a VIEW, not reclamation: the bytes are still there and the address still
+	// reads. Which is exactly why it has to be SAID — a listing that quietly drops 38
+	// rows reads as "those channels are gone", and a caller that believes that will not
+	// look for output it still has.
+	hidden := 0
 	for _, sess := range sessions {
 		live := s.sessMgr.Get(sess.ID)
 		if live == nil {
@@ -66,6 +79,7 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 				sess.ID, sess.Status, dash(sess.SSHConfig), ageOf(sess.CreatedAt)))
 			continue
 		}
+		shown := 0
 		for _, sh := range shells {
 			if !boolFlag(stmt, "shells") && len(shells) > 1 && sh.Index > 1 {
 				// Without --shells, one line per session: the primary channel names
@@ -73,10 +87,24 @@ func (s *Server) directivePS(ctx context.Context, stmt directive.Statement, win 
 				// of them by default would make a fleet's ps unreadable.
 				continue
 			}
+			if sh.Status != api.SessionRunning && !boolFlag(stmt, "all") {
+				hidden++
+				continue
+			}
 			b.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%s\n",
 				handleOf(sess.ID, sh.Index), sh.Status, dash(string(sh.Mode)),
 				dash(sh.Name), ageOf(sh.CreatedAt)))
+			shown++
 		}
+		// A SESSION WHOSE CHANNELS ARE ALL HIDDEN MUST NOT VANISH: its own line is what
+		// keeps it addressable from this listing, and the channels are one flag away.
+		if shown == 0 && hidden > 0 {
+			b.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\n",
+				sess.ID, sess.Status, dash(sess.SSHConfig), ageOf(sess.CreatedAt)))
+		}
+	}
+	if hidden > 0 {
+		b.WriteString(fmt.Sprintf("(%d finished channel(s) not shown; `ls --all` lists them, and their output is still readable)\n", hidden))
 	}
 	body := b.String()
 	// PEERS ARE NODES ON THE SAME LISTING. `ls <session>` is the only place a caller
