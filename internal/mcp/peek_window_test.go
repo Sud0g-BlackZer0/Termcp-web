@@ -53,7 +53,7 @@ func TestAFullWindowEndsTheWait(t *testing.T) {
 	// noisy command is a coin toss. The window filling is a fact about the RANGE: the span
 	// the reply covers is exactly the caller's byte_limit, which cannot happen by accident
 	// and does not depend on what the stream did in the microseconds after the read.
-	if !strings.Contains(got, "206") && !strings.Contains(got, "200 OK") {
+	if !statusLineIs(got, "206") && !statusLineIs(got, "200") {
 		t.Fatalf("a reply about bytes has to say how it went:\n%s", got)
 	}
 	rng := regexp.MustCompile(`Content-Range: bytes (\d+)-(\d+)/(\d+)`).FindStringSubmatch(got)

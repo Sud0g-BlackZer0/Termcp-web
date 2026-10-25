@@ -29,8 +29,14 @@ func TestAStdioCallWaitsForItsOwnReply(t *testing.T) {
 	if !strings.Contains(got, `"result"`) {
 		t.Fatalf("one call did not return the reply:\n%s", got)
 	}
-	if strings.Contains(got, "202") {
-		t.Fatalf("call answered \"sent\" instead of waiting:\n%s", got)
+	// THE STATUS LINE, NOT THE WHOLE REPLY. This assertion used to be a substring test
+	// for "202" over the entire reply, which the command echo satisfied by accident:
+	// the random session id in `Path: call 548e1202-666:1 {...}` contains it. The test
+	// then failed on CI for the id it happened to draw and passed locally for every
+	// other one — this repo's own rule that an assertion must not be satisfiable by
+	// the echo.
+	if !strings.HasPrefix(got, "TERM/1 200") {
+		t.Fatalf("call answered something other than the reply:\n%s", got)
 	}
 }
 
@@ -48,7 +54,7 @@ func TestSendDoesNotWait(t *testing.T) {
 		"cmd":     "call " + h + ` --send {"jsonrpc":"2.0","id":7,"method":"tools/list"}`,
 		"timeout": 20,
 	})
-	if !strings.Contains(got, "202") {
+	if !strings.HasPrefix(got, "TERM/1 202") {
 		t.Fatalf("--send waited for a reply that was never coming:\n%s", got)
 	}
 }

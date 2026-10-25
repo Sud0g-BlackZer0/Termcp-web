@@ -585,7 +585,7 @@ func TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt(t *testing.T) {
 	h := openPipe(t, s, "cat")
 
 	frame := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
-	if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + frame}); !strings.Contains(out, "202") {
+	if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + frame}); !statusLineIs(out, "202") {
 		t.Fatalf("write did not accept the frame:\n%s", out)
 	}
 
@@ -626,7 +626,7 @@ func TestMCPRecvCursorIsDroppedOnClose(t *testing.T) {
 	// The frame-reading half is covered by TestMCPRecvCursorUsesRawByteSpan.
 	s.setRecvCursor(h, 7)
 
-	if out := termText(t, s, map[string]any{"cmd": "close " + h}); !strings.Contains(out, "204") {
+	if out := termText(t, s, map[string]any{"cmd": "close " + h}); !statusLineIs(out, "204") {
 		t.Fatalf("close: %s", out)
 	}
 	if _, ok := s.recvCursors[h]; ok {
@@ -647,7 +647,7 @@ func TestMCPRecvCursorUsesRawByteSpan(t *testing.T) {
 	h := openPipe(t, s, "cat")
 
 	frame := `{"jsonrpc":"2.0","id":7,"method":"ping"}`
-	if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + frame}); !strings.Contains(out, "202") {
+	if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + frame}); !statusLineIs(out, "202") {
 		t.Fatalf("mcp send: %s", out)
 	}
 
@@ -695,7 +695,7 @@ func TestMCPRecvDrainsEveryQueuedFrame(t *testing.T) {
 		`{"jsonrpc":"2.0","id":3,"method":"notifications/initialized"}`,
 	}
 	for _, f := range frames {
-		if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + f}); !strings.Contains(out, "202") {
+		if out := termText(t, s, map[string]any{"cmd": "call " + h + " --send " + f}); !statusLineIs(out, "202") {
 			t.Fatalf("write did not accept %s:\n%s", f, out)
 		}
 	}
@@ -1323,7 +1323,7 @@ func TestTermRefusalIsNeverSuccessShaped(t *testing.T) {
 		t.Fatal("a refused directive reported success")
 	}
 	out := toolResultText(res)
-	if strings.Contains(out, "204") || strings.Contains(out, "200 OK") {
+	if statusLineIs(out, "204") || statusLineIs(out, "200") {
 		t.Errorf("a refusal was rendered with a success status:\n%s", out)
 	}
 	// The failure must name the reason a caller can act on, not a generic one.
@@ -1553,7 +1553,7 @@ func TestFilePermChmodActuallyChangesTheMode(t *testing.T) {
 	out := termText(t, s, map[string]any{
 		"cmd": "write " + sid + " file " + file + " --op chmod --mode 420",
 	})
-	if !strings.Contains(out, "success") && !strings.Contains(out, "200") {
+	if !strings.Contains(out, "success") && !statusLineIs(out, "200") {
 		t.Fatalf("chmod did not report success: %s", out)
 	}
 
@@ -1798,4 +1798,18 @@ func statusCode(t *testing.T, text string) int {
 		t.Fatalf("status line is not a code: %q", line)
 	}
 	return n
+}
+
+// statusLineIs reports whether a rendered reply's FIRST LINE carries the given code.
+//
+// The whole-reply substring tests it replaces were flaky by construction: a reply echoes
+// the command in `Path:`, and that echo contains the session and channel ids, which are
+// random hex. `Path: call 548e1202-666:1` contains "202", so a test asserting "this did
+// not answer 202" failed for whichever ids happened to spell it and passed for every
+// other draw. It failed on CI's windows leg and never locally.
+//
+// A status code is a claim about the first line. Nothing else in a reply is one.
+func statusLineIs(reply, code string) bool {
+	first, _, _ := strings.Cut(reply, "\n")
+	return strings.HasPrefix(strings.TrimSpace(first), "TERM/1 "+code)
 }

@@ -26,6 +26,11 @@ import (
 // back through a NEW manager — the same path a restarted daemon takes.
 func TestWhyASessionDiedIsRecordedAndSurvivesARestart(t *testing.T) {
 	store := storage.New(t.TempDir())
+	// THE STORE OWNS OPEN FILE HANDLES, so it has to be closed before the temp
+	// directory is removed. On Windows an open handle makes RemoveAll fail and the
+	// failure is reported as the TEST's, not the cleanup's — the assertion that
+	// matters had already passed.
+	t.Cleanup(func() { _ = store.Close() })
 	mm := message.NewManager(store)
 	srv := sshserver.New()
 	if err := srv.Start(); err != nil {
@@ -87,6 +92,11 @@ func TestWhyASessionDiedIsRecordedAndSurvivesARestart(t *testing.T) {
 // indistinguishable from a session that never had its reason recorded at all.
 func TestAClosedOnRequestSessionSaysSo(t *testing.T) {
 	store := storage.New(t.TempDir())
+	// THE STORE OWNS OPEN FILE HANDLES, so it has to be closed before the temp
+	// directory is removed. On Windows an open handle makes RemoveAll fail and the
+	// failure is reported as the TEST's, not the cleanup's — the assertion that
+	// matters had already passed.
+	t.Cleanup(func() { _ = store.Close() })
 	mm := message.NewManager(store)
 	srv := sshserver.New()
 	if err := srv.Start(); err != nil {
@@ -117,6 +127,11 @@ func TestAClosedOnRequestSessionSaysSo(t *testing.T) {
 // to another instance: the manifest is there, the registry is not holding it.
 func TestPersistedSessionFindsARecordTheRegistryDoesNotHold(t *testing.T) {
 	store := storage.New(t.TempDir())
+	// THE STORE OWNS OPEN FILE HANDLES, so it has to be closed before the temp
+	// directory is removed. On Windows an open handle makes RemoveAll fail and the
+	// failure is reported as the TEST's, not the cleanup's — the assertion that
+	// matters had already passed.
+	t.Cleanup(func() { _ = store.Close() })
 	mm := message.NewManager(store)
 	srv := sshserver.New()
 	if err := srv.Start(); err != nil {
