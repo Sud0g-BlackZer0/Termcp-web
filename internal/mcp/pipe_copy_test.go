@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAPipelineCopiesBytesWithoutStoringThem is the whole point of `read | write`:
@@ -26,6 +27,29 @@ func TestAPipelineCopiesBytesWithoutStoringThem(t *testing.T) {
 	// command echo, once as its output — and the assertion could be satisfied by the
 	// echo of a command that never ran.
 	termText(t, s, map[string]any{"cmd": "run " + h + " $1", "args": []any{"echo pipeline-$(echo marker)"}})
+
+	// WAIT FOR THE OUTPUT TO BE IN THE LOG, NOT FOR THE WINDOW TO END.
+	//
+	// A pty `run` returns when the stream goes QUIET, and a quiet moment can fall
+	// between the terminal echoing the command line and the command's own output
+	// arriving — so the copy below could run against a log that holds the echo
+	// (`echo pipeline-$(echo marker)`) and not yet the result (`pipeline-marker`), which
+	// is exactly the string the assertion needs. Observed once in a full shuffled run.
+	//
+	// The wait is a POSITIONAL read, so it consumes nothing: `--cursor 0` names its own
+	// window, and repeating it cannot skip past the bytes the pipeline is about to copy.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		seen := termText(t, s, map[string]any{"cmd": "read " + h + " --cursor 0", "timeout": 2})
+		if strings.Contains(seen, "pipeline-marker") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the command's output never reached the channel's log, so there is nothing "+
+				"for the pipeline to copy:\n%s", seen)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "copied.txt")

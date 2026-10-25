@@ -1117,6 +1117,25 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 				return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path},
 					Body: body}
 			}
+			// AN ARGUMENT IS A WORD IN THIS GRAMMAR TOO.
+			//
+			// The guide names `args`, `vars` and `secrets` in its first screen, so the next
+			// thing a caller types is `help secrets` — which answered "unknown directive:
+			// secrets" while the page already existed, in the argument table that the tool
+			// schema and the generated docs are both rendered from. Deriving this page from
+			// that table is the same rule the flag list follows: a hand-kept copy would
+			// drift the first time an argument was added, and the one that matters most is
+			// the one a caller reads BEFORE typing a credential.
+			if decl, ok := termArgDeclFor(stmt.Args[0]); ok {
+				body := decl.Name + " is an argument of the `term` tool, not a directive.\n\n" + decl.Desc + "\n"
+				if decl.DocNote != "" {
+					body += "\n" + decl.DocNote + "\n"
+				}
+				capped, code, cut, total := capGeneratedCounted(body, win)
+				headers := map[string]string{"Path": stmt.Path}
+				noteTruncated(headers, code, cut, total, win)
+				return envelope.Slot{Code: code, Headers: headers, Body: capped}
+			}
 			// 400, NOT 404 — AND THE SAME 400 THE BARE WORD GETS.
 			//
 			// Typing the word directly answered 400 ("this line is malformed"), while

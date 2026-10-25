@@ -2127,9 +2127,46 @@ func (s *Server) directiveLS(ctx context.Context, stmt directive.Statement, win 
 		return []envelope.Slot{badRequest(stmt, "`ls "+sid+"` lists every channel; for one of them "+
 			"use `get "+sid+":"+strconv.Itoa(idx)+"`.")}
 	}
+	// A TARGET NAMES A COLLECTION, SO A TARGET THAT NAMES NOTHING MUST SAY SO.
+	//
+	// `ls nosuchthing` (and `ls <a session that was rm'd>`) fell through to the same
+	// filtered listing a real session gets, the filter matched nothing, and the reply was
+	// the GLOBAL sentence "(nothing is running)" plus the hint about `ls host`. That
+	// sentence is about a different collection and answers a different question: a caller
+	// asking "what is on this link" was told the machine has no sessions at all. Same
+	// shape as #148 one branch up — a stale or mistyped target read as a fact about the
+	// world (found by dogfooding).
+	//
+	// THE PREDICATE IS THE LISTING'S OWN. `ls <target>` narrows to a session by id OR by
+	// profile name — `ls internal` is how a caller lists the session on the internal
+	// profile — so a check that only knew about ids refused a spelling that had been
+	// working, and the browser test caught it. A target that names neither is the one
+	// case where the empty listing is a lie about the collection.
+	if !s.lsTargetNames(stmt.Target) {
+		return []envelope.Slot{s.slotFromFailure(ctx, stmt, &toolFailure{
+			code: CodeSessionNotFound,
+			msg: fmt.Sprintf("no session %q, so there is nothing to list for it. `ls` lists every live "+
+				"link, `ls --all` includes the ones that have exited.", stmt.Target),
+		})}
+	}
 	return []envelope.Slot{s.directivePS(ctx, withFlags(stmt, map[string]string{
 		"shells": "true", "only-session": stmt.Target, "all": "true",
 	}), win)}
+}
+
+// lsTargetNames reports whether a target names a session the listing can show: its id,
+// or the profile it was opened on.
+//
+// Both spellings are what directivePS's own filter accepts, and keeping the two in step
+// is the point — a check that answered a narrower question than the filter would refuse
+// targets the filter handles.
+func (s *Server) lsTargetNames(target string) bool {
+	for _, sess := range s.sessMgr.ListAll() {
+		if sess.ID == target || sess.SSHConfig == target {
+			return true
+		}
+	}
+	return false
 }
 
 // wantPTY decides whether a new channel gets a terminal.

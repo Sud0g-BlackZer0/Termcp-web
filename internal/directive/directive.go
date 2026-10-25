@@ -1017,8 +1017,13 @@ A shell-level &, | or > is the shell's, so it goes in the VALUE:
 args: ["make -j8 > /tmp/build.log 2>&1 &"].
 
 $0 is refused (args is 1-based), and ${N} is the unambiguous spelling at 10 or
-more. Named values are a different channel: vars substitutes $NAME as one quoted
-word of DATA, which is right for a flag value and wrong for a command line.
+more. Named values ($NAME) and positional ones ($1) are ONE channel under two
+spellings: the POSITION decides how a value is inserted, never which table named it,
+so a $NAME that is the whole payload behaves exactly like a $1 that is. What differs
+between the tables is the RECORD, not the insertion — args and vars are written to the
+server log, secrets is not. (This paragraph used to say vars was "wrong for a command
+line" and quoted the value as data; it was true before the two tables were merged, and
+it contradicted the argument's own documentation for as long as it survived.)
 
 EVERY VALUE YOU PASS HAS TO BE NAMED SOMEWHERE IN cmd, and this is checked before
 anything runs. A value nothing references is refused rather than dropped: the
@@ -3045,14 +3050,14 @@ func SessionTargetProblem(op Op, target string) string {
 	return op.Name + " needs a SESSION, not the channel \"" + target + "\". " +
 		"A channel address names one shell inside a session; this directive acts on the " +
 		"container. To stop a single channel use `close " + target + "`; to erase the " +
-		"whole session use its id without the `:N` suffix (`ps` prints it in the first column)."
+		"whole session use its id without the `:N` suffix (`ls` prints it in the first column)."
 }
 
 // ChannelTargetProblem is the message for a target that names a container where a
 // channel was required.
 //
 // It is exported because the same refusal happens at two layers — the parser and
-// the dispatch entry — and the two must say the same thing. It names `ps` and the
+// the dispatch entry — and the two must say the same thing. It names `ls` and the
 // shape rather than just rejecting, because "which channel" is answerable in one
 // line and an error that only refuses leaves the caller to work it out.
 func ChannelTargetProblem(op Op, target string) string {
