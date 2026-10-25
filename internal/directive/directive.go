@@ -507,7 +507,8 @@ var ops = []Op{
 
 	{Name: "run", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChain,
 		PayloadType: PayloadVar,
-		Usage:       "run <channel> $1   |   run <session> <index> $1",
+		Flags:       []string{"tail:number", "grep", "grep-limit:number", "encoding"},
+		Usage:       "run <channel> $1 [--tail N] [--grep RE]   |   run <session> <index> $1",
 		Detail:      runDetail},
 	{Name: "input", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChain,
 		PayloadType: PayloadVar,
@@ -967,6 +968,20 @@ Content-Range on this reply numbers the CHANNEL's stream, not the reply: bytes
 399-639/640 means the sample is the last 241 bytes of a 640-byte stream, not that
 399 bytes were dropped. The number is where the sample sits, so it stays stable
 across reads and tells you whether you are behind.
+
+--tail AND --grep ARE THE SAME WINDOW PARAMETERS read HAS, and both are scoped to
+THIS COMMAND's output rather than to the channel:
+
+  run a1f3:1 $1 --tail 20          the last 20 lines of what this command printed
+  run a1f3:1 $1 --grep 'ERROR'     only the lines that match, with their real line numbers
+
+That scoping is the whole point of having them here. A 5000-word scan prints about
+1.4 MB, and the caller wants its last lines or its errors — but the alternative was
+to run and then read, and the read would have had to say where the command's output
+began. --tail is taken from this command's window, so a previous command's unread
+tail is not part of the answer; a trimmed reply says so (Trimmed: the last N of M
+lines) instead of dropping the rest silently. --grep counts MATCHES, not raw lines,
+and does not consume the transcript: two searches see the same bytes.
 
 For a program whose output you need in full, prefer pipe (--argv) on the same
 entry — its exit IS observable, so a read after it returns the whole output.

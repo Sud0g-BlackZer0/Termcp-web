@@ -753,7 +753,46 @@ func (s *Server) runOne(ctx context.Context, stmt directive.Statement, win termA
 		}
 	}
 
-	return s.readSlotAfter(ctx, stmt, win, start)
+	// --grep CHANGES WHAT THE WINDOW COUNTS, so it takes the same path `read` does
+	// (matches rather than raw lines) — scoped to this command, which is the region the
+	// caller just created (issue #187).
+	if _, ok := stmt.Flag("grep"); ok {
+		return s.readGrepFrom(ctx, stmt, win, start)
+	}
+	slot := s.readSlotAfter(ctx, stmt, win, start)
+	return tailSlot(slot, stmt)
+}
+
+// tailSlot keeps the last N lines of a reply, and says that it did.
+//
+// NOT THE TRANSCRIPT'S OWN TAIL SELECTOR. That one reads from the end of the whole
+// buffer and IGNORES an offset when both are given (window.go switches on TailLines
+// before Offset), so `run --tail 20` would hand back the previous command's last lines
+// as part of this command's output — the exact confusion issue #194 is about. The
+// window is read from this command's input first, and the tail is taken from it.
+//
+// The trim is a FACT, not a silent loss: the reply names how many lines it kept and how
+// many the window held, and Content-Range still describes the stream span the window
+// came from (so `read --cursor` continues from where this reply's bytes ended).
+func tailSlot(slot envelope.Slot, stmt directive.Statement) envelope.Slot {
+	v, ok := stmt.Flag("tail")
+	if !ok || v == "" || slot.Code >= 400 || slot.Body == "" {
+		return slot
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return slot
+	}
+	lines := strings.Split(strings.TrimRight(slot.Body, "\n"), "\n")
+	if len(lines) <= n {
+		return slot
+	}
+	if slot.Headers == nil {
+		slot.Headers = map[string]string{}
+	}
+	slot.Headers["Trimmed"] = fmt.Sprintf("the last %d of %d lines of this command's output; read the rest with `read`", n, len(lines))
+	slot.Body = strings.Join(lines[len(lines)-n:], "\n")
+	return slot
 }
 
 // checkWindow validates the read window a command will be read with, before the

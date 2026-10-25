@@ -44,6 +44,15 @@ const (
 // scan behind a parameter that looks like a size cap). Both are wrong, and the caller
 // cannot tell which one it got. A directive states its own cost.
 func (s *Server) readGrep(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
+	return s.readGrepFrom(ctx, stmt, win, 0)
+}
+
+// readGrepFrom is readGrep over the region that starts at from.
+//
+// The offset is what lets `run --grep` search THIS command's output rather than the
+// whole channel: a run knows where its input started, and a search that ignored that
+// would answer with matches from a command the caller has already dealt with.
+func (s *Server) readGrepFrom(ctx context.Context, stmt directive.Statement, win termArgs, from int64) envelope.Slot {
 	pattern, _ := stmt.Flag("grep")
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -99,7 +108,7 @@ func (s *Server) readGrep(ctx context.Context, stmt directive.Statement, win ter
 	// channel that just exited can be readable by bytes while line N is not yet
 	// indexed — the observed symptom was `Lines-Scanned: 1` on a buffer holding eight
 	// lines. An offset read needs no index: the bytes are the bytes.
-	args["offset"] = float64(0)
+	args["offset"] = float64(from)
 
 	res, fail := s.callTool(ctx, "shell_output", args)
 	if fail != nil {
