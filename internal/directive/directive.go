@@ -1106,7 +1106,7 @@ index — so a1f3:1 and a1f3 1 are the same node.
 
 const getDetail = `Describe one node: a session, one of its channels, or a peer.
 
-  get a1f3              status, endpoint, mode, age
+  get a1f3              status, endpoint, mode, age, and why it ended
   get a1f3:1            that channel's state
   get a1f3 cdp:1            the connection: endpoint, frame cursor, attached tabs
   get a1f3 cdp:1@<id>       one tab: target, url, enabled domains

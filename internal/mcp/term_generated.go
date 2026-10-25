@@ -156,6 +156,13 @@ func (s *Server) directiveInfo(ctx context.Context, stmt directive.Statement, wi
 		writeKV(&b, "exit_code", fmt.Sprint(*info.ExitCode))
 	}
 	writeKV(&b, "created", ageOf(info.CreatedAt))
+	// WHY IT IS NOT RUNNING, right after the state it explains. A session that is
+	// `exited` with no reason is the shape issue #176 reported: every surface agreed it
+	// was gone and none said why. Deliberate closes record their reason too, so the line
+	// never has to be guessed at.
+	if info.ExitReason != "" {
+		writeKV(&b, "exit_reason", info.ExitReason)
+	}
 	writeKV(&b, "approval", approvalSummaryText(info))
 	for _, sh := range sess.ListChildShells() {
 		writeKV(&b, "shell", fmt.Sprintf("%s %s %s %s",

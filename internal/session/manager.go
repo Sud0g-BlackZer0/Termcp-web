@@ -418,6 +418,25 @@ func (m *Manager) persist(sessions ...[]api.Session) {
 	}
 }
 
+// PersistedSession returns the manifest on disk for a session id, or nil when there is
+// none.
+//
+// It is the answer to a question the registry cannot answer about itself: a caller that
+// failed to find a session wants to know whether this process never had it or whether the
+// record is sitting on disk unloaded (issue #176). Two roads lead to the second: the id
+// was `rm`'d after this process started, or the caller is talking to a different
+// `--data-dir` / a different instance than the one that created the session.
+func (m *Manager) PersistedSession(sessionID string) *api.Session {
+	if m.store == nil || sessionID == "" {
+		return nil
+	}
+	sess, err := m.store.ReadSession(sessionID)
+	if err != nil || sess == nil {
+		return nil
+	}
+	return sess
+}
+
 // RestoreDead loads persisted sessions into the registry as read-only DEAD
 // sessions (no SSH connection), so previously disconnected sessions reappear as
 // tiles after a restart and their history is viewable. Call once at boot.
