@@ -67,6 +67,35 @@ func TestWhyASessionDiedIsRecordedAndSurvivesARestart(t *testing.T) {
 
 	// THE RESTART. A fresh manager over the same directory restores the session as DEAD;
 	// "why" is the one thing it cannot reconstruct from the bytes it has.
+	//
+	// WAIT FOR THE MANIFEST, NOT FOR THE STATUS. markDeadLocked sets the reason under
+	// the session's lock and unlocks — which is what makes DEAD observable — and only
+	// then calls the dead hook that persists. So "the status flipped" is not "the reason
+	// is on disk", and a restart inside that window reads the PREVIOUS manifest. That
+	// window is one function call wide in the product, but a test that restarts
+	// immediately lands in it about once in ten CI runs: measured on ubuntu and macos,
+	// live "❌ SSH connection lost: EOF" against restored "".
+	//
+	// Polling the disk is the honest assertion: it checks that the reason IS persisted
+	// (a reason that is never written still fails, by timing out), without claiming an
+	// order the product does not promise.
+	wantReason := info.ExitReason
+	writeDeadline := time.Now().Add(10 * time.Second)
+	for {
+		rec, err := store.ReadSession(id)
+		if err == nil && rec != nil && rec.ExitReason == wantReason {
+			break
+		}
+		if time.Now().After(writeDeadline) {
+			onDisk := "(no manifest)"
+			if rec, err := store.ReadSession(id); err == nil && rec != nil {
+				onDisk = "" + rec.ExitReason + ""
+			}
+			t.Fatalf("the reason never reached the manifest: live %q, on disk %s", wantReason, onDisk)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	m2 := NewManager(message.NewManager(store), store, nil)
 	if err := m2.RestoreDead(); err != nil {
 		t.Fatalf("restore: %v", err)
