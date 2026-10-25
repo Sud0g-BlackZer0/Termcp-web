@@ -1194,6 +1194,16 @@ const writeDetail = `Write a file on a session.
 or --local-path. The write is a plain overwrite, not an append: use --offset only
 when you mean to patch bytes in place.
 
+PATHS ARE POSIX ON THE WIRE, ON EVERY PLATFORM. SFTP is a POSIX-shaped protocol, so
+a Windows absolute path has a second spelling: C:/tc/x is /C:/tc/x on the wire, and
+that is what a server recognises as absolute. Written as C:/tc/x it is RELATIVE to
+a server that resolves paths against a working directory, which then joins the two
+and fails with a system error about the file NAME — a sentence that says nothing
+about the spelling, and that arrives after an extension's whitelist has already
+admitted the path. Use /C:/... in the request and in the extension's declared
+paths, which are matched against the same string you pass. help read, docs/api.md
+and this page said nothing about it until issue #186.
+
 --local-path IS A TRANSFER AND ANSWERS 202 WITH A RECEIPT. Moving a file over SFTP
 takes as long as the link takes, and a caller behind a tool-call watchdog would
 otherwise be killed partway through — leaving a truncated file on the far side with

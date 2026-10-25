@@ -79,7 +79,7 @@ func (s *Server) handleFileRead(ctx context.Context, request mcpgo.CallToolReque
 	defer sftpCli.Close()
 	result, err := sftpCli.ReadFile(remotePath, offset, length, mode, localPath, charset)
 	if err != nil {
-		return fileErr(err), nil
+		return fileErr(err, remotePath), nil
 	}
 	return jsonResult(toMap(result)), nil
 }
@@ -117,7 +117,7 @@ func (s *Server) handleFileWrite(ctx context.Context, request mcpgo.CallToolRequ
 		defer sftpCli.Close()
 		n, err := sftpCli.WriteFile(remotePath, offset, data, mode, localPath, localOffset, length)
 		if err != nil {
-			return fileErr(err), nil
+			return fileErr(err, remotePath), nil
 		}
 		return jsonResult(map[string]any{"ok": true, "bytes_written": n}), nil
 	}
@@ -190,7 +190,7 @@ func (s *Server) handleFileReplace(ctx context.Context, request mcpgo.CallToolRe
 
 	n, err := sftpCli.ReplaceInFile(remotePath, oldText, newText)
 	if err != nil {
-		return fileErr(err), nil
+		return fileErr(err, remotePath), nil
 	}
 	// bytes_written is the whole point of reporting here: the caller can confirm the
 	// edit landed without a second stat, and a replace that reports nothing leaves
@@ -220,7 +220,7 @@ func (s *Server) handleFileStat(ctx context.Context, request mcpgo.CallToolReque
 	}
 	result, err := sftpCli.StatFile(remotePath)
 	if err != nil {
-		return fileErr(err), nil
+		return fileErr(err, remotePath), nil
 	}
 	m := toMap(result)
 	// Build the URLs and the echoed id from the RESOLVED session, never the
@@ -250,7 +250,7 @@ func (s *Server) handleFileDelete(ctx context.Context, request mcpgo.CallToolReq
 	}
 	defer sftpCli.Close()
 	if err := sftpCli.RemoveFile(remotePath); err != nil {
-		return fileErr(err), nil
+		return fileErr(err, remotePath), nil
 	}
 	return successResult(), nil
 }
@@ -272,7 +272,7 @@ func (s *Server) handleFileRename(ctx context.Context, request mcpgo.CallToolReq
 	}
 	defer sftpCli.Close()
 	if err := sftpCli.RenameFile(fromPath, toPath); err != nil {
-		return fileErr(err), nil
+		return fileErr(err, fromPath), nil
 	}
 	return successResult(), nil
 }
@@ -293,7 +293,7 @@ func (s *Server) handleFileMakeDir(ctx context.Context, request mcpgo.CallToolRe
 	}
 	defer sftpCli.Close()
 	if err := sftpCli.MakeDir(remotePath); err != nil {
-		return fileErr(err), nil
+		return fileErr(err, remotePath), nil
 	}
 	return successResult(), nil
 }
@@ -388,7 +388,7 @@ func (s *Server) handleFilePerm(ctx context.Context, request mcpgo.CallToolReque
 		}
 		mode := os.FileMode(getFloat64(args, "mode", 0))
 		if err := sftpCli.ChmodFile(remotePath, mode); err != nil {
-			return fileErr(err), nil
+			return fileErr(err, remotePath), nil
 		}
 	case "chown":
 		remotePath := getString(args, "remote_path", "")
@@ -409,7 +409,7 @@ func (s *Server) handleFilePerm(ctx context.Context, request mcpgo.CallToolReque
 			return toolError(CodeInvalidArgument, "%s", "uid and gid must be >= 0"), nil
 		}
 		if err := sftpCli.ChownFile(remotePath, *uid, *gid); err != nil {
-			return fileErr(err), nil
+			return fileErr(err, remotePath), nil
 		}
 	case "chtimes":
 		remotePath := getString(args, "remote_path", "")
@@ -426,7 +426,7 @@ func (s *Server) handleFilePerm(ctx context.Context, request mcpgo.CallToolReque
 		atime := clock.Time(int64(getFloat64(args, "atime", 0)))
 		mtime := clock.Time(int64(getFloat64(args, "mtime", 0)))
 		if err := sftpCli.ChtimesFile(remotePath, atime, mtime); err != nil {
-			return fileErr(err), nil
+			return fileErr(err, remotePath), nil
 		}
 	default:
 		return toolError(CodeInvalidArgument, "%s", "action must be chmod, chown, or chtimes"), nil
@@ -461,7 +461,7 @@ func (s *Server) handleFileLinkOp(ctx context.Context, request mcpgo.CallToolReq
 		}
 		target, err := sftpCli.ReadLink(remotePath)
 		if err != nil {
-			return fileErr(err), nil
+			return fileErr(err, remotePath), nil
 		}
 		return jsonResult(map[string]any{"target": target}), nil
 	case "symlink":
@@ -471,7 +471,7 @@ func (s *Server) handleFileLinkOp(ctx context.Context, request mcpgo.CallToolReq
 			return toolError(CodeInvalidArgument, "%s", "symlink requires target and link_path"), nil
 		}
 		if err := sftpCli.SymlinkFile(target, linkPath); err != nil {
-			return fileErr(err), nil
+			return fileErr(err, linkPath), nil
 		}
 	case "link":
 		existingPath := getString(args, "existing_path", "")
@@ -480,7 +480,7 @@ func (s *Server) handleFileLinkOp(ctx context.Context, request mcpgo.CallToolReq
 			return toolError(CodeInvalidArgument, "%s", "link requires existing_path and new_path"), nil
 		}
 		if err := sftpCli.LinkFile(existingPath, newPath); err != nil {
-			return fileErr(err), nil
+			return fileErr(err, newPath), nil
 		}
 	default:
 		return toolError(CodeInvalidArgument, "%s", "action must be readlink, symlink, or link"), nil
@@ -517,7 +517,7 @@ func (s *Server) handleFileFsOp(ctx context.Context, request mcpgo.CallToolReque
 		}
 		size := int64(getFloat64(map[string]any{"size": sizeVal}, "size", 0))
 		if err := sftpCli.TruncateFile(remotePath, size); err != nil {
-			return fileErr(err), nil
+			return fileErr(err, remotePath), nil
 		}
 	case "realpath":
 		remotePath := getString(args, "remote_path", "")
@@ -526,7 +526,7 @@ func (s *Server) handleFileFsOp(ctx context.Context, request mcpgo.CallToolReque
 		}
 		canonical, err := sftpCli.RealPath(remotePath)
 		if err != nil {
-			return fileErr(err), nil
+			return fileErr(err, remotePath), nil
 		}
 		// TWO SERVERS, TWO MEANINGS OF "REAL PATH".
 		//
@@ -572,7 +572,7 @@ func (s *Server) handleFileFsOp(ctx context.Context, request mcpgo.CallToolReque
 		}
 		result, err := sftpCli.StatVFS(remotePath)
 		if err != nil {
-			return fileErr(err), nil
+			return fileErr(err, remotePath), nil
 		}
 		return jsonResult(toMap(result)), nil
 	default:
@@ -597,7 +597,8 @@ func (s *Server) handleFileGetwd(_ context.Context, request mcpgo.CallToolReques
 	defer sftpCli.Close()
 	dir, err := sftpCli.Getwd()
 	if err != nil {
-		return fileErr(err), nil
+		// No caller path is involved: the working directory is the server's own.
+		return fileErr(err, ""), nil
 	}
 	return jsonResult(map[string]any{"directory": dir}), nil
 }
@@ -612,19 +613,81 @@ func (s *Server) handleFileGetwd(_ context.Context, request mcpgo.CallToolReques
 //
 // The not-found case is also the one a caller hits most: stat/read/delete on a
 // missing path is an ordinary answer, not a server fault.
-func fileErr(err error) *mcpgo.CallToolResult {
+// fileErr renders a file-operation failure.
+//
+// THE ERRORS CARRY NO PATHS, SO THIS TAKES THE ONE THAT WAS ASKED FOR. A Windows
+// absolute path has a second spelling on the wire, and a caller who does not know
+// that gets a system error about the file name — see wireSpellingHint. The hint
+// needs the caller's own path to be useful, so it is passed in rather than
+// recovered from the error text (which is the server's, and may be rewritten).
+func fileErr(err error, remotePath string) *mcpgo.CallToolResult {
+	code, msg := classifyFileErr(err)
+	if code == CodeOperationFailed {
+		msg += wireSpellingHint(remotePath)
+	}
+	return toolError(code, "%s", msg)
+}
+
+func classifyFileErr(err error) (string, string) {
 	switch {
 	case err == nil:
-		return toolError(CodeOperationFailed, "%s", "unknown file error")
+		return CodeOperationFailed, "unknown file error"
 	case errors.Is(err, os.ErrNotExist), errors.Is(err, pkgsftp.ErrSSHFxNoSuchFile):
-		return toolError(CodeFileNotFound, "%s", err.Error())
+		return CodeFileNotFound, err.Error()
 	case errors.Is(err, os.ErrPermission), errors.Is(err, pkgsftp.ErrSSHFxPermissionDenied):
-		return toolError(CodeForbidden, "%s", err.Error())
+		return CodeForbidden, err.Error()
 	case errors.Is(err, filesftp.ErrIsDirectory):
 		// A directory is a caller mistake, not a fault: 400 rather than 500.
-		return toolError(CodeInvalidArgument, "%s", err.Error())
+		return CodeInvalidArgument, err.Error()
 	}
-	return toolError(CodeOperationFailed, "%s", err.Error())
+	return CodeOperationFailed, err.Error()
+}
+
+// wireSpellingHint names the second spelling of a Windows absolute path.
+//
+// SFTP IS A POSIX-SHAPED PROTOCOL, so the wire form of `C:/tc/x` is `/C:/tc/x`.
+// A server that resolves relative paths against a working directory applies
+// path.IsAbs — which is POSIX and therefore says `C:/tc/x` is RELATIVE — and joins
+// it onto that directory. Measured on a relay-backed Windows session (issue #186):
+//
+//	C:/tc/Diana/go.mod  ->  open C:\Users\Administrator\C:\tc\Diana\go.mod: ...
+//	                        The filename, directory name, or volume label syntax is incorrect.
+//
+// That sentence is about the file NAME, so the caller reads it as "my path is wrong"
+// with no way to learn that the path is fine and the SPELLING is not. And it arrives
+// AFTER the extension whitelist admitted the path, because the whitelist compares the
+// caller's own string — so the failure looks like it came from the layer above.
+//
+// The hint is offered on a 500 only: a 404 or 403 is an answer about a path the
+// server could resolve, and appending "maybe your spelling" to it would be noise on
+// the common case (a file that really is not there).
+//
+// It names the extension whitelist too, because `paths` is matched against the same
+// string the caller passes: a caller who fixes the request but not the declaration
+// gets a 403 next, which is the same confusion one step later.
+func wireSpellingHint(remotePath string) string {
+	if !looksLikeWindowsDrivePath(remotePath) {
+		return ""
+	}
+	return "\n\nHint: this path is a Windows drive path, and SFTP carries paths in POSIX form, " +
+		"where the absolute spelling is " + "/" + remotePath + ". A server that resolves relative " +
+		"paths against a working directory treats " + remotePath + " as relative and joins it onto " +
+		"that directory — which is why the error above names a doubled path. Use " + "/" + remotePath +
+		" in the request AND in the extension's declared paths, since the whitelist matches the " +
+		"string you pass."
+}
+
+// looksLikeWindowsDrivePath reports whether p is a drive path as a caller would type
+// it: `C:/x`, `C:\x`, or `c:x`. Not the wire form (/C:/x) — that one is already right.
+func looksLikeWindowsDrivePath(p string) bool {
+	if len(p) < 2 {
+		return false
+	}
+	c := p[0]
+	if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+		return false
+	}
+	return p[1] == ':'
 }
 
 // isWindowsDrivePrefixedPath reports whether p looks like "/C:/..." or "/C:\...",
