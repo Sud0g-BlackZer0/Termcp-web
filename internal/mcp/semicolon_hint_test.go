@@ -56,7 +56,16 @@ func TestNoHintWhenNothingWasCutShort(t *testing.T) {
 // variable reference and the shell text is the value it carries.
 func TestHelpRunDocumentsArgs(t *testing.T) {
 	s := newTestServer(t)
-	got := termText(t, s, map[string]any{"cmd": "help run"})
+	// THE WHOLE PAGE, NOT THE DEFAULT WINDOW. `help run` is longer than 8 KiB, so a read
+	// with the default window returns a 206 with the tail withheld — and a grep over what
+	// arrived then reports "the page does not document vars" when the page documents it
+	// two kilobytes further down. The window is the caller's to raise, and this test is
+	// the caller.
+	got := termText(t, s, map[string]any{
+		"cmd":         "help run",
+		"bytes_limit": float64(32768),
+		"lines_limit": float64(2000),
+	})
 	for _, want := range []string{"args", "$1", "exactly one reference", "vars"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("help run does not mention %q:\n%s", want, got)

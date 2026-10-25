@@ -508,7 +508,7 @@ var ops = []Op{
 	{Name: "run", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChain,
 		PayloadType: PayloadVar,
 		Flags:       []string{"tail:number", "grep", "grep-limit:number", "encoding"},
-		Usage:       "run <channel> $1 [--tail N] [--grep RE]   |   run <session> <index> $1",
+		Usage:       "run <channel> [--tail N] [--grep RE] $1   |   run <session> <index> $1",
 		Detail:      runDetail},
 	{Name: "input", Core: true, Kind: KindPayload, Target: true, MinArgs: 1, TargetKind: TargetChain,
 		PayloadType: PayloadVar,
@@ -982,10 +982,11 @@ output. It is the offset BEFORE the input — the echo included — so re-readin
 it gives back this window rather than skipping the line you just typed.
 
 --tail AND --grep ARE THE SAME WINDOW PARAMETERS read HAS, and both are scoped to
-THIS COMMAND's output rather than to the channel:
+THIS COMMAND's output rather than to the channel. THEY GO BEFORE THE PAYLOAD, because
+the payload is the rest of the line:
 
-  run a1f3:1 $1 --tail 20          the last 20 lines of what this command printed
-  run a1f3:1 $1 --grep 'ERROR'     only the lines that match, with their real line numbers
+  run a1f3:1 --tail 20 $1          the last 20 lines of what this command printed
+  run a1f3:1 --grep ERROR $1       only the lines that match, with their real line numbers
 
 That scoping is the whole point of having them here. A 5000-word scan prints about
 1.4 MB, and the caller wants its last lines or its errors — but the alternative was
