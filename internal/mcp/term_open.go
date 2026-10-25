@@ -73,6 +73,15 @@ func (s *Server) directiveOpen(ctx context.Context, stmt directive.Statement, wi
 		}
 	}
 	if name, ok := stmt.Flag("name"); ok {
+		// AN EMPTY LABEL IS NOT A LABEL, and accepting it would be the silent kind of
+		// help: a caller that computed a name and got "" opens an unnamed channel and
+		// believes it is labelled (issue #188). Leaving the flag off is how a caller says
+		// "no label".
+		if strings.TrimSpace(name) == "" {
+			return []envelope.Slot{badRequest(stmt,
+				"`--name` was given an empty value. A channel either has a label or it does not — "+
+					"pass a name, or leave the flag off.")}
+		}
 		args["name"] = name
 	}
 	if onExit, ok := stmt.Flag("on-exit"); ok {
@@ -200,10 +209,19 @@ func createdBody(doc map[string]any, mode string) string {
 	if i := strings.LastIndex(handle, ":"); i > 0 {
 		split = fmt.Sprintf(" (session %s, channel %s)", handle[:i], handle[i+1:])
 	}
-	if mode == "pty" {
-		return fmt.Sprintf("%s pty%s\n", handle, split)
+	// THE LABEL IS PRINTED NEXT TO THE ADDRESS IT LABELS, and only when the caller chose
+	// one. A caller that asked for a name gets to see that the server took it, and one
+	// that did not gets the reply it always got — an empty column teaches nothing. The
+	// generated default (`shell-<id>`) is not a label the caller chose, so it is not
+	// shown as one (issue #188).
+	label := ""
+	if name := getString(doc, "name", ""); name != "" && !strings.HasPrefix(name, "shell-") {
+		label = " [" + name + "]"
 	}
-	return fmt.Sprintf("%s pipe (stderr separable: --stream e)%s\n", handle, split)
+	if mode == "pty" {
+		return fmt.Sprintf("%s pty%s%s\n", handle, label, split)
+	}
+	return fmt.Sprintf("%s pipe (stderr separable: --stream e)%s%s\n", handle, label, split)
 }
 
 // shortHandle renders `<session>:N` from a handler reply.

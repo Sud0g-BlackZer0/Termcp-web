@@ -378,6 +378,11 @@ func (s *Server) handleStartSubShell(_ context.Context, request mcpgo.CallToolRe
 	}
 	cs, err := sess.CreateChildShell(command, toolArgs, mode == "pty", rows, cols, name)
 	if err != nil {
+		// A LABEL ALREADY IN USE IS AN ARGUMENT PROBLEM (issue #188): the caller can fix
+		// it by choosing another name, and answering 500 would say the server failed.
+		if errors.Is(err, session.ErrLabelTaken) {
+			return toolError(CodeInvalidArgument, "%s", err.Error()), nil
+		}
 		return toolError(CodeOperationFailed, "%s", err.Error()), nil
 	}
 	// Echo sess.ID, not the argument: the response's ids must be usable as ids, and

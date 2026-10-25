@@ -1078,6 +1078,24 @@ terminal would read an empty reply as "no output" instead of "still running".
 keep leaves it readable (the default, so its output is never lost), close frees it
 immediately. It has no meaning on a pty, whose shell does not exit.
 
+--name IS A LABEL FOR THE CHANNEL, and it is not an address:
+
+  open a1f3 --argv sleep 5 --name web
+
+  a1f3:2 pipe (stderr separable: --stream e) [web] (session a1f3, channel 2)
+
+The address stays a1f3:2 — what the reply prints in the first column is what every
+other command takes — and the label is the column ls and get show next to it. It
+exists because a caller running four things at once reads :1 .. :4 and cannot tell
+which is which, and because the numbers are minted in order rather than kept.
+
+A LABEL IS TAKEN OR REFUSED. Two channels in one session cannot share one: the label
+would stop doing the only thing it does, and ls would show two rows that read alike.
+The refusal names the channel that holds it. An exited channel still holds its label
+(it is still addressable for reading), so reuse means choosing another name.
+--name with an empty value is refused too: a channel either has a label or it does
+not, and silently opening an unnamed one hides a name that was never computed.
+
 The other children are named by a KIND before the key:
 
   open a1f3 forward --local-port 8080 --remote-host db --remote-port 5432
