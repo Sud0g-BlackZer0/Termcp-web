@@ -1042,7 +1042,7 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 		// The boot manifest: one extension per line, with its state and handle, so
 		// a caller that lost its context gets its toolset back in one call. Capped like
 		// the rest: a host with twenty installed extensions is a reply, not a receipt.
-		return generatedSlot(stmt, win, s.extensionListing(res))
+		return generatedSlot(stmt, win, s.extensionListing(res, boolFlag(stmt, "all")))
 	}
 	doc, _ := toolResultMap(res)
 	return generatedSlot(stmt, win, compactDocument(doc))
@@ -1551,12 +1551,27 @@ func listFromDoc(res *mcpgo.CallToolResult, listKey, field string) string {
 // `<session>:<index>` — the same spelling `ps` prints and every later command
 // pastes — so a caller that copies this row can act on it directly instead of
 // calling `get ext` to translate.
-func (s *Server) extensionListing(res *mcpgo.CallToolResult) string {
+func (s *Server) extensionListing(res *mcpgo.CallToolResult, all bool) string {
 	doc, ok := toolResultMap(res)
 	if !ok {
 		return toolResultText(res)
 	}
 	items, _ := doc["extensions"].([]any)
+	// THE LIST CAPS ITSELF, AND NAMES WHAT IT WITHHELD (issue #185).
+	//
+	// The byte window would cut forty rows mid-line and report it in a header about
+	// bytes: "Truncated: 900 bytes withheld" does not tell a caller whether it is
+	// missing one extension or thirty, and the one it needs may be in the part it did
+	// not see. A count plus a command is something it can act on; "and more" is a wall.
+	//
+	// This is a VIEW, not a limit on what can be reached: `ls ext --all` lists every
+	// one, and an extension that is not shown is still addressable by name.
+	const listed = 10
+	hidden := 0
+	if !all && len(items) > listed {
+		hidden = len(items) - listed
+		items = items[:listed]
+	}
 	var b strings.Builder
 	for _, raw := range items {
 		item, ok := raw.(map[string]any)
@@ -1580,6 +1595,9 @@ func (s *Server) extensionListing(res *mcpgo.CallToolResult) string {
 	}
 	if b.Len() == 0 {
 		return "(no extensions installed)\n"
+	}
+	if hidden > 0 {
+		b.WriteString(fmt.Sprintf("(%d more not shown; `ls ext --all` lists every extension)\n", hidden))
 	}
 	return b.String()
 }

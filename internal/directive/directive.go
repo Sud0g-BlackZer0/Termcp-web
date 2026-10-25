@@ -1483,6 +1483,9 @@ DRIVING ONE. ext list gives each extension's status, its handle and the first
 line of its notes; ext get <name> gives the whole template, notes included. Read
 the notes before first use — they are the extension's own operating instructions,
 written by whoever pinned it, and they are the part that changes how you drive it.
+THE LIST SHOWS TEN AND COUNTS THE REST (ls ext --all lists every one), because a
+host with forty extensions is a page of rows and the one you need may be past the
+bottom; a name not shown is still addressable, so nothing is out of reach.
 Only a status of available has handles: probing is a connection attempt in
 flight, unavailable has last_failure and next_retry, disabled is parked by its
 author. Take the handle from the LATEST listing after a restart — a restarted
