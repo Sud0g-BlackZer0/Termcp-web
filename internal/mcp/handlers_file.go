@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -93,16 +94,64 @@ func (s *Server) handleFileWrite(ctx context.Context, request mcpgo.CallToolRequ
 	// byte. They shared the value 0 once, and the destructive one was the default.
 	offset := int64PtrFromArgs(args, "offset")
 	data := getString(args, "data", "")
-	mode := getString(args, "mode", "text")
+	// EMPTY MEANS NOT GIVEN, and the distinction is load-bearing: --mode is the
+	// ENCODING of --data, so an explicit "text" on a --local-path write is a flag that
+	// cannot be honoured, while saying nothing is the ordinary case. Spelling the
+	// default as "text" made the two indistinguishable (#190).
+	mode := getString(args, "mode", "")
 	localPath := getString(args, "local_path", "")
 	localOffset := int64(getFloat64(args, "local_offset", 0))
 	length := int64(getFloat64(args, "length", 0))
+
+	// ONE PLACE, BOTH PATHS (#190).
+	//
+	// `--mode` was validated on the `--data` path and IGNORED on the `--local-path`
+	// one: `--mode 0755` answered 500 on the first and 202 "done" on the second,
+	// while the file landed with the default permissions. A caller who meant "make
+	// this script executable" then watched `open --argv` fail with "permission
+	// denied" and went looking at mounts, users and paths — the parameter had been
+	// dropped in silence, which is the one failure mode a reply cannot recover from.
+	//
+	// The check is on the VALUE, so both routes refuse the same input with the same
+	// sentence. Empty means "not given", which is text.
+	switch mode {
+	case "":
+		// NOT GIVEN. For --data that means text, which is what every caller expects;
+		// for --local-path it means nothing is decoded, which is the ordinary case.
+	case "text", "hex":
+		// A LOCAL FILE CARRIES ITS OWN BYTES, so a decoding mode has nothing to do
+		// here — and saying so is the difference between a caller fixing its command
+		// and a caller believing the flag took effect.
+		if localPath != "" {
+			return toolError(CodeInvalidArgument, "%s",
+				"--mode "+mode+" does not apply to --local-path: the file's bytes are sent as they are. "+
+					"Drop --mode, or pass --mode file to say so."), nil
+		}
+	case "file":
+	default:
+		return toolError(CodeInvalidArgument, "%s",
+			"unknown mode "+strconv.Quote(mode)+": it is the ENCODING of --data, one of text, hex, file. "+
+				"(Permissions are not this flag: use --op chmod --mode 0755.)"), nil
+	}
 
 	if remotePath == "" {
 		return toolError(CodeInvalidArgument, "%s", "remote_path required"), nil
 	}
 	if localPath == "" && data == "" {
 		return toolError(CodeInvalidArgument, "%s", "data or local_path required"), nil
+	}
+
+	// A LOCAL PATH IS RESOLVED ONCE, HERE, AND THE RESOLUTION IS WHAT TRAVELS (#192).
+	//
+	// The path is relative to the DAEMON's working directory — not the caller's, and
+	// not the session's — because the file is read by the process that owns this
+	// handler. A caller whose cwd is elsewhere gets `open local file: open
+	// ./autopilot/s1.sh: no such file or directory`, which quotes the path it TYPED
+	// and never the path that was tried, so the first reading is "but the file is
+	// right there". Resolving up front puts the answer in the error and in the task
+	// record, and it is the same path the transfer then opens.
+	if localPath != "" {
+		localPath = resolveLocalPath(localPath)
 	}
 
 	sftpCli, bad := s.sftpClient(sessionID)
@@ -613,6 +662,24 @@ func (s *Server) handleFileGetwd(_ context.Context, request mcpgo.CallToolReques
 //
 // The not-found case is also the one a caller hits most: stat/read/delete on a
 // missing path is an ordinary answer, not a server fault.
+// resolveLocalPath makes a caller's local path absolute, so the error and the task
+// record name the file that was tried rather than the one that was typed (#192).
+//
+// IT CANNOT FAIL USEFULLY. filepath.Abs only fails when the working directory cannot
+// be determined, and a daemon that cannot ask for its own cwd has a problem this
+// handler is not the place to report: returning the caller's spelling keeps the
+// behaviour it had, and the error from opening the file still says something true.
+func resolveLocalPath(p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
+}
+
 // fileErr renders a file-operation failure.
 //
 // THE ERRORS CARRY NO PATHS, SO THIS TAKES THE ONE THAT WAS ASKED FOR. A Windows

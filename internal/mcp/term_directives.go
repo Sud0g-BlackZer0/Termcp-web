@@ -1484,6 +1484,21 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 		headers["Status"] = status
 		if exit != nil {
 			headers["Exit-Code"] = fmt.Sprint(*exit)
+			// 126 AND 127 ARE TWO ANSWERS, AND THE SHELL'S OWN WORDS DO NOT TELL THEM
+			// APART (issue #191). "permission denied" covers both "this file has no
+			// execute bit" and "this filesystem is mounted noexec", and the caller who
+			// reads it starts chmod-ing a file that is already 755. "command not
+			// found" is a PATH answer. Neither is a fact about the terminal, so it is
+			// stated rather than guessed at: the two causes are named, and the mode is
+			// one command away (`--op stat` reports it).
+			if *exit == 126 {
+				headers["Hint"] = "exit 126: the program exists but could not be executed. Check its mode " +
+					"(`get <session> file <path> --op stat` reports mode/uid/gid); a filesystem mounted noexec " +
+					"refuses execution even at 755, which `mount` on the remote will show."
+			} else if *exit == 127 {
+				headers["Hint"] = "exit 127: the shell could not find that program — check the name and the " +
+					"remote PATH, not the file's permissions."
+			}
 			// WHO ASKED DECIDES WHETHER A NON-ZERO EXIT IS THIS REPLY'S FAILURE.
 			//
 			// `run` reports the command it just sent, so a non-zero exit is news
