@@ -8,6 +8,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -125,6 +126,28 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 // peer writes) are skipped by the trim in firstMCPMessage, and the offset advances
 // over them too, so a resumed read starts at the next '{'.
 func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, handle string, win termArgs) envelope.Slot {
+	// ONE READER AT A TIME, FOR THE WHOLE READ (#183). The lock spans the poll loop
+	// because that is where the duplication happens: two readers that both start
+	// before the frame arrives both find it. It is held across the recursive call's
+	// setup but NOT across the recursion itself, which re-enters here.
+	reader := s.recvReader(handle)
+	reader.Lock()
+	defer reader.Unlock()
+	for {
+		slot, readAgain := s.mcpRecvFrameOnce(ctx, stmt, handle, win)
+		if !readAgain {
+			return slot
+		}
+		// The sub-MCP sampling request was answered underneath and the caller still
+		// has no frame, so another one is taken — INSIDE the lock, because this
+		// reader is still the one reading.
+	}
+}
+
+// mcpRecvFrameOnce is one frame, with the caller holding this handle's reader lock.
+// readAgain asks for another read because the frame it took was answered on the
+// caller's behalf (a sub-MCP's sampling request) rather than delivered.
+func (s *Server) mcpRecvFrameOnce(ctx context.Context, stmt directive.Statement, handle string, win termArgs) (envelope.Slot, bool) {
 	from := s.recvCursor(handle)
 	// A whole frame has to fit the window, or a single large reply could never be
 	// delivered: the window is a cap on what one recv will consider, not a
@@ -165,12 +188,12 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 			"shell_id", handle, "offset", float64(from),
 			"max_bytes", float64(window), "timeout", float64(0), "strip_ansi", false))
 		if fail != nil {
-			return s.slotFromFailure(ctx, stmt, fail)
+			return s.slotFromFailure(ctx, stmt, fail), false
 		}
 		var ok bool
 		doc, ok = toolResultMap(res)
 		if !ok {
-			return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
+			return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)}), false
 		}
 		body = getString(doc, "output", "")
 		if _, complete := firstMCPMessage(body); complete {
@@ -181,7 +204,7 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 		}
 		select {
 		case <-ctx.Done():
-			return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: ctx.Err().Error()})
+			return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: ctx.Err().Error()}), false
 		case <-time.After(recvPollInterval):
 		}
 	}
@@ -200,12 +223,12 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 			return envelope.Slot{Code: 413, Headers: map[string]string{
 				"Path": stmt.Path, "Error-Code": "frame_too_large",
 				"Content-Range": envelope.UnsatisfiedRange(total),
-			}, Body: fmt.Sprintf("a frame at offset %d is longer than the %d-byte window", from, window)}
+			}, Body: fmt.Sprintf("a frame at offset %d is longer than the %d-byte window", from, window)}, false
 		}
 		return envelope.Slot{Code: 204, Headers: map[string]string{
 			"Path":          stmt.Path,
 			"Content-Range": envelope.ContentRange(from, from+rawLen-1, total),
-		}, Body: "no complete frame yet" + recvHint(win) + notAFrame(body)}
+		}, Body: "no complete frame yet" + recvHint(win) + notAFrame(body)}, false
 	}
 	start := from + int64(strings.Index(body, frame))
 	end := start + int64(len(frame))
@@ -231,17 +254,17 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 	// answer is written back to the sub-MCP's stdin and the cursor moves past it.
 	if handled, slot := s.forwardSubMCPSampling(ctx, stmt, handle, frame); handled {
 		if slot != nil {
-			return *slot
+			return *slot, false
 		}
 		// Answered and written back: read again, so this recv still delivers a frame.
-		return s.mcpRecvFrame(ctx, stmt, handle, win)
+		return envelope.Slot{}, true
 	}
 
 	return envelope.Slot{
 		Code:    200,
 		Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.ContentRange(start, end-1, end)},
 		Body:    frame,
-	}
+	}, false
 }
 
 // mcpAwaitReply reads one frame for a `call` that has already been written, and says
@@ -411,6 +434,22 @@ const minRecvWindow = 1 << 20
 // Keyed by handle without the server's own offset bookkeeping: two callers reading
 // the same channel is a race the protocol does not describe, and serialising here
 // means neither silently loses a frame to the other's window.
+// recvReader returns the mutex that makes one handle's frames have one reader at a
+// time, creating it on first use.
+func (s *Server) recvReader(handle string) *sync.Mutex {
+	s.recvCursorMu.Lock()
+	defer s.recvCursorMu.Unlock()
+	if s.recvReaders == nil {
+		s.recvReaders = make(map[string]*sync.Mutex)
+	}
+	m, ok := s.recvReaders[handle]
+	if !ok {
+		m = &sync.Mutex{}
+		s.recvReaders[handle] = m
+	}
+	return m
+}
+
 func (s *Server) recvCursor(handle string) int64 {
 	s.recvCursorMu.Lock()
 	defer s.recvCursorMu.Unlock()
@@ -422,6 +461,10 @@ func (s *Server) dropRecvCursor(handle string) {
 	s.recvCursorMu.Lock()
 	defer s.recvCursorMu.Unlock()
 	delete(s.recvCursors, handle)
+	// The reader lock goes too: handles are minted monotonically, so a reopened
+	// channel never reuses this key and the map would grow by one entry per channel
+	// the process ever opened.
+	delete(s.recvReaders, handle)
 }
 
 func (s *Server) setRecvCursor(handle string, at int64) {
