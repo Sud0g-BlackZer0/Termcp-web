@@ -122,7 +122,7 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 // With an explicit offset read the position is unambiguous and stateless on the
 // server side, so the map below is the only state and it advances by exactly the
 // frame that was returned. Bytes between frames (the newlines a line-delimited
-// peer writes) are skipped by the trim in firstJSONValue, and the offset advances
+// peer writes) are skipped by the trim in firstMCPMessage, and the offset advances
 // over them too, so a resumed read starts at the next '{'.
 func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, handle string, win termArgs) envelope.Slot {
 	from := s.recvCursor(handle)
@@ -173,7 +173,7 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 			return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
 		}
 		body = getString(doc, "output", "")
-		if _, complete := firstJSONValue(body); complete {
+		if _, complete := firstMCPMessage(body); complete {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -190,7 +190,7 @@ func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, han
 	// the reply was ANSI-stripped or escaped, so advancing by it lands mid-frame.
 	// windowResult names this quantity raw_bytes for exactly this reason.
 	rawLen := int64(getFloatAny(doc, "raw_bytes", 0))
-	frame, complete := firstJSONValue(body)
+	frame, complete := firstMCPMessage(body)
 	total := int64(getFloatAny(doc, "total_bytes", 0))
 	if !complete {
 		// `has_more` says the channel holds bytes this window did not return, which
@@ -451,7 +451,17 @@ func recvHint(win termArgs) string {
 // worth waiting on. A caller that retries a banner retries for ever.
 func notAFrame(body string) string {
 	s := strings.TrimSpace(body)
-	if s == "" || s[0] == '{' || s[0] == '[' {
+	if s == "" {
+		return ""
+	}
+	if s[0] == '{' || s[0] == '[' {
+		// THE START OF A VALUE. If it is a complete value that simply is not a message,
+		// saying so is the difference between "wait" and "this will never become a
+		// frame": `[0]` is legal JSON, so a caller left with "not yet" would wait out
+		// its whole window for bytes that already arrived (#184).
+		if json.Valid([]byte(s)) && !isMCPMessage(s) {
+			return " — these bytes are JSON, but not a JSON-RPC message (no `id` or `method`), so no frame was taken"
+		}
 		// Empty, or the start of a value that is simply not finished: the honest
 		// "not yet", and nothing to explain.
 		return ""
@@ -472,7 +482,7 @@ func notAFrame(body string) string {
 	return " — the bytes in front are not a frame: " + strconv.Quote(line)
 }
 
-// firstJSONValue returns the first complete JSON value in raw.
+// firstMCPMessage returns the first complete JSON-RPC message in raw.
 //
 // It scans for a complete object or array rather than trusting a newline: a frame
 // may be pretty-printed, and a line-delimited peer may still emit a value with
@@ -489,13 +499,20 @@ func notAFrame(body string) string {
 // had already arrived, with no way to act on it.
 //
 // SO EVERY CANDIDATE IS TRIED, in the order the buffer holds them, and the first one
-// that decodes into a complete value wins. A candidate that is not JSON fails within
-// its first byte or two, which is what keeps the scan cheap.
+// that is a MESSAGE wins. A candidate that is not JSON fails within its first byte or
+// two, which is what keeps the scan cheap.
 //
 // IN BUFFER ORDER, NOT GROUPED BY OPENER. Trying every '{' before any '[' looks
 // equivalent and is not: a batch array `[{...}]` starts with '[', so scanning '{'
 // first would return the object INSIDE the batch as if it were the frame.
-func firstJSONValue(raw string) (string, bool) {
+//
+// AND A CANDIDATE HAS TO BE A MESSAGE, NOT MERELY JSON (#184). The criterion used to
+// be "it parses", which is a different question and has an everyday wrong answer: a
+// PowerShell error line reads `InputObject[0]: some text`, `[0]` is legal JSON, and a
+// caller waiting for a reply was handed `[0]` with a 200 — a plausible wrong answer,
+// which is worse than "not yet". The caller's own contract is the message: this verb
+// parses ONE JSON-RPC FRAME, and `[0]` is not one.
+func firstMCPMessage(raw string) (string, bool) {
 	for i := 0; i < len(raw); i++ {
 		if raw[i] != '{' && raw[i] != '[' {
 			continue
@@ -504,7 +521,12 @@ func firstJSONValue(raw string) (string, bool) {
 		var value json.RawMessage
 		err := dec.Decode(&value)
 		if err == nil {
-			return strings.TrimSpace(string(value)), true
+			if isMCPMessage(string(value)) {
+				return strings.TrimSpace(string(value)), true
+			}
+			// A COMPLETE VALUE THAT IS NOT A MESSAGE IS SKIPPED, NOT RETURNED: the
+			// caller asked for a frame, and ordinary output is allowed to hold JSON.
+			continue
 		}
 		// THE ONE FAILURE THAT MEANS "WAIT" RATHER THAN "WRONG PLACE". The input
 		// ending inside a value is a frame still arriving; anything else is a
@@ -518,6 +540,44 @@ func firstJSONValue(raw string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// isMCPMessage reports whether value has the shape of a JSON-RPC message: an object
+// carrying `id` or `method`, or an array of such objects (the batch form the spec
+// allows).
+//
+// THE SHAPE IS THE WHOLE TEST, and it is deliberately not "it parses": a caller that
+// is handed a value it did not ask for cannot tell it from an answer. `id` OR `method`
+// rather than both, because a notification carries only `method` and a reply only
+// `id`. A missing `jsonrpc` field is NOT checked: JSON-RPC 1.0 has no such field, and
+// refusing a peer over it would turn a working channel into an unreadable one.
+func isMCPMessage(value string) bool {
+	if isMessageObject(value) {
+		return true
+	}
+	var batch []json.RawMessage
+	if err := json.Unmarshal([]byte(value), &batch); err != nil {
+		return false
+	}
+	for _, item := range batch {
+		if !isMessageObject(string(item)) {
+			return false
+		}
+	}
+	return len(batch) > 0
+}
+
+// isMessageObject is isMCPMessage for the object form, which a batch is a list of.
+func isMessageObject(value string) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(value), &obj); err != nil || obj == nil {
+		return false
+	}
+	if _, ok := obj["id"]; ok {
+		return true
+	}
+	_, ok := obj["method"]
+	return ok
 }
 
 // isSyntaxEOF reports whether a JSON decode failed only because the input ended.

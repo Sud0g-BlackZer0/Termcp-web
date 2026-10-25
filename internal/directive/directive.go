@@ -859,6 +859,14 @@ frame is held for the next call rather than cut in half. That cursor is kept per
 channel, independent of the plain byte reader — so reading raw bytes never consumes
 a frame, and reading frames never shifts the byte position of a plain read.
 
+WHAT COUNTS AS A FRAME IS THE MESSAGE, NOT THE JSON. A frame is an object carrying
+id or method, or an array of such objects (a batch); a value that is merely legal
+JSON is skipped, and the scan keeps looking behind it. This is not pedantry: a
+server's own log line can hold JSON — PowerShell writes InputObject[0]: some text —
+and a caller handed [0] reads a peer that answered with an empty array. When
+nothing in the window is a message, the 204 quotes the bytes it looked at, so a
+caller can tell a banner from a slow peer.
+
 AN EMPTY REPLY IS USUALLY EARLY, NOT BROKEN. On a live pty a 204 means "sampled,
 nothing new since the cursor" — the command may simply not have printed yet. The
 reply carries Sampled: true and, when the call did not wait at all, a Hint naming
@@ -1423,10 +1431,15 @@ address terminal work by shell_id. For the same reason, NEVER close, terminate o
 delete an extension's session: it would take down more than the one you are
 looking at. termcp restarts a dead extension on its own; take the new handle.
 
-kind=mcp, stdio: the handle is the SHELL running the server. Drive it with mcp
-tools|send|recv (see help mcp). Frames can arrive in pieces — a result with
+kind=mcp, stdio: the handle is the SHELL running the server. Drive it the way any
+channel is driven — call <handle> <frame> to write one and wait for its reply, or
+read <handle> --frame to take the next frame off the stream. Frames can arrive in
+pieces — a result with
 partial_tail_bytes > 0 is an unfinished frame, so keep reading the same cursor
-until a complete JSON object is in hand; never parse a partial frame. The
+until a complete JSON object is in hand; never parse a partial frame. Only a
+JSON-RPC message is a frame (an object with id or method, or an array of them), so
+a line of the server's own output that happens to hold JSON is reported rather than
+returned. The
 server's logs come on stderr, so read them with --stream e and they never splice
 into a frame. Handshake: initialize, then notifications/initialized, then
 tools/list.

@@ -93,40 +93,107 @@ func TestRecvSaysWhenTheBytesInFrontAreNotAFrame(t *testing.T) {
 
 // THE SCAN TRIES EVERY CANDIDATE, not just the first bracket. A banner can hold
 // several, and only one of them is the frame.
-func TestFirstJSONValueTriesEveryCandidate(t *testing.T) {
+//
+// THE FIXTURES ARE MESSAGES because that is what a frame is (#184): a value counts
+// only when it carries `id` or `method`. This test used to feed it `{"a":1}` — legal
+// JSON, not a message — and that is exactly the looseness the issue measured, so the
+// fixtures moved rather than the assertion.
+func TestFirstMCPMessageTriesEveryCandidate(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 		want string
 	}{
-		{"banner then frame", `[warn] x [y] {"a":1}`, `{"a":1}`},
-		{"an array frame is a frame too", `[warn] [1,2,3]`, `[1,2,3]`},
-		{"noise with braces that never close", `{oops {"a":1}`, `{"a":1}`},
+		{"banner then frame", `[warn] x [y] {"id":1}`, `{"id":1}`},
+		{"an array frame is a frame too", `[warn] [{"id":1},{"method":"x"}]`, `[{"id":1},{"method":"x"}]`},
+		{"noise with braces that never close", `{oops {"id":1}`, `{"id":1}`},
 		{"nothing but noise", `[warn] nothing here`, ""},
 		// A HALF-ARRIVED VALUE IS STILL "NOT YET", and saying anything else would be
 		// wrong in the other direction: the caller should wait, and there is nothing
 		// to explain. notAFrame is what decides that, so it is pinned here rather
 		// than through a two-second wait on the door.
-		{"a partial frame at the front", `{"a":`, ""},
-		{"a partial frame at the end", `[warn] {"a":`, ""},
-		{"the value comes first", `{"a":1} trailing`, `{"a":1}`},
+		{"a partial frame at the front", `{"id":`, ""},
+		{"a partial frame at the end", `[warn] {"id":`, ""},
+		{"the value comes first", `{"id":1} trailing`, `{"id":1}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := firstJSONValue(tc.in)
+			got, ok := firstMCPMessage(tc.in)
 			if tc.want == "" {
 				if ok {
-					t.Errorf("firstJSONValue(%q) = %q, want no value", tc.in, got)
+					t.Errorf("firstMCPMessage(%q) = %q, want no value", tc.in, got)
 				}
 				return
 			}
 			if !ok {
-				t.Fatalf("firstJSONValue(%q) found nothing, want %q", tc.in, tc.want)
+				t.Fatalf("firstMCPMessage(%q) found nothing, want %q", tc.in, tc.want)
 			}
 			if got != tc.want {
-				t.Errorf("firstJSONValue(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("firstMCPMessage(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// WHAT COUNTS AS A FRAME (#184). The criterion is the SHAPE of a JSON-RPC message,
+// because the caller asked for a frame and "it parses as JSON" has an everyday wrong
+// answer: PowerShell writes `InputObject[0]: some text`, and `[0]` is legal JSON.
+//
+// The line to hold: a value that is only JSON is SKIPPED, so the scan keeps looking
+// rather than answering with something the caller will read as an answer.
+func TestOnlyAMessageIsAFrame(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// A reply carries id, a notification carries method, a batch is a list.
+		{"a reply", `{"jsonrpc":"2.0","id":2,"result":{}}`, `{"jsonrpc":"2.0","id":2,"result":{}}`},
+		{"a notification", `{"jsonrpc":"2.0","method":"Page.loadEventFired"}`, `{"jsonrpc":"2.0","method":"Page.loadEventFired"}`},
+		{"a batch", `[{"id":1},{"method":"x"}]`, `[{"id":1},{"method":"x"}]`},
+		// 1.0 has no jsonrpc field, and refusing a peer over a missing field would turn
+		// a working channel into an unreadable one.
+		{"a 1.0 reply", `{"id":1,"result":1}`, `{"id":1,"result":1}`},
+		{"the reporter's line", `InputObject[0]: some text`, ""},
+		{"a bare zero in brackets", `[0]`, ""},
+		{"an object with no id and no method", `{"a":1}`, ""},
+		// A CONTAINER THAT IS NOT A BATCH IS NOT SKIPPED WHOLESALE, and the answer is
+		// the message inside it. That is not a loophole: the cursor advances only past
+		// the bytes RETURNED, so `[0]` stays in the buffer and the next read sees it
+		// again — nothing is lost, and a real message is not withheld because it arrived
+		// inside a malformed wrapper.
+		{"a batch holding a non-message", `[{"id":1},[0]]`, `{"id":1}`},
+		{"json null", `null`, ""},
+		{"a string", `"hello"`, ""},
+		{"a number", `42`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := firstMCPMessage(tc.in)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("firstMCPMessage(%q) = %q; that is not a JSON-RPC message", tc.in, got)
+				}
+				return
+			}
+			if !ok || got != tc.want {
+				t.Fatalf("firstMCPMessage(%q) = %q, %v; want %q", tc.in, got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// AND THE SCAN KEEPS LOOKING PAST IT. Skipping the candidate is what makes the
+// criterion usable: the real reply is usually BEHIND the line that looked like JSON,
+// and answering "not yet" while it sits in the buffer is the other half of the bug.
+func TestAFrameBehindANonMessageIsStillFound(t *testing.T) {
+	raw := "InputObject[0]: some text\n" + `{"jsonrpc":"2.0","id":7,"result":{"ok":true}}` + "\n"
+	got, ok := firstMCPMessage(raw)
+	if !ok {
+		t.Fatal("the reply behind the bracketed noise was not found")
+	}
+	if want := `{"jsonrpc":"2.0","id":7,"result":{"ok":true}}`; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

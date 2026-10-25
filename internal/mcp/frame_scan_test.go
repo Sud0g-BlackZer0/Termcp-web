@@ -39,17 +39,17 @@ func TestAPeerBannerWithABracketDoesNotHideTheFrame(t *testing.T) {
 		{"noise between frames", frame + "\n" + banner + frame, frame},
 		{"a frame on its own", frame, frame},
 		{"a batch array", `[{"jsonrpc":"2.0","id":1}]`, `[{"jsonrpc":"2.0","id":1}]`},
-		{"nested brackets in the frame itself", `{"a":[[1,2],{"b":[3]}]}`, `{"a":[[1,2],{"b":[3]}]}`},
+		{"nested brackets in the frame itself", `{"id":1,"result":[[1,2],{"b":[3]}]}`, `{"id":1,"result":[[1,2],{"b":[3]}]}`},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok := firstJSONValue(c.raw)
+			got, ok := firstMCPMessage(c.raw)
 			if !ok {
-				t.Fatalf("firstJSONValue found no frame in %q", c.raw)
+				t.Fatalf("firstMCPMessage found no frame in %q", c.raw)
 			}
 			if got != c.want {
-				t.Fatalf("firstJSONValue:\n got %q\nwant %q", got, c.want)
+				t.Fatalf("firstMCPMessage:\n got %q\nwant %q", got, c.want)
 			}
 		})
 	}
@@ -67,8 +67,8 @@ func TestAHalfArrivedFrameIsNotAFrame(t *testing.T) {
 		"[1, 2",
 		"[chrome-devtools-mcp] banner only, no frame yet\n",
 	} {
-		if got, ok := firstJSONValue(raw); ok {
-			t.Fatalf("firstJSONValue(%q) answered %q; nothing complete has arrived", raw, got)
+		if got, ok := firstMCPMessage(raw); ok {
+			t.Fatalf("firstMCPMessage(%q) answered %q; nothing complete has arrived", raw, got)
 		}
 	}
 }
@@ -77,7 +77,7 @@ func TestAHalfArrivedFrameIsNotAFrame(t *testing.T) {
 // (which adds strings.Index(body, frame) to the window start) still lands on the frame.
 func TestTheFrameIsFoundAfterTheNoise(t *testing.T) {
 	raw := "[peer] starting\n" + `{"jsonrpc":"2.0","id":7}` + "\n"
-	frame, ok := firstJSONValue(raw)
+	frame, ok := firstMCPMessage(raw)
 	if !ok {
 		t.Fatal("no frame found")
 	}
