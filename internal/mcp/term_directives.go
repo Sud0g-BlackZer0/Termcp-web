@@ -1004,13 +1004,29 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 // `timeout` bounds both and defaults to two seconds.
 func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, win termArgs, start int64) envelope.Slot {
 	args := argsOf("shell_id", stmt.Target, "offset", float64(start))
+	// WHERE THIS COMMAND'S OUTPUT BEGINS (issue #194).
+	//
+	// The reply is a SAMPLE of the channel's stream, and the one number that turns the
+	// sample into something a caller can act on is the offset the input landed at: it is
+	// what `read --offset <n>` takes to get the rest, and it is what tells an empty reply
+	// apart from a caller whose cursor is already past the output. The number was already
+	// computed — it is the offset this window was scoped to — it just was not said.
+	//
+	// It is the offset BEFORE the input, not the marker's: the window starts where the
+	// command's bytes begin, so re-reading from Input-At gives back this same window
+	// (marker included) rather than skipping the echo.
+	inputAt := strconv.FormatInt(start, 10)
 	// A byte limit of 0 means "hand back the channel, consume nothing": the
 	// directive must not even read, or a JSON-RPC frame destined for `mcp recv`
 	// would be eaten by the envelope.
 	if win.BytesLimit == 0 {
 		return envelope.Slot{
-			Code:    204,
-			Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.UnsatisfiedRange(start)},
+			Code: 204,
+			Headers: map[string]string{
+				"Path":          stmt.Path,
+				"Content-Range": envelope.UnsatisfiedRange(start),
+				"Input-At":      inputAt,
+			},
 		}
 	}
 	waitStarted := time.Now()
@@ -1028,6 +1044,12 @@ func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, wi
 		windowExpired = s.awaitWindow(ctx, stmt.Target, win, start)
 	}
 	slot := s.readSlot(ctx, stmt, win, args, time.Since(waitStarted))
+	if slot.Code < 400 {
+		if slot.Headers == nil {
+			slot.Headers = map[string]string{}
+		}
+		slot.Headers["Input-At"] = inputAt
+	}
 	if waitedOnAPty && !windowExpired && slot.Code < 400 {
 		// HOW THE WAIT ENDED IS A FACT, AND IT WAS THE ONE THING NOT SAID.
 		//

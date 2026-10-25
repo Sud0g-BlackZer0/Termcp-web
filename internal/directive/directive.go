@@ -969,6 +969,18 @@ Content-Range on this reply numbers the CHANNEL's stream, not the reply: bytes
 399 bytes were dropped. The number is where the sample sits, so it stays stable
 across reads and tells you whether you are behind.
 
+Input-At IS WHERE THIS COMMAND'S OUTPUT BEGINS, and it is the one number that makes
+the sample usable on its own:
+
+  run a1f3:1 $1 make       -> 200, Input-At: 4096, Content-Range: bytes 4096-5231/5231
+  read a1f3:1 --offset 4096    the same bytes back, and then it follows the stream
+
+It is present even when the reply is empty, which is the case that needs it most: a
+204 with Input-At says the command was accepted and has produced nothing yet, and the
+same 204 without it is indistinguishable from a cursor that is already past the
+output. It is the offset BEFORE the input — the echo included — so re-reading from
+it gives back this window rather than skipping the line you just typed.
+
 --tail AND --grep ARE THE SAME WINDOW PARAMETERS read HAS, and both are scoped to
 THIS COMMAND's output rather than to the channel:
 
