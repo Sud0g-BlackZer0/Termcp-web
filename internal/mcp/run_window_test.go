@@ -104,6 +104,45 @@ func TestRunGrepSearchesThisCommandOnly(t *testing.T) {
 	}
 }
 
+// TestRunGrepWaitsForTheCommandItJustTyped is the defect the dogfood pass found.
+//
+// `read --grep` reads with a zero blocking window on purpose: the bytes are already in
+// the transcript, and waiting for bytes that are not there would make "no match" take as
+// long as the caller's patience and answer the same. A run's bytes are NOT already
+// there, and the same zero window made it scan nothing and answer
+// "no line matched `c` in the 0 lines scanned" — true, and useless.
+//
+// No retry loop here: the assertion IS that one call waits.
+func TestRunGrepWaitsForTheCommandItJustTyped(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "sh")
+	defer termText(t, s, map[string]any{"cmd": "close " + h})
+
+	// The first run establishes that the channel works; the searched one is the test.
+	runWindowUntil(t, s, h, "warm", "printf 'warm\n'")
+
+	// THE MARKER MUST NOT BE IN THE ECHO. `printf 'wanted'` puts the word in the
+	// transcript twice — once as the typed line and once as the output — so a search that
+	// does not wait is satisfied by the echo and the test proves nothing (verified: it
+	// passed with the fix removed). Running a script file keeps the command line
+	// (`sh /tmp/…/probe.sh`) free of the word the script prints.
+	script := writeScript(t, "sleep 1; printf 'noise\\nwanted\\n'")
+	got := termText(t, s, map[string]any{
+		"cmd":     "run " + h + " --grep wanted $1",
+		"args":    []any{"sh '" + script + "'"},
+		"timeout": 5,
+	})
+	if !statusLineIs(got, "200") {
+		t.Fatalf("a searched run must find the line it just printed, in one call:\n%s", got)
+	}
+	if !strings.Contains(replyBody(got), "wanted") {
+		t.Errorf("the search did not wait for the command's output:\n%s", got)
+	}
+	if strings.Contains(replyBody(got), "noise") {
+		t.Errorf("--grep returned a line that does not match:\n%s", got)
+	}
+}
+
 // TestRunSaysWhereItsInputLanded is issue #194.
 //
 // The reply to a run is a sample of the channel's stream, and Input-At is the offset the

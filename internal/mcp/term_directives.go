@@ -756,8 +756,24 @@ func (s *Server) runOne(ctx context.Context, stmt directive.Statement, win termA
 	// --grep CHANGES WHAT THE WINDOW COUNTS, so it takes the same path `read` does
 	// (matches rather than raw lines) — scoped to this command, which is the region the
 	// caller just created (issue #187).
+	//
+	// IT WAITS FIRST, THE SAME WAY THE PLAIN PATH DOES. A search over bytes that have not
+	// arrived is not a search: it scanned nothing and answered "no line matched … in the 0
+	// lines scanned", which is true and useless — found by driving it, not by a test. The
+	// wait is the same one the read half uses, so the two halves of a `run` cannot
+	// disagree about when the command's output is there.
 	if _, ok := stmt.Flag("grep"); ok {
-		return s.readGrepFrom(ctx, stmt, win, start)
+		waited := s.awaitRunOutput(ctx, stmt, win, start)
+		slot := s.readGrepFrom(ctx, stmt, win, start, readTimeout(remaining(win, waited)))
+		if slot.Code < 400 {
+			if slot.Headers == nil {
+				slot.Headers = map[string]string{}
+			}
+			// A searched run is still a run: the caller needs the offset its input landed
+			// at as much here as anywhere (issue #194).
+			slot.Headers["Input-At"] = strconv.FormatInt(start, 10)
+		}
+		return slot
 	}
 	slot := s.readSlotAfter(ctx, stmt, win, start)
 	return tailSlot(slot, stmt)
@@ -987,6 +1003,28 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 		args["charset"] = v
 	}
 	return s.readSlot(ctx, stmt, win, args, 0)
+}
+
+// awaitRunOutput waits for the command a `run` just typed, using the same signals the
+// read half uses, and returns how long it waited.
+//
+// ONE PLACE DECIDES WHEN A COMMAND'S OUTPUT IS THERE, because two places deciding it
+// separately is how the plain half and the searched half of one verb end up disagreeing:
+// `run --grep` read with a zero window while `run` read with the caller's, so a search
+// over bytes that had not arrived answered "no line matched … in the 0 lines scanned".
+//
+// A LIVE PIPE HAS NO SIGNAL AT ALL — no exit to wait for and no pty to go quiet — so this
+// returns immediately and the caller's window is spent by the read that follows, which
+// blocks for it. That is the division the plain path makes, and it is why the return is a
+// duration rather than a bool: what is LEFT of the window is what the read may spend.
+func (s *Server) awaitRunOutput(ctx context.Context, stmt directive.Statement, win termArgs, start int64) time.Duration {
+	began := time.Now()
+	if s.completionWait(stmt.Target) {
+		s.awaitExit(ctx, stmt.Target, win)
+	} else if s.ptyRunning(stmt.Target) {
+		s.awaitWindow(ctx, stmt.Target, win, start)
+	}
+	return time.Since(began)
 }
 
 // readSlotAfter reads the window a command produced, starting where it was
