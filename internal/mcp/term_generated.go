@@ -1208,6 +1208,13 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	// submitting a job reads an eaten command as a successful one.
 	b.WriteString("                               into the TERMINAL: whoever owns the input reads it\n")
 	b.WriteString("                               (a program waiting for an answer TAKES your line).\n")
+	// THE INTERFACE IS IMPRECISE, AND THAT IS THE INTERFACE. A caller that wants a
+	// precise state (did it run? is something in the foreground?) is asking the terminal
+	// for something a person at the same screen never had either — they read the screen.
+	// Saying so here costs two lines and prevents the whole class of "the reply does not
+	// tell me" reports about a pty.
+	b.WriteString("                               A terminal is not precise: the bytes in the reply\n")
+	b.WriteString("                               ARE the state — read them as you would a screen.\n")
 	b.WriteString("                               `help run` has what that means for the reply.\n")
 	b.WriteString("  args: [\"make && test\"]\n")
 	b.WriteString("  input/key/read are the same three steps taken separately, for a TUI or a\n")

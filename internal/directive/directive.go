@@ -908,6 +908,15 @@ see your own text answered by the other program, it was input, not a command. Ch
 the echo when a reply makes no sense, and send the matching key (key <channel>
 ctrl-c, ctrl-d) or write the answer deliberately.
 
+THE INTERFACE IS IMPRECISE, AND THAT IS THE INTERFACE — not a defect waiting to be
+fixed. There is no precise state to ask for: a person at the same screen cannot tell
+"the command ran" from "the program ate my line" except by reading what the screen
+shows, and a terminal has never offered anything better. So the bytes in the reply ARE
+the state, and an empty window is not evidence that nothing happened: it means no
+bytes arrived while you were watching. USE IT THE WAY A HUMAN USES ONE — look, then
+decide what to type next. Demanding a status code for "did it run" is asking for a
+sense the terminal does not have.
+
 SOMEONE ELSE MAY BE USING THIS CHANNEL. That is normal, not a fault: the same
 channel is open in the Web UI, and a person (or a script on the HTTP entrance) can
 type into it between your calls. Nothing ever promises you the channel is yours
