@@ -137,6 +137,12 @@ function renderExtensionGrid(rows) {
      disappeared when empty was a panel the author could not open to author
      with. */
   grid.innerHTML = '';
+  /* THE PLATE'S WORDS ARE ITS EMPTY STATE, so they go the moment a card exists —
+     the same rule the archive applies to its own sentence. The element stays in
+     the DOM (it is part of the plate) and is toggled, never re-created: a node
+     that came and went would be another thing the next render has to know about. */
+  var inscription = document.getElementById('ext-inscription');
+  if (inscription) inscription.hidden = list.length > 0;
   if (list.length === 0) {
     grid.appendChild(renderExtensionEmpty());
   } else {

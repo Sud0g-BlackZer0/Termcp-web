@@ -248,7 +248,12 @@ func TestExtensionsWSFrame(t *testing.T) {
 	rows := summarizeExtensions(h.Extensions)
 	if row := findExtension(rows, "docs"); row == nil {
 		t.Fatalf("WS frame misses the extension, got %+v", rows)
-	} else if row.Status != extensions.StatusUnavailable && row.Status != extensions.StatusProbing && row.Status != extensions.StatusAvailable {
+	} else if row.Status != extensions.StatusIdle && row.Status != extensions.StatusUnavailable && row.Status != extensions.StatusProbing && row.Status != extensions.StatusAvailable {
+		/* IDLE belongs in this set: an on-demand extension that nothing has asked
+		   for yet is reported as idle rather than unavailable, and this assertion
+		   is the one place the frame's status vocabulary is written down. Leaving
+		   it out made the test a race — green once the reconciler had started
+		   probing, red on the frames before that. */
 		t.Errorf("WS row status %q is not one the reconciler reports", row.Status)
 	}
 }
