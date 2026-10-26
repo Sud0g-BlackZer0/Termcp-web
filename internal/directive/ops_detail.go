@@ -289,6 +289,20 @@ closed one alike. --stream o keeps stdout only, e keeps stderr only; the default
 keeps both. --cursor N is a byte offset (end+1 from Content-Range), --from-line N
 a complete line, --tail N the last N lines.
 
+WITH --stream o|e THE NUMBERS ARE THAT STREAM'S, NOT THE CHANNEL'S. The channel is
+one interleaved write order, so a channel offset counts the other stream's bytes:
+"stderr starts at 7" is a fact about stdout. Every address in the reply --
+Content-Range, Offset, Next-Offset, and the N that --cursor and --offset take --
+is therefore numbered in the stream you selected, and paging with them stays inside
+it. Content-Range: bytes */0 on a stdout-only channel means "this stream is empty",
+which the old channel-wide "*/7" could not say: seven was somebody else's bytes.
+
+Positions still address the BYTES, so a decode (--encoding) does not move them: a
+GBK window whose text becomes UTF-8 is still at the offsets of the bytes it came
+from. --from-line and --tail count CHANNEL lines, because a line only exists in the
+bytes as they were written; the byte addresses in their replies are the stream's,
+as above.
+
 Typed-By: api ON A REPLY says bytes entered this channel at or after the start of
 the window you were just shown through the HTTP/WebSocket surface — a person in a
 browser, or any script driving that entrance. The transcript records the ENTRANCE
@@ -420,15 +434,11 @@ things, since only one of them has a remedy:
   ...they are the end of the stream and do not form a character in this encoding,
   so no read returns them as text  — a character the writer never finished
 
-A FILTERED READ SAYS WHAT IT PASSED OVER. --stream o answers "stdout only" by
-selecting a subset of the span the window covers, and the span still runs to the
-end of the range: the cursor has to move by the range, or a poll loop would
-re-read the same bytes forever. So the bytes of the other stream leave your
-cursor without ever being shown, and nothing used to say so. The worst case was
-not a partial body -- --stream e on a channel that only ever wrote stdout
-answered 200 with an EMPTY body under "Content-Range: bytes 0-7/8", eight bytes
-"here" and none delivered, and the plain read that followed returned 204. Eight
-bytes of output were consumed by a reply that displayed nothing.
+A FILTERED READ ALSO SAYS HOW MANY BYTES IT STEPPED OVER. Reading is a walk of
+the CHANNEL -- one reader, one write order, the bytes it passes are the bytes it
+will not deliver again -- so a stderr read still advances the cursor across the
+stdout bytes in between. The reply's addresses are the stream's, which by
+construction do not count those bytes, so the count has to be said separately:
 
   Omitted: N bytes in this range are not in stream o and went past unseen;
   read --stream e (or --stream all) shows them, and --offset reaches back
@@ -438,6 +448,10 @@ in the channel, and the other view is one flag away. The count is in the units o
 your cursor (raw bytes) and is NOT derivable from the rest of the reply --
 bytes_returned is the RENDERED length, so a stripped byte and a filtered-out byte
 look the same there.
+
+Two spans per reply, then: the stream's own (stream_start/stream_end, what
+Content-Range carries) and, in Omitted, the part of the channel window that was
+not in it. Together they are the channel window the read covered.
 
 WHY WITHHOLD AND NOT HAND THE FRAGMENT OVER. Half of a multi-byte character is not
 information: it cannot be read, and you cannot join it to the next window's bytes

@@ -83,7 +83,8 @@ func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement,
 	if v, ok := stmt.Flag("encoding"); ok {
 		args["charset"] = v
 	}
-	return s.readSlot(ctx, stmt, win, args, 0)
+	slot, _ := s.readSlot(ctx, stmt, win, args, 0)
+	return slot
 }
 
 // awaitRunOutput waits for the command a `run` just typed, using the same signals the
@@ -162,7 +163,7 @@ func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, wi
 		waitedOnAPty = true
 		windowExpired = s.awaitWindow(ctx, stmt.Target, win, start)
 	}
-	slot := s.readSlot(ctx, stmt, win, args, time.Since(waitStarted))
+	slot, channelEnd := s.readSlot(ctx, stmt, win, args, time.Since(waitStarted))
 	if slot.Code < 400 {
 		if slot.Headers == nil {
 			slot.Headers = map[string]string{}
@@ -209,10 +210,10 @@ func (s *Server) readSlotAfter(ctx context.Context, stmt directive.Statement, wi
 	// without showing anything, and advancing past bytes the caller never saw would
 	// turn a withheld window into a skipped one.
 	if slot.Code < 400 && slot.Body != "" {
-		if end, ok := envelope.RangeEnd(slot.Headers["Content-Range"]); ok {
-			if cs, bad := s.requireShell(stmt.Target); bad == nil {
-				cs.AdvanceDefaultReader(end)
-			}
+		// channelEnd, not Content-Range's end: a `--stream e|o` reply numbers its own
+		// stream, and this cursor walks the channel (issue #202).
+		if cs, bad := s.requireShell(stmt.Target); bad == nil {
+			cs.AdvanceDefaultReader(channelEnd)
 		}
 	}
 	return slot
@@ -408,7 +409,14 @@ func (s *Server) awaitExit(ctx context.Context, handle string, win termArgs) {
 // That is also what makes `timeout` mean one thing. `readTimeout` capped a plain read at
 // 60 and left `run` uncapped, so the same parameter bounded two directives differently
 // and nothing in the reply said which had happened (issue #161, P1-3).
-func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win termArgs, args map[string]any, waited time.Duration) envelope.Slot {
+// readSlot reads one window and also reports where that window ends IN THE CHANNEL.
+//
+// The second return is separate from the slot's Content-Range on purpose: that header
+// carries the caller's addresses, and on a `--stream e|o` read those are the stream's,
+// while the reader cursor is a CHANNEL position (issue #202). Advancing the cursor by
+// the reply's own end would walk it into the wrong numbering the moment a caller
+// filtered the stream.
+func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win termArgs, args map[string]any, waited time.Duration) (envelope.Slot, int64) {
 	started := time.Now()
 	args["max_bytes"] = float64(win.BytesLimit)
 	args["max_lines"] = float64(win.LinesLimit)
@@ -419,11 +427,11 @@ func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win ter
 
 	res, fail := s.callTool(ctx, "shell_output", args)
 	if fail != nil {
-		return s.slotFromFailure(ctx, stmt, fail)
+		return s.slotFromFailure(ctx, stmt, fail), 0
 	}
 	doc, ok := toolResultMap(res)
 	if !ok {
-		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)})
+		return s.slotFromFailure(ctx, stmt, &toolFailure{code: CodeOperationFailed, msg: toolResultText(res)}), 0
 	}
 	// WAITED IS THE WHOLE CALL, not just this read.
 	//
@@ -432,7 +440,9 @@ func (s *Server) readSlot(ctx context.Context, stmt directive.Statement, win ter
 	// was measured from the READ, so the wait before it (where the window is actually
 	// spent) was missing: a call that sat on a 1s window answered `Waited: 0ms`, and the
 	// reporting caller read that as "the window never happened" (issue #161, P1-3).
-	return s.windowSlot(stmt, win, doc, waited+time.Since(started))
+	// end_offset is the CHANNEL's end even when the reply's own addresses are the
+	// stream's: the two groups are always both present (see windowResult).
+	return s.windowSlot(stmt, win, doc, waited+time.Since(started)), int64(getFloatAny(doc, "end_offset", 0))
 }
 
 // remaining is the part of the caller's window that the wait did not spend.
@@ -458,6 +468,30 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 	start := int64(getFloatAny(doc, "start_offset", 0))
 	end := int64(getFloatAny(doc, "end_offset", 0))
 	total := int64(getFloatAny(doc, "total_bytes", 0))
+	// THE ADDRESSES IN THIS REPLY ARE THE ONES THE CALLER PAGES WITH (issue #202).
+	//
+	// On a `--stream e|o` read the handler reports both numberings: start/end/total
+	// stay the CHANNEL's (the cursor walks that) and stream_* are the selected stream's.
+	// Everything the caller reads has to come from the second group — a Content-Range
+	// that counts stdout, next to a body that does not contain it, is an address the
+	// caller cannot resume from.
+	streamed := getString(doc, "stream", "") != ""
+	if streamed {
+		start = int64(getFloatAny(doc, "stream_start", 0))
+		end = int64(getFloatAny(doc, "stream_end", 0))
+		total = int64(getFloatAny(doc, "stream_total_bytes", 0))
+	}
+	// Trimmed is a CHANNEL-space count: the withheld bytes are the channel window's
+	// tail, so the arithmetic below has to be done in the coordinates it was measured in.
+	trimStart := start
+	trimEnd := end
+	trimTotal := total
+	if streamed {
+		trimStart = int64(getFloatAny(doc, "start_offset", 0))
+		trimEnd = int64(getFloatAny(doc, "end_offset", 0))
+		trimTotal = int64(getFloatAny(doc, "total_bytes", 0))
+	}
+	_ = trimStart
 	body := getString(doc, "output", "")
 	headers := map[string]string{"Path": stmt.Path}
 
@@ -482,12 +516,12 @@ func (s *Server) windowSlot(stmt directive.Statement, win termArgs, doc map[stri
 		//
 		// Both are said in terms of the CHARSET, because that is what decided the cut:
 		// the boundary came from the encoding, not from the size limit the caller passed.
-		if end+n >= total {
+		if trimEnd+n >= trimTotal {
 			headers["Trimmed"] = fmt.Sprintf("bytes %d-%d withheld: they are the end of the stream and do not form a character in this encoding, so no read returns them as text",
-				end, end+n-1)
+				trimEnd, trimEnd+n-1)
 		} else {
 			headers["Trimmed"] = fmt.Sprintf("bytes %d-%d withheld: the window end fell inside a character in this encoding; read --cursor %d continues there",
-				end, end+n-1, end)
+				trimEnd, trimEnd+n-1, trimEnd)
 		}
 	}
 
