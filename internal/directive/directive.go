@@ -165,6 +165,36 @@ type Op struct {
 	// they are refused instead of silently ignored.
 	MaxArgs int
 
+	// DataArgs is the WHITELIST of positional words that may hold a variable,
+	// counted from the END of the word list. Zero means none of them may.
+	//
+	// THIS IS THE DSL ESCALATION BOUNDARY, and it is default-deny on purpose. A
+	// reference is filled in after the parse, so by the time its value is known the
+	// statement's SHAPE is already decided: a word that was meant to be a kind, a
+	// flag name or a channel index could not become one, and it fell through to a
+	// positional argument instead — where nothing reads it. `close s:1 $1` then
+	// closed the WHOLE SESSION instead of channel 2 and answered 204 (issue #199).
+	//
+	// The words that carry data are named here (`resize <ch> <rows> <cols>` takes
+	// two numbers, `get <s> cdp:1 protocol <Domain>` takes a domain). Every other
+	// positional word is grammar, and a reference in one is refused by name rather
+	// than silently reinterpreted.
+	DataArgs int
+
+	// NoPositional makes a stray positional word an ERROR for a verb that takes none.
+	//
+	// MaxArgs cannot say this: it is a ceiling where 0 means "not declared", and the
+	// verbs that need this are the ones with nothing to declare. `close`/`rm`/`read`/`ls`
+	// read their object from the TARGET and their detail from a KIND and its key, so a
+	// leftover word is always a mistake — and ignoring it is how `close <session> 99`
+	// (a channel that does not exist) closed the whole session: the index fell through to
+	// a positional word, which nobody read (issue #199, second half).
+	//
+	// A reference that fails to become its role lands here too, so this is the backstop
+	// under the DataArgs whitelist: even if a position is missed there, the word is
+	// refused instead of silently changing what the command acts on.
+	NoPositional bool
+
 	// MinArgs is the minimum number of POSITIONAL arguments after the target,
 	// for the flag kinds (a payload kind is governed by whether a payload exists
 	// at all). It is checked so a truncated command fails here, with a usage
@@ -472,18 +502,21 @@ var ops = []Op{
 		RestValue: []string{"argv"},
 		Usage:     "open <session> [--argv <cmd> [--pty]]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>   |   open <session> cdp:N --target <targetId>",
 		Detail:    openDetail},
-	{Name: "ls", Core: true, Kind: KindFlags, Target: true, TargetOptional: true,
+	{Name: "ls", Core: true, Kind: KindFlags, Target: true, TargetOptional: true, NoPositional: true,
 		Kinds:     []string{"forward", "file", "host", "ext", "alias", "cdp", "mcp", "jrpc", "task"},
 		Flags:     []string{"all"},
 		Valueless: []string{"all"},
 		Usage:     "ls   |   ls host   |   ls ext   |   ls alias   |   ls task   |   ls <session> [forward|file]",
 		Detail:    lsDetail},
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
-		Kinds:  []string{"file", "host", "ext", "protocol", "cdp", "mcp", "jrpc", "task"},
-		Flags:  []string{"op"},
-		Usage:  "get <session|channel|host-name>   |   get host <name>   |   get ext <name>   |   get task <id>   |   get <session> file <path> [--op stat|realpath|urls|…]   |   get <session> cdp[:N][@target] [protocol [Domain]]",
-		Detail: getDetail},
-	{Name: "close", Core: true, Kind: KindFlags, Target: true,
+		Kinds: []string{"file", "host", "ext", "protocol", "cdp", "mcp", "jrpc", "task"},
+		Flags: []string{"op"},
+		// `get <s> cdp:1 protocol <Domain>` and `get <s> mcp:1 tools <name>`: the
+		// word after the key is a NAME the peer understands, not grammar of ours.
+		DataArgs: 1,
+		Usage:    "get <session|channel|host-name>   |   get host <name>   |   get ext <name>   |   get task <id>   |   get <session> file <path> [--op stat|realpath|urls|…]   |   get <session> cdp[:N][@target] [protocol [Domain]]",
+		Detail:   getDetail},
+	{Name: "close", Core: true, Kind: KindFlags, Target: true, NoPositional: true,
 		// mcp/cdp/jrpc/file are DECLARED SO THEY ARE REFUSED BY NAME. Dropping them
 		// from the list does not make `close <session> mcp 1` invalid — the word simply
 		// becomes a stray positional argument and the statement still reaches the
@@ -496,7 +529,7 @@ var ops = []Op{
 		},
 		Usage:  "close <session> [<index>]   |   close <peer>",
 		Detail: closeDetail},
-	{Name: "rm", Kind: KindFlags, Target: true, TargetKind: TargetSession,
+	{Name: "rm", Kind: KindFlags, Target: true, NoPositional: true, TargetKind: TargetSession,
 		Kinds:     []string{"file", "host", "ext", "alias"},
 		Flags:     []string{"force", "dry-run"},
 		Valueless: []string{"force", "dry-run"},
@@ -514,9 +547,12 @@ var ops = []Op{
 		PayloadType: PayloadVar,
 		Usage:       "input <channel> $1   |   input <session> <index> $1",
 		Detail:      inputDetail},
-	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, Flags: []string{"repeat:number"}, TargetKind: TargetChain,
+	// DataArgs 1: the key name is a VALUE the terminal receives (`enter`, `ctrl+c`), and
+	// it cannot change which object the statement acts on — unlike a kind, a flag name or
+	// a channel index, which is what this boundary exists for.
+	{Name: "key", Core: true, Kind: KindFlags, Target: true, MinArgs: 1, DataArgs: 1, Flags: []string{"repeat:number"}, TargetKind: TargetChain,
 		Usage: "key <channel> <key> [--repeat N]"},
-	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2, TargetKind: TargetChain,
+	{Name: "resize", Kind: KindFlags, Target: true, MinArgs: 2, MaxArgs: 2, DataArgs: 2, TargetKind: TargetChain,
 		Usage: "resize <channel> <rows> <cols>"},
 	{Name: "span", Kind: KindFlags, Target: true, TargetKind: TargetChain,
 		Usage:  "span <channel>",
@@ -526,7 +562,7 @@ var ops = []Op{
 
 	// --- bytes in and out of a node ---
 
-	{Name: "read", Core: true, Kind: KindFlags, Target: true,
+	{Name: "read", Core: true, Kind: KindFlags, Target: true, NoPositional: true,
 		Kinds: []string{"file", "cdp", "mcp", "jrpc"},
 		Flags: []string{"cursor:number", "since:number", "at:number", "offset:number", "bytes:number",
 			"from-line:number", "tail:number", "stream:enum=o,e,all", "raw", "grep", "grep-limit:number",
@@ -2373,6 +2409,16 @@ func isSentinel(v string) bool {
 	return strings.Contains(v, sentinelMarker)
 }
 
+// isWholeReference reports whether a word is EXACTLY one reference and nothing else.
+//
+// isSentinel asks a different question — "does this text contain a reference" — and
+// the difference is the whole point here: `{"v":"$1"}` is a FRAME whose template text
+// happens to hold a reference, so it is a PAYLOAD and the peer expands it. Asking
+// isSentinel would read that frame as a bare reference and refuse it as grammar.
+func isWholeReference(v string) bool {
+	return isSentinel(strings.Trim(v, `'"`))
+}
+
 // checkTargetKindAfterSubst re-runs the target-kind rule on a statement whose
 // sentinels have been filled in.
 //
@@ -2567,6 +2613,33 @@ func checkOneWordOneLanguage(op Op, rest []word, holes *sentinelTable) error {
 // Requiring one variable reference removes the guess without removing the capability:
 // the shell text still arrives intact, it just arrives as a VALUE — `args: ["ls | wc
 // -l"]` is the command line, and the payload is the reference that carries it.
+// referenceIsGrammar refuses a reference that reached a word the GRAMMAR decides.
+//
+// THIS IS THE DSL ESCALATION BOUNDARY, and it is deliberately a refusal rather than
+// a smarter parse. A reference is filled in after the statement is parsed, so by the
+// time the value arrives the shape is already fixed: a word meant to be a kind, a flag
+// name, a key name or a channel index cannot become one, and it falls through to a
+// positional argument — where the verb may read it as a different operation, or not
+// read it at all. `close <session> $1` closed the WHOLE SESSION instead of channel 2
+// that way, and answered 204 (issue #199).
+//
+// The alternative is not a smaller refusal but a different language: substituting
+// first and parsing after would let a caller's DATA choose which directive runs. That
+// is the escalation, so the reference stops here and the caller is told what to write.
+func referenceIsGrammar(op Op, where string, options ...string) error {
+	var b strings.Builder
+	b.WriteString("a reference fills a VALUE; it never becomes part of the grammar.\n")
+	b.WriteString("THIS ONE SITS " + where + ". The word cannot be read until the value arrives,\n")
+	b.WriteString("and the statement's shape is decided before that — so it would fall through to a\n")
+	b.WriteString("positional word, and the command would mean something else. Refused, not reinterpreted.\n")
+	b.WriteString("Here is how to say it instead:\n")
+	for _, o := range options {
+		b.WriteString("  " + o + "\n")
+	}
+	b.WriteString("the same value is always reachable as data — only the spelling changes.")
+	return &Error{Op: op.Name, Msg: b.String(), Usage: op.Usage}
+}
+
 func checkPayloadType(st Statement, holes *sentinelTable, op Op) error {
 	if op.PayloadType != PayloadVar {
 		return nil
@@ -2876,6 +2949,37 @@ func parseStatement(src string, stmt *syntax.Stmt, holes *sentinelTable) (Statem
 					rest = rest[1:]
 				}
 			}
+			// A REFERENCE CANNOT BE A KIND (issue #199).
+			//
+			// The word right after the target is where a kind goes, and a reference is
+			// filled in AFTER the statement's shape is decided — so the parser cannot see
+			// what it will be, cannot match it against op.Kinds, and it falls through to a
+			// positional word instead. `close <session> $1` closed the WHOLE SESSION
+			// rather than channel 2 that way, and answered 204.
+			//
+			// The alternative costs the caller nothing, because the WHOLE handle is a
+			// value: `close $1` with args ["<session>:2"] says the same thing and is
+			// already supported.
+			//
+			// A PAYLOAD VERB IS THE ONE PLACE A LONE REFERENCE IS STILL A VALUE: `call h $1`
+			// hands the frame over whole, and there is no kind in that spelling to be
+			// confused with. Two words are the ambiguous shape — `call s $1 $2` can only
+			// mean "kind, frame" — and that is refused.
+			lonePayload := op.Kind == KindPayload && len(rest) == 1
+			if len(op.Kinds) > 0 && len(rest) > 0 && !lonePayload && isWholeReference(rest[0].text) {
+				where := "where the channel index goes (it folds into the address as <target>:N)"
+				opts := []string{
+					"an index   — put it in the address:  " + name + " <target>:2",
+					"an address — pass the whole handle as the target:  " + name + " $1   args [\"<target>:2\"]",
+				}
+				if len(op.Kinds) > 0 {
+					where = "where a kind or the channel index goes"
+					opts = append([]string{
+						"a kind    — write it literally, value beside it:  " + name + " <target> " + op.Kinds[0] + " 1",
+					}, opts...)
+				}
+				return Statement{}, false, referenceIsGrammar(op, where, opts...)
+			}
 			// A kind may also follow the target: `open a1f3 forward`,
 			// `read a1f3 file /x`, `rm a1f3 file /x`.
 			if kind, inline, ok := kindWordWithKey(op, rest); ok {
@@ -3061,6 +3165,50 @@ func parseStatement(src string, stmt *syntax.Stmt, holes *sentinelTable) (Statem
 			if err := checkValueWasNotCutOff(op, key, val, rest, i, holes); err != nil {
 				return Statement{}, false, err
 			}
+		}
+	}
+
+	// A REFERENCE THAT LANDED IN A POSITIONAL WORD WAS REFUSED A ROLE (issue #198).
+	//
+	// Reaching here with a reference in Args means the word it was meant to be could
+	// not become it: a kind, a flag name and a key name are matched against a table
+	// BEFORE the value exists, and a channel index is folded before it too. What is
+	// left is an argument the verb may never read — silently, which is how a command
+	// changes its subject.
+	//
+	// DataArgs is the per-directive whitelist, counted from the end. Everything in
+	// front of it is grammar.
+	if first := len(out.Args) - op.DataArgs; first > 0 {
+		for i := 0; i < first; i++ {
+			if !isWholeReference(out.Args[i]) {
+				continue
+			}
+			// NAME THE FLAGS, because "this word is not data" is only half the
+			// answer: a caller who put a value here was trying to reach one of them.
+			hint := []string{"this word is read by nobody — " + name + " takes its object from the target"}
+			if len(op.Flags) > 0 {
+				// The declaration carries the value's domain (`cursor:number`); the
+				// spelling the caller types is the name alone.
+				flag := strings.SplitN(op.Flags[0], ":", 2)[0]
+				hint = append(hint, "a value goes after its flag:  "+name+" <target> --"+flag+" $1")
+			}
+			if op.NoPositional {
+				hint = append(hint, "there is no positional word here at all")
+			}
+			return Statement{}, false, referenceIsGrammar(op, "in a positional word this verb does not read", hint...)
+		}
+	}
+
+	if op.NoPositional && len(out.Args) > 0 {
+		return Statement{}, false, &Error{
+			Op: name,
+			Msg: name + " takes no positional words — its object is the TARGET and its detail " +
+				"is a KIND and that kind's key, so the rest of the line \"" + strings.Join(out.Args, " ") + "\" " +
+				"would be read by nobody.\n" +
+				"It is refused rather than ignored because a word that goes unread can change what the " +
+				"command acts on: `close <session> 99` closed the whole session that way, not channel 99.\n" +
+				"If the word was meant to be an index, it belongs in the address: `" + name + " <session>:99`.",
+			Usage: op.Usage,
 		}
 	}
 
