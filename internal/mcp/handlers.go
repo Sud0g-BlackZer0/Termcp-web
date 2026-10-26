@@ -424,7 +424,29 @@ func (s *Server) requireShell(shellID string) (*session.ChildShell, *mcpgo.CallT
 			return cs, nil
 		}
 	}
-	return nil, toolError(CodeShellNotFound, "%s", fmt.Sprintf("Shell '%s' not found", shellID))
+	return nil, toolError(CodeShellNotFound, "%s", s.shellNotFoundMessage(shellID))
+}
+
+// shellNotFoundMessage is the 404 for a channel the registry does not hold.
+//
+// THE HANDLE IS WHAT A CALLER ACTUALLY KEEPS (dogfood on #183). The extension
+// status carries closed_at/closed_reason for the id it took away, and the session
+// 404 already explains itself — but the channel 404 did not, so an agent holding
+// the shell id it was given read `Shell 'x' not found` and had no way to tell a
+// reaped instance from a typo. docs/api.md promised the id would explain itself;
+// this is the half that makes that true.
+func (s *Server) shellNotFoundMessage(shellID string) string {
+	msg := fmt.Sprintf("Shell '%s' not found", shellID)
+	if s.extensions == nil {
+		return msg
+	}
+	if name, reason, at, ok := s.extensions.ExplainClosed("", shellID); ok {
+		return fmt.Sprintf(
+			"Shell '%s' was closed at %s: the extension %q %s. "+
+				"This is not a typo and not a failure — `open ext %s` starts a new instance and returns its handles.",
+			shellID, at.Format("15:04:05"), name, reason, name)
+	}
+	return msg
 }
 
 // resolveSSHFromArgs returns the ssh_config name, loaded entry, and remote dial settings (nil Remote = built-in loopback).

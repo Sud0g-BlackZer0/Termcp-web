@@ -203,6 +203,19 @@ func (r *Reconciler) bringUp(ctx context.Context, ext *Extension, st *extState, 
 				return "", "", "", "start", cerr
 			}
 			shellID = shell.ID
+			// A FRESH CHANNEL GETS THE SAME GRACE THE RECONCILER'S OWN DOES.
+			//
+			// This branch used to mark the extension available the instant the fork
+			// returned, so a template whose program does not exist answered
+			// `available` with a handle to a process that had already exited — and the
+			// caller found out on the next read, or, worse, sent its first JSON-RPC
+			// frame into an empty stream. `--command nosuchprogram` is a typo a reader
+			// makes on the first day (dogfood on #183).
+			if serr := r.waitForStart(sess, shell); serr != nil {
+				r.fail(st, "start", serr.Error())
+				st.recordClosed(sess.ID, shellID, serr.Error())
+				return "", "", "", "start", serr
+			}
 		}
 		// A template with no shell is served by the connection alone: a read-only file
 		// window has no channel to hand out, and its instance is the session.
@@ -446,14 +459,29 @@ func (r *Reconciler) Touch(shellID, sessionID string) {
 	}
 	r.mu.Unlock()
 
-	for name, st := range pairs {
-		if shellID != "" && st.renew(shellID) {
-			r.armIdle(name, st)
-			return
+	// A CHANNEL ID NAMES ONE INSTANCE, and only that one is in use.
+	//
+	// This used to be a single loop trying shellID then sessionID per extension,
+	// returning at the first hit — and every extension on the same connection
+	// matches the session, so renewing A's channel could land on a sibling B and
+	// stop there, leaving A's timer to fire on schedule while its channel was being
+	// read. With one extension it looked perfect; with ten on one connection it
+	// reaped the channel being used almost every time (dogfood on #183).
+	if shellID != "" {
+		for name, st := range pairs {
+			if st.renew(shellID) {
+				r.armIdle(name, st)
+				return
+			}
 		}
-		if sessionID != "" && st.renewSession(sessionID) {
-			r.armIdle(name, st)
-			return
+	}
+	if sessionID != "" {
+		// The session IS in use, and every extension hanging off it is being used
+		// with it — so all of them are renewed, not just whichever came first.
+		for name, st := range pairs {
+			if st.renewSession(sessionID) {
+				r.armIdle(name, st)
+			}
 		}
 	}
 }

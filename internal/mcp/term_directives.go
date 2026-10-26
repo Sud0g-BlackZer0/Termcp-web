@@ -27,6 +27,21 @@ import (
 // — info, ps, span — would otherwise be reachable across namespaces, which is
 // exactly the isolation this feature promises.
 func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win termArgs) []envelope.Slot {
+	// A HANDLE THE RECONCILER TOOK AWAY EXPLAINS ITSELF HERE, once, for every
+	// directive that names one.
+	//
+	// The channel-level 404 used to be a bare "not found", which reads the same as
+	// a typo — and docs/api.md promises the id that named an instance answers with
+	// what happened to it (dogfood on #183). Answering at the entrance covers
+	// read/input/key/resize/close alike: they all resolve through this one place.
+	//
+	// The idle clock is renewed in the guard, which already resolves every id
+	// spelling — one owner for "is this channel live", not two.
+	if stmt.Target != "" {
+		if ghost := s.explainClosedChannel(stmt); ghost != nil {
+			return []envelope.Slot{*ghost}
+		}
+	}
 	if bad := s.refuseForeignTarget(ctx, stmt); bad != nil {
 		return []envelope.Slot{*bad}
 	}
@@ -523,6 +538,25 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 // A batch is checked entry by entry and refused as a whole: running part of it
 // against somebody else's session would make the refusal partial and the outcome
 // unknowable.
+// explainClosedChannel answers a directive that names a channel the reconciler
+// closed: the id it took away is not a typo, and a caller can only learn that from
+// the reply it gets.
+func (s *Server) explainClosedChannel(stmt directive.Statement) *envelope.Slot {
+	if s.extensions == nil || s.sessMgr == nil {
+		return nil
+	}
+	// Still here: nothing to explain.
+	if s.sessMgr.GetChildShell(stmt.Target) != nil || s.sessMgr.GetSessionByShellID(stmt.Target) != nil {
+		return nil
+	}
+	if _, _, _, ok := s.extensions.ExplainClosed("", stmt.Target); !ok {
+		return nil
+	}
+	slot := failureSlot(&toolFailure{code: CodeShellNotFound, msg: s.shellNotFoundMessage(stmt.Target)})
+	slot.Headers["Path"] = stmt.Path
+	return &slot
+}
+
 func (s *Server) refuseForeignTarget(ctx context.Context, stmt directive.Statement) *envelope.Slot {
 	callerNS := callerNamespace(ctx)
 	if callerNS == "" || stmt.Target == "" {

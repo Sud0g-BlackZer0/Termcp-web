@@ -1,6 +1,7 @@
 package extensions
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -362,5 +363,97 @@ func TestIdleTimeoutMustBeADuration(t *testing.T) {
 	}
 	if got != DefaultIdleTimeout {
 		t.Errorf("an absent idle_timeout should mean the default, got %s", got)
+	}
+}
+
+// TestABrokenProgramIsNotOfferedAsAvailable pins the fresh path's grace. `open ext`
+// used to mark the extension available the instant the fork returned, so a template
+// whose program does not exist answered 200 with a handle to a process that had
+// already exited — and the caller learned it on the next read, or sent its first
+// JSON-RPC frame into an empty stream (dogfood on #183).
+func TestABrokenProgramIsNotOfferedAsAvailable(t *testing.T) {
+	r := startReconciler(t)
+	ext := Preset(KindMCP)
+	ext.Name = "bad"
+	ext.Target = "internal"
+	ext.Command = "nosuchprogram-xyz"
+	ext.Args = []string{"serve"}
+	mustSave(t, r.store, &ext)
+
+	st, err := r.Acquire("bad", 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status == StatusAvailable {
+		t.Fatalf("a program that does not exist was reported available with shell %q", st.ShellID)
+	}
+	if st.ShellID != "" {
+		t.Errorf("no handle should be handed out for a dead process, got %q", st.ShellID)
+	}
+	reason := ""
+	for _, f := range st.Failures {
+		reason += f.Reason + " "
+	}
+	if !strings.Contains(reason, "executable file not found") && !strings.Contains(reason, "no such file") {
+		t.Errorf("the failure should carry the program's own message, got %q", reason)
+	}
+}
+
+// TestTouchExtendsTheWindow pins the half of the idle window that makes it usable:
+// a channel being driven is not a channel nobody asked about. The window is 400ms
+// and the ask happens at 250ms, so the original deadline passes at 400ms — the
+// channel must still be there at 500ms, and must still close once silence is real.
+func TestTouchExtendsTheWindow(t *testing.T) {
+	r := startReconciler(t)
+	lazyExt(t, r, "touchy", "400ms")
+	st, err := r.Acquire("touchy", 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ShellID == "" {
+		t.Fatal("no channel")
+	}
+	time.Sleep(250 * time.Millisecond)
+	r.Touch(st.ShellID, "")
+	time.Sleep(250 * time.Millisecond)
+	if cur, _ := r.Status("touchy"); cur.Instances == 0 {
+		t.Fatalf("the window was not extended by use: %+v", cur)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		cur, _ := r.Status("touchy")
+		if cur.Instances == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("never closed after silence: %+v", cur)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestDrivingAChannelResetsTheReportedSilence pins the other half of the field: a
+// caller asking "how long have I got" reads idle_for_ms, so a channel it is driving
+// must reset that clock — otherwise the number says the instance is idle while the
+// instance is being used (dogfood on #183).
+func TestDrivingAChannelResetsTheReportedSilence(t *testing.T) {
+	r := startReconciler(t)
+	lazyExt(t, r, "clocked", "10m")
+	st, err := r.Acquire("clocked", 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ShellID == "" {
+		t.Fatal("no channel")
+	}
+	time.Sleep(300 * time.Millisecond)
+	before, _ := r.Status("clocked")
+	r.Touch(st.ShellID, "")
+	after, _ := r.Status("clocked")
+	if before.IdleForMs < 250 {
+		t.Fatalf("the clock did not move before the touch: %d ms", before.IdleForMs)
+	}
+	if after.IdleForMs > 150 {
+		t.Errorf("driving the channel left the reported silence at %d ms (was %d)", after.IdleForMs, before.IdleForMs)
 	}
 }

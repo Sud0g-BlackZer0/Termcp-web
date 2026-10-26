@@ -216,21 +216,31 @@ func (r *Reconciler) ensureMemberShell(plan hostPlan, st *extState, sess *sessio
 		return "", err
 	}
 
-	// A process that cannot start says so immediately. Waiting a beat turns "the
-	// extension is unavailable" from a bare fact into the actual error line,
-	// which is what makes the failure history worth reading.
-	select {
-	case <-shell.Done():
-		return "", r.memberExit(sess, shell, "process exited during startup")
-	case <-time.After(probeGrace):
-	}
-	// The window can close in the same instant the process ends, and a slow starter
-	// that dies on its own schedule would otherwise be reported as up for one walk
-	// and as a mystery afterwards. One more look is what keeps "started" honest.
-	if liveShell(sess, shell.ID) == nil {
-		return "", r.memberExit(sess, shell, "process exited during startup")
+	if err := r.waitForStart(sess, shell); err != nil {
+		return "", err
 	}
 	return shell.ID, nil
+}
+
+// waitForStart is the grace every channel gets, whoever forked it: the reconciler's
+// own path and a caller's on-demand ask share one implementation, because they are
+// asking the same question and a second copy is a second answer.
+//
+// A process that cannot start says so immediately, and waiting a beat turns "the
+// extension is unavailable" from a bare fact into the actual error line. The window
+// can also close in the same instant the process ends, and a slow starter that dies
+// on its own schedule would otherwise be reported as up for one pass and as a
+// mystery afterwards — one more look is what keeps "started" honest.
+func (r *Reconciler) waitForStart(sess *session.Session, shell *session.ChildShell) error {
+	select {
+	case <-shell.Done():
+		return r.memberExit(sess, shell, "process exited during startup")
+	case <-time.After(probeGrace):
+	}
+	if liveShell(sess, shell.ID) == nil {
+		return r.memberExit(sess, shell, "process exited during startup")
+	}
+	return nil
 }
 
 // memberExit closes a channel whose process ended before the extension could use

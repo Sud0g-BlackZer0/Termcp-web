@@ -292,12 +292,18 @@ func (st *extState) dropInstancesOnSession(sessionID string) []string {
 
 // renew stamps the instance this shell id names, for the tool calls that keep
 // using it. It reports whether the shell is one of this extension's instances.
+//
+// The extension's own clock moves with it: `idle_for_ms` answers "how long have I
+// got" out of that field, and a channel being driven while the reported silence kept
+// climbing is the field telling the caller something the daemon does not believe
+// (dogfood on #183).
 func (st *extState) renew(shellID string) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	for _, ex := range st.extra {
 		if ex.shellID == shellID {
 			ex.lastUse = time.Now()
+			st.lastUse = ex.lastUse
 			return true
 		}
 	}
@@ -444,6 +450,14 @@ func (st *extState) statusOf() string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.status
+}
+
+// isLazy reports whether this extension is started on demand rather than kept
+// resident, which decides who owns the retry: the caller, not a timer.
+func (st *extState) isLazy() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.lazy
 }
 
 func (st *extState) flags() (status string, autoRetry bool) {

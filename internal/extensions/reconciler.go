@@ -307,6 +307,15 @@ func (r *Reconciler) probe(ctx context.Context, name string) {
 func (r *Reconciler) fail(st *extState, stage, reason string) {
 	st.recordFailure(stage, reason)
 	st.mark(StatusUnavailable)
+	// ON DEMAND, AN ATTEMPT IS A CALLER'S ASK (issue #183). Arming a retry here
+	// would print a NextRetry the timer then declines to honour — the timer's
+	// callback goes through retryNow, which returns immediately for a lazy
+	// extension. A field that promises a retry nobody scheduled is worse than no
+	// field: the caller waits for something that is not coming.
+	if st.isLazy() {
+		r.notifyChange()
+		return
+	}
 	if wait, ok := st.scheduleBackoff(); ok {
 		// THE LADDER IS A TIMER, NOT A POLL (issue #183). The walk used to re-read
 		// "has the backoff elapsed" every five seconds, which made a retry due at
