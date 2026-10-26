@@ -203,6 +203,14 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 				return []envelope.Slot{s.cdpAttach(ctx, stmt, h, target)}
 			}
 			return s.openPeer(ctx, stmt, win, stmt.Kind)
+		case "ext":
+			// THE EXTENSION LAYER'S OPEN (issue #183). An extension that declares no
+			// forward is not dialled until something asks for it, and this is the ask:
+			// `open ext <name>` brings it up and hands back the handles, the same way
+			// `open <session>` does for a session. There is no target here — the
+			// reconciler owns the container, and a caller that could name one would be
+			// able to open a channel on somebody else's connection.
+			return []envelope.Slot{s.directiveExtensionUse(ctx, stmt, win)}
 		default:
 			return s.directiveOpen(ctx, stmt, win, wantPTY(stmt))
 		}
@@ -244,6 +252,13 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 	// closing the primary channel): a qualifier read as decoration.
 	case "close":
 		switch stmt.Kind {
+		case "ext":
+			// HANDING AN INSTANCE BACK (issue #183). An on-demand extension's instances
+			// are the caller's to keep or give up, and a caller that knows it has
+			// finished says so here rather than leaving a process on the target until
+			// its silence runs out. The handle names which one; leaving it off means
+			// "all of them", which is what a caller that did not keep the handle means.
+			return []envelope.Slot{s.directiveExtensionRelease(ctx, stmt, win)}
 		case "task":
 			return []envelope.Slot{s.directiveCloseTask(ctx, stmt)}
 		case "forward":

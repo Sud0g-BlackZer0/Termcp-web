@@ -62,9 +62,18 @@ type Reconciler struct {
 	groups   map[string]*extGroup
 	onChange func()
 
-	trigger chan struct{}
-	cancel  context.CancelFunc
-	done    chan struct{}
+	// syncs carries the names of templates whose saved file changed, and revive
+	// carries "a profile was rewritten". They are queues, not signals to a walk: the
+	// callback that fills them runs inside a store's write, so it must only drop the
+	// name in and get out — doing the work there would deadlock on the store's own
+	// lock, which is exactly what a synchronous subscriber did.
+	syncs  chan string
+	revive chan struct{}
+	// ctx is the run's context, kept so an event that arrives at any time — a save
+	// from a tool call, a deleted file — has a run to join.
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
 
 	// probes tracks the connection attempts the run loop has launched and not yet
 	// heard back from. Stop waits on it so a reconciler that has been told to stop
@@ -79,6 +88,7 @@ type Reconciler struct {
 // differs for each.
 const (
 	StatusDisabled    = "disabled"    // enabled=false: the reconciler will not touch it
+	StatusIdle        = "idle"        // nothing is running because nothing has asked; the next use starts it
 	StatusUnavailable = "unavailable" // not up; either not yet tried or down after a failure
 	StatusProbing     = "probing"     // a connection attempt is in flight
 	StatusAvailable   = "available"   // session established, process alive, forwards up
@@ -108,8 +118,11 @@ type ForwardStatus struct {
 // Store; the two are merged for whoever asks (the MCP tool, the Web UI).
 type Status struct {
 	Name string `json:"name"`
-	// Status is one of the four above.
+	// Status is one of the five above.
 	Status string `json:"status"`
+	// Lazy is true for an extension the reconciler starts on demand rather than at
+	// startup (every enabled template that declares no forward).
+	Lazy bool `json:"lazy,omitempty"`
 	// SessionID is the connection this extension is served by. Extensions that
 	// share a host and a capability set report the same one.
 	SessionID string `json:"session_id,omitempty"`
@@ -122,6 +135,21 @@ type Status struct {
 	// NextRetry is when the reconciler tries again (Unix ms); 0 = no retry
 	// scheduled.
 	NextRetry int64 `json:"next_retry,omitempty"`
+	// IdleTimeoutMs is how long a lazy extension stays up after its last use, and
+	// IdleForMs is how long ago that was; both are reported so "why is this not
+	// up" and "how long have I got" are facts rather than guesses.
+	IdleTimeoutMs int64 `json:"idle_timeout_ms,omitempty"`
+	IdleForMs     int64 `json:"idle_for_ms,omitempty"`
+	// Instances is how many callers this extension is currently serving: one
+	// channel each, all on the group's connection (issue #183).
+	Instances int `json:"instances,omitempty"`
+	// ClosedAt and ClosedSessionID describe the instance the reconciler took away:
+	// a caller holding the old handle is told what happened to it instead of
+	// reading "not found".
+	ClosedAt        int64  `json:"closed_at,omitempty"`
+	ClosedSessionID string `json:"closed_session_id,omitempty"`
+	ClosedShellID   string `json:"closed_shell_id,omitempty"`
+	ClosedReason    string `json:"closed_reason,omitempty"`
 }
 
 // maxFailures caps the history. Enough to see a pattern, not so much that a
@@ -147,13 +175,6 @@ var backoffSteps = []time.Duration{
 // is not coming back.
 const maxAutoRetries = 3
 
-// loopInterval is how often the reconciler re-walks the store even with no
-// signal. It is the recovery path for conditions nothing notifies about — a
-// profile recreated by hand, a forward that died quietly, a channel whose process
-// ended without taking the connection with it — so it is a backstop, not the
-// primary driver.
-const loopInterval = 5 * time.Second
-
 // probeGrace is how long a started process gets to prove it can stay alive. A
 // stdio MCP server with a bad command dies within milliseconds; a healthy one
 // blocks on its first read forever, so the wait costs nothing for it.
@@ -175,6 +196,11 @@ type extGroup struct {
 	key       string
 	target    string
 	namespace string
+	// created is when this group was first resolved. The sweep uses it to leave
+	// alone a connection that appeared while the walk was running: the walk's
+	// picture of who wants what was taken at the top, and a group that did not exist
+	// then exists precisely because somebody asked for it in the meantime.
+	created time.Time
 	// sessionID is the session the group is served by. A DEAD one stays named
 	// here until the next attempt replaces it, so the corpse can be finalized
 	// rather than left in the registry; "does this group have a session" is a
@@ -209,17 +235,26 @@ func NewReconciler(store *Store, sessMgr *session.Manager, msgMgr *message.Manag
 		forwardMgr: forwardMgr,
 		states:     map[string]*extState{},
 		groups:     map[string]*extGroup{},
-		trigger:    make(chan struct{}, 1),
+		syncs:      make(chan string, 64),
+		revive:     make(chan struct{}, 1),
 		done:       make(chan struct{}),
 	}
 	if store != nil {
-		store.SetOnChange(r.Trigger)
+		// The write names the template, so the runtime does that one and nothing
+		// else. This is the whole of "the store changed" — there is no listing to
+		// diff and no tick to wait for.
+		store.SetOnChange(r.syncNamed)
 	}
 	if sshConfigs != nil {
-		// A profile written by hand is the fix a template failure was waiting on,
-		// so the walk hears about it when it happens rather than at the next loop
-		// tick.
-		sshConfigs.SetOnChange(r.Trigger)
+		// A profile rewritten by hand is the fix a failing extension was waiting for.
+		// It has no name to give (it is not an extension), so the extensions that gave
+		// up on a missing target get one more attempt.
+		sshConfigs.SetOnChange(func() {
+			select {
+			case r.revive <- struct{}{}:
+			default:
+			}
+		})
 	}
 	if sessMgr != nil {
 		sessMgr.AddOnDeadHook(r.onSessionDead)
@@ -313,201 +348,226 @@ func (r *Reconciler) Stop() {
 	r.probes.Wait()
 }
 
-// Trigger asks the reconciler to re-walk the store as soon as it can. It never
-// blocks: the channel has room for one signal, and a second call while one is
-// pending is the same walk anyway.
-func (r *Reconciler) Trigger() {
+// syncNamed is the store's subscriber, and it only queues: it runs inside another
+// component's write, holding that component's lock, so anything it did here would
+// have to be deadlock-free against a lock it does not own. The run loop does the
+// work, serialized, one template at a time.
+func (r *Reconciler) syncNamed(name string) {
 	select {
-	case r.trigger <- struct{}{}:
+	case r.syncs <- name:
 	default:
-	}
-}
-
-func (r *Reconciler) run(ctx context.Context) {
-	defer close(r.done)
-	for {
-		if err := r.reconcileAll(ctx); err != nil {
-			slog.Warn("extension reconcile failed", "err", err)
+		// The queue is full, which means the loop is behind by dozens of writes. Drop
+		// the oldest instead of losing this one: the newest state of a name is the one
+		// that matters, and a dropped name would leave a template never re-read.
+		select {
+		case <-r.syncs:
+		default:
 		}
 		select {
-		case <-ctx.Done():
-			return
-		case <-r.trigger:
-		case <-time.After(loopInterval):
+		case r.syncs <- name:
+		default:
 		}
 	}
 }
 
-// member is one enabled extension the walk is about to act on, with its template
-// already loaded.
-type member struct {
-	name string
-	ext  *Extension
+// reviveTargets is the profile store's subscriber: a rewritten profile is the fix
+// an extension that could not resolve its target was waiting for, so every
+// extension whose budget is spent on that stage gets one more attempt. It runs one
+// pass over the states, dials nothing, and is caused by a write — the same shape as
+// every other reaction here.
+func (r *Reconciler) reviveTargets(ctx context.Context) {
+	r.mu.Lock()
+	pairs := make(map[string]*extState, len(r.states))
+	for name, st := range r.states {
+		pairs[name] = st
+	}
+	r.mu.Unlock()
+	for name, st := range pairs {
+		if _, autoRetry := st.flags(); autoRetry {
+			continue
+		}
+		if st.lastStage() != "target" {
+			continue
+		}
+		ext, err := r.store.Load(name)
+		if err != nil || !r.rebuildable(ext) {
+			continue
+		}
+		st.resetRetryBudget()
+		r.notifyChange()
+		r.retryNow(name)
+	}
 }
 
-// reconcileAll walks the store once and leaves the runtime in the shape it
-// describes: anything absent from the store loses its state, anything parked is
-// detached and left alone, the groups nothing resolves to any more are closed,
-// and every remaining member is pushed toward available.
-func (r *Reconciler) reconcileAll(ctx context.Context) error {
-	names, err := r.store.List()
+// Sync makes the runtime match one template: the write that changed it says which,
+// so nothing is listed, nothing is diffed, and no walk is needed to find out what
+// might have moved.
+//
+// It is called for the name a save or a delete named, and once per stored template
+// at startup. Everything a periodic walk used to do now happens here, for the one
+// extension the event was about.
+func (r *Reconciler) Sync(ctx context.Context, name string) {
+	ext, err := r.store.Load(name)
 	if err != nil {
-		return err
-	}
-	seen := map[string]bool{}
-	live := map[string]bool{} // group keys something still resolves to
-	members := make([]member, 0, len(names))
-
-	for _, name := range names {
-		seen[name] = true
-		ext, err := r.store.Load(name)
-		if err != nil {
-			// A file that no longer validates is reported through its own status
-			// rather than dropped: silently ignoring a broken extension would let
-			// it stay "unavailable forever, reason unknown".
+		// A file that no longer exists is a delete; one that no longer validates is
+		// reported through its own status rather than dropped, because silently
+		// forgetting a broken extension leaves "unavailable forever, reason unknown".
+		if r.store.Exists(name) {
 			st := r.state(name)
 			st.leaveGroup()
 			st.mark(StatusUnavailable)
 			st.recordFailure("target", "extension config is no longer valid: "+err.Error())
 			r.notifyChange()
-			continue
+			return
 		}
-		st := r.state(name)
-		if !ext.IsEnabled() {
-			// A parked extension holds nothing: its channel and its tunnels are
-			// closed, and the connection it was sharing is left to the extensions
-			// that are still enabled. Its retry budget is handed back too, so
-			// enabling it again is an immediate attempt rather than a resumed wait.
-			had := st.leaveGroup()
-			if had || st.statusOf() != StatusDisabled {
-				r.detach(st)
-				st.mark(StatusDisabled)
-				st.resetRetryBudget()
-				r.notifyChange()
-			}
-			continue
-		}
-		key := groupKey(ext)
-		// Both readings happen unconditionally, and the result is combined after:
-		// setGroup answers "did the connection move" and changed answers "is this a
-		// different template", and they are independent. Chaining them with || was
-		// the bug — a template that moved groups short-circuited the fingerprint
-		// update, so the next walk saw the stale fingerprint, called it a change,
-		// and tore down the channel and tunnels it had just built.
-		moved := st.setGroup(key)
-		differed := st.changed(ext)
-		if moved || differed {
-			// The template changed: it now dials another connection (or asks for
-			// another capability set), or what it describes is different. Either way
-			// the extension is rebuilt from it — its channel and its tunnels are
-			// closed, and the walk below probes it again — while the group's
-			// connection is left alone: the session belongs to every extension
-			// sharing the host, and rebuilding it would redial for all of them. An
-			// edit is also the author's nudge ("change the command and see if it
-			// works now"), so the automatic retries come with it.
+		r.Forget(name)
+		return
+	}
+	st := r.state(name)
+	idleLimit, idleErr := ext.IdleTimeoutDuration()
+	if idleErr != nil {
+		st.leaveGroup()
+		st.mark(StatusUnavailable)
+		st.recordFailure("target", idleErr.Error())
+		r.notifyChange()
+		return
+	}
+	st.setRun(ctx)
+	st.setLazy(ext.Lazy(), idleLimit)
+
+	if !ext.IsEnabled() {
+		// A parked extension holds nothing: its channels and its tunnels are closed,
+		// and the connection it shared is left to the extensions that are still
+		// enabled. Its retry budget is handed back too, so enabling it again is an
+		// immediate attempt rather than a resumed wait.
+		had := st.leaveGroup()
+		st.stopIdle()
+		if had || st.statusOf() != StatusDisabled {
 			r.detach(st)
-			st.mark(StatusUnavailable)
+			st.mark(StatusDisabled)
 			st.resetRetryBudget()
 			r.notifyChange()
 		}
-		live[key] = true
-		r.group(key, ext)
-		members = append(members, member{name: name, ext: ext})
+		return
 	}
 
-	// Extensions the store no longer holds lose their state, and with it the status
-	// the panel was reading. This runs before the groups are swept: an extension
-	// that is gone detaches here, so closing the connection it was last attached to
-	// does not read as its session dying.
+	// Both readings happen unconditionally and are combined after: setGroup answers
+	// "did the connection move", changed answers "is this a different template", and
+	// chaining them with || was the bug — a template that moved groups short-circuited
+	// the fingerprint update, so the next pass saw a stale fingerprint, called it a
+	// change, and tore down the channel it had just built.
+	moved := st.setGroup(groupKey(ext))
+	differed := st.changed(ext)
+	if moved || differed {
+		// SAVING A TEMPLATE STOPS WHAT IT STARTED. A process running the old command
+		// is not what the file now describes, and leaving the two disagreeing means
+		// every later question ("why is it behaving like that") has two answers. The
+		// channels go, the tunnels go, and the file is read again for whatever comes
+		// next — for a lazy extension that is the next ask, for a resident one it is
+		// the attempt below.
+		r.closeInstances(st, fingerprint(ext), "the template was edited")
+		r.detach(st)
+		st.stopIdle()
+		st.mark(StatusUnavailable)
+		st.resetRetryBudget()
+		r.notifyChange()
+	}
+
+	// The connection is not a caller's to hold: a channel belongs to the caller that
+	// asked for it, and the connection under it is the install's, kept for whoever
+	// asks next. Registering the group is what keeps it alive.
+	r.group(groupKey(ext), ext)
+
+	if ext.Lazy() {
+		// ON DEMAND: NOTHING IS STARTED HERE (issue #183). A channel exists because a
+		// caller asked for one; this only keeps what exists honest — drop the ones
+		// that ended, close the ones whose silence has run out — and re-arms the
+		// window from the template as it is now.
+		r.sweepInstances(name, ext, st, idleLimit)
+		r.armIdle(name, st)
+		return
+	}
+	// A resident extension declares a forward: a listener has no caller whose
+	// absence could mean "idle", so it is brought up and kept.
+	st.setIdleLimit(idleLimit)
+	r.retryNow(name)
+}
+
+// Forget drops an extension that is no longer stored: its channels, its tunnels,
+// its state, and the connection nothing else names.
+func (r *Reconciler) Forget(name string) {
+	st := r.state(name)
+	st.stopIdle()
+	st.leaveGroup()
+	r.closeInstances(st, "", "the extension was removed")
+	r.detach(st)
 	r.mu.Lock()
-	var gone []string
-	for name := range r.states {
-		if !seen[name] {
-			gone = append(gone, name)
-		}
+	delete(r.states, name)
+	groups := make([]*extGroup, 0, len(r.groups))
+	for _, g := range r.groups {
+		groups = append(groups, g)
 	}
 	r.mu.Unlock()
-	for _, name := range gone {
-		st := r.state(name)
-		st.leaveGroup()
-		r.detach(st)
-		r.mu.Lock()
-		delete(r.states, name)
-		r.mu.Unlock()
-		r.notifyChange()
-		slog.Debug("extension removed", "name", name)
-	}
-
-	// A connection exists for the extensions it serves, so a group nothing
-	// resolves to any more is closed: parked, deleted, or moved to another host.
-	for _, g := range r.groupList() {
-		if live[g.key] {
+	for _, g := range groups {
+		if r.groupNamed(g.key) {
 			continue
 		}
 		r.closeGroup(g)
 		r.mu.Lock()
 		delete(r.groups, g.key)
 		r.mu.Unlock()
-		r.notifyChange()
-		slog.Debug("extension session closed", "group", g.key, "target", g.target, "namespace", g.namespace)
+		slog.Debug("extension session closed", "group", g.key, "target", g.target)
 	}
+	r.notifyChange()
+	slog.Debug("extension removed", "name", name)
+}
 
-	// Finally, the members that are not up. Reads of the store and of state are
-	// kept separate locks, so a slow dial in one probe goroutine never blocks this
-	// walk.
-	for _, m := range members {
-		st := r.state(m.name)
-		status, autoRetry := st.flags()
-		switch status {
-		case StatusProbing:
-			continue // an attempt is already in flight
-		case StatusAvailable:
-			sess := r.attachedSession(st)
-			if sess == nil {
-				// The connection is gone. Forget the handle before recording the
-				// failure, or the state keeps advertising a channel that cannot be
-				// driven.
-				r.detach(st)
-				r.fail(st, "session", "session is no longer running")
-				continue
-			}
-			if ch := liveShell(sess, st.shellOf()); m.ext.Mode != "" && ch == nil {
-				// The channel the extension runs on ended by itself: its process is
-				// gone while the connection it shares is not, so the retry opens a
-				// channel instead of redialing the host. Read the exit line before
-				// detach closes the channel, then drop the handle so the recorded
-				// failure does not carry a dead one.
-				reason := r.channelEndReason(sess, st)
-				r.detach(st)
-				r.fail(st, "session", reason)
-				continue
-			}
-			if err := r.ensureForwards(m.ext, st); err != nil {
-				r.fail(st, "forward", err.Error())
-				continue
-			}
-			continue // available and fully forwarded: nothing to do this walk
-		default:
-			if !autoRetry {
-				/* The budget is spent. One condition is still worth re-checking
-				   without a nudge: the target profile itself. Recreated by hand, it is
-				   a fix rather than a transient, and reading it costs one store lookup
-				   instead of a dial. A host whose profile resolves fine but is not
-				   answering keeps waiting for the panel key or the agent — that is the
-				   case the budget exists to stop. */
-				if st.lastStage() != "target" || !r.rebuildable(m.ext) {
-					continue
-				}
-				st.resetRetryBudget()
-				r.notifyChange()
-			}
-			if st.readyAtLocked().After(time.Now()) {
-				continue // backoff window not elapsed
-			}
+// groupNamed reports whether any state still resolves to this connection.
+func (r *Reconciler) groupNamed(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, st := range r.states {
+		if st.groupOf() == key {
+			return true
 		}
-		r.startProbe(ctx, m.name)
 	}
-	return nil
+	return false
+}
+
+// run reconciles on events, not on a clock. Every write that can change the
+// runtime — saving a template, deleting one, parking one, a profile a failing
+// extension was waiting for — arrives through Trigger, so the work happens when
+// something happened and never because a timer ticked.
+//
+// THE PERIODIC WALK IS GONE ON PURPOSE (issue #183). Its jobs went to the thing
+// that owns each deadline: an idle channel closes on its own timer, a failed
+// attempt is retried on its own timer, and a channel whose process ended is
+// noticed by whoever reads it next. What is left is "the store says something
+// different from what I hold", which is exactly what an event means.
+func (r *Reconciler) run(ctx context.Context) {
+	defer close(r.done)
+	r.mu.Lock()
+	r.ctx = ctx
+	r.mu.Unlock()
+	// The startup pass: resident extensions are established here, because a
+	// template that declares a forward has no caller whose ask could start it.
+	if names, err := r.store.List(); err == nil {
+		for _, name := range names {
+			r.Sync(ctx, name)
+		}
+	} else {
+		slog.Warn("extension start failed", "err", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case name := <-r.syncs:
+			r.Sync(ctx, name)
+		case <-r.revive:
+			r.reviveTargets(ctx)
+		}
+	}
 }
 
 // startProbe marks the extension probing and runs the attempt in its own
@@ -527,7 +587,6 @@ func (r *Reconciler) startProbe(ctx context.Context, name string) {
 	go func() {
 		defer r.probes.Done()
 		r.probe(ctx, name)
-		r.Trigger()
 	}()
 }
 
@@ -537,59 +596,16 @@ func (r *Reconciler) startProbe(ctx context.Context, name string) {
 func (r *Reconciler) probe(ctx context.Context, name string) {
 	ext, err := r.store.Load(name)
 	if err != nil || !ext.IsEnabled() {
-		// Removed or parked between the walk and the attempt: the next walk drops
-		// the state (removed) or leaves it alone (parked).
+		// Removed or parked between the scheduling and the attempt.
 		return
 	}
 	st := r.state(name)
-	g := r.groupFor(st)
-	if g == nil {
+	if r.groupFor(st) == nil {
 		return
 	}
-
-	plan, err := r.resolve(ext)
-	if err != nil {
-		// The template does not resolve to a connection at all — a missing profile,
-		// a bad path rule. No retry can clear this: the ladder exists for conditions
-		// a redial fixes, and this one is fixed only by editing the template. Its
-		// recovery path is the walk's rebuildable check, which costs a store
-		// lookup and hands the budget back the moment the template resolves again,
-		// so the budget is spent now rather than climbed over twenty seconds —
-		// and the missing profile stops re-probing every walk in the meantime.
-		r.failForGood(st, "target", err.Error())
-		return
-	}
-
-	sess, err := r.ensureGroupSession(ctx, g, plan.config)
-	if err != nil {
-		r.fail(st, "dial", sshclient.DescribeDialError(err))
-		return
-	}
-
-	shellID, err := r.ensureMemberShell(plan, st, sess)
-	if err != nil {
-		// The connection is up and shared; only this extension's process failed to
-		// start. The session stays — its other members are using it, and this
-		// extension's own retry is then a channel open rather than a redial.
-		r.fail(st, "start", err.Error())
-		return
-	}
-	st.attach(sess.ID, shellID)
-
-	if err := r.ensureForwards(ext, st); err != nil {
-		// The session is up and usable for its own sake; only the tunnel is
-		// missing, so the failure is recorded and the retry targets the forward
-		// alone rather than tearing the connection down to rebuild it.
-		r.fail(st, "forward", err.Error())
-		return
-	}
-
-	// Proven up: the budget is whole again, so a later failure starts the ladder
-	// over rather than resuming a count from before the extension was working.
-	st.resetRetryBudget()
-	st.mark(StatusAvailable)
-	slog.Debug("extension available", "name", name, "session_id", sess.ID, "shell_id", shellID)
-	r.notifyChange()
+	// The reconciler's own attempt: it reuses the channel the extension already has,
+	// because a retry after a tunnel failure must not restart the process.
+	_, _, _, _, _ = r.bringUp(ctx, ext, st, false)
 }
 
 // fail records a reason, marks the extension unavailable, and arms the backoff
@@ -599,7 +615,14 @@ func (r *Reconciler) probe(ctx context.Context, name string) {
 func (r *Reconciler) fail(st *extState, stage, reason string) {
 	st.recordFailure(stage, reason)
 	st.mark(StatusUnavailable)
-	st.scheduleBackoff()
+	if wait, ok := st.scheduleBackoff(); ok {
+		// THE LADDER IS A TIMER, NOT A POLL (issue #183). The walk used to re-read
+		// "has the backoff elapsed" every five seconds, which made a retry due at
+		// 1.5s fire somewhere between 1.5 and 6.5 — and it made the reconciler the
+		// owner of a deadline it could not keep. One timer per extension keeps the
+		// deadline it printed.
+		r.armRetry(st, wait)
+	}
 	r.notifyChange()
 }
 
@@ -788,7 +811,7 @@ func (r *Reconciler) group(key string, ext *Extension) *extGroup {
 	if g, ok := r.groups[key]; ok {
 		return g
 	}
-	g := &extGroup{key: key, target: ext.Target, namespace: ns.ForExtensions(ext.Target)}
+	g := &extGroup{key: key, target: ext.Target, namespace: ns.ForExtensions(ext.Target), created: time.Now()}
 	r.groups[key] = g
 	return g
 }
@@ -1001,16 +1024,28 @@ func (r *Reconciler) onSessionDead(sessionID string) {
 		}
 	}
 	for _, st := range states {
-		if !st.detachFrom(sessionID) {
+		// THE INSTANCES GO WITH THE CONNECTION, AND THEY SAY SO. They are channels
+		// in it, so a handle to one of them is a handle to nothing — and an
+		// on-demand extension has no attachment of its own for detachFrom to find,
+		// so dropping the instances is the ONLY news this hook has for it. Leaving
+		// the drop silent sent it to `idle` with no reason and no failure: the
+		// caller's handle answered "not found", and the panel showed a healthy
+		// on-demand card for a connection that had died.
+		dropped := st.dropInstancesOnSession(sessionID)
+		if !st.detachFrom(sessionID) && len(dropped) == 0 {
 			// Not one of this session's extensions: the hook fans out to every
 			// state, and only the ones attached have anything to say about it.
 			continue
+		}
+		for _, shellID := range dropped {
+			st.recordClosed(sessionID, shellID, reason)
 		}
 		served = true
 		r.fail(st, "session", reason)
 	}
 	if served {
-		r.Trigger()
+		// The failure armed its own retry timer; there is no pass to wake.
+		_ = served
 	}
 	// The group keeps the dead session's id rather than clearing it: the next
 	// attempt replaces the corpse with a live connection, and resolving "does this
@@ -1028,7 +1063,54 @@ func (r *Reconciler) Status(name string) (Status, bool) {
 	if !r.store.Exists(name) {
 		return Status{}, false
 	}
-	return r.state(name).snapshot(), true
+	st := r.state(name)
+	r.reapEnded(name, st)
+	return st.snapshot(), true
+}
+
+// reapEnded drops the channels whose process is gone, and says so.
+//
+// THIS IS A PULL, NOT A PUSH (issue #183). No walk ticks behind the reconciler
+// any more, so a channel whose process exited is noticed by whoever asks about it
+// next — which is the caller that was about to drive it. Nothing is lost by the
+// delay: a caller reading the status gets the truth, and a caller reading the
+// channel gets the exit reason from the read itself. The alternative was a
+// goroutine polling every extension every five seconds to keep a line in a
+// listing fresh.
+func (r *Reconciler) reapEnded(name string, st *extState) {
+	st.mu.Lock()
+	empty, lazy := len(st.extra) == 0, st.lazy
+	st.mu.Unlock()
+	if empty || !lazy {
+		return
+	}
+	sess := r.attachedSession(st)
+	if sess == nil {
+		return
+	}
+	changed := false
+	for _, shellID := range st.extraShells() {
+		if shellID == "" || liveShell(sess, shellID) != nil {
+			// A template with no shell (a read-only file window) is served by the
+			// connection itself, so its instance has no channel to test and no
+			// process to outlive. Its liveness is the session's, which is the hook's
+			// news — not this loop's.
+			continue
+		}
+		if !st.dropExtra(shellID) {
+			continue
+		}
+		reason := r.instanceEndReason(sess, shellID)
+		st.recordFailure("session", reason)
+		st.recordClosed(sessIDOf(sess), shellID, reason)
+		st.mark(StatusUnavailable)
+		slog.Debug("extension instance ended", "name", name, "shell_id", shellID, "reason", reason)
+		changed = true
+	}
+	if changed {
+		r.settle(name, st)
+		r.notifyChange()
+	}
 }
 
 // List reports every extension's runtime state, sorted the way the store sorts
@@ -1059,12 +1141,596 @@ func (r *Reconciler) Retry(name string) error {
 	if !ext.IsEnabled() {
 		return errors.New("extension is disabled; enable it before retrying")
 	}
+	if ext.Lazy() {
+		// ON DEMAND, "RETRY" MEANS "GIVE ME AN INSTANCE NOW". There is no channel for
+		// the walk to repair — a lazy extension holds nothing until a caller asks —
+		// so the retry is the ask, and it answers with the same failure the first
+		// attempt did when the template is what is wrong (issue #183).
+		_, err := r.Acquire(name, 0)
+		return err
+	}
 	st := r.state(name)
+	// A manual retry is an ask: for a resident extension it is what starts it again
+	// after a failure the ladder gave up on. Nothing is woken here — the attempt is
+	// started directly, which is what the walk used to do a tick later.
+	st.want()
 	r.detach(st)
 	st.mark(StatusUnavailable)
 	st.resetRetryBudget()
-	r.Trigger()
+	r.retryNow(name)
 	return nil
+}
+
+// retryNow starts one attempt for an extension the reconciler owns. It is what the
+// retry timer, the panel's key and the MCP call all funnel through, so there is one
+// place that decides whether an attempt is allowed to start.
+func (r *Reconciler) retryNow(name string) {
+	ext, err := r.store.Load(name)
+	if err != nil || !ext.IsEnabled() {
+		return
+	}
+	if ext.Lazy() {
+		// On demand, an attempt is a caller's ask, and nobody asked here.
+		return
+	}
+	st := r.state(name)
+	if st.statusOf() == StatusProbing {
+		return
+	}
+	if _, autoRetry := st.flags(); !autoRetry {
+		/* The budget is spent. One condition is still worth re-checking without a
+		   nudge: the target profile itself. Recreated by hand, it is a fix rather
+		   than a transient, and reading it costs one store lookup instead of a dial.
+		   A host whose profile resolves fine but is not answering keeps waiting for
+		   the panel's key or the agent — that is the case the budget exists to stop. */
+		if st.lastStage() != "target" || !r.rebuildable(ext) {
+			return
+		}
+		st.resetRetryBudget()
+		r.notifyChange()
+	}
+	if wait, ok := st.backoffPending(); ok && wait > 0 {
+		// Still inside the window the failure printed. Re-arm rather than ignore, so
+		// the deadline is kept even if this call arrived early.
+		r.armRetry(st, wait)
+		return
+	}
+	ctx := st.runContext()
+	if ctx == nil {
+		return
+	}
+	r.startProbe(ctx, name)
+}
+
+// backoffPending reports how much of the current backoff window is left.
+func (st *extState) backoffPending() (time.Duration, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.readyAt.IsZero() {
+		return 0, false
+	}
+	return time.Until(st.readyAt), true
+}
+
+// runCtx is the reconciler's run context, or nil before Start.
+func (r *Reconciler) runCtx() context.Context {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ctx
+}
+
+// runContext is the run this state belongs to, for calls that start an attempt.
+func (st *extState) runContext() context.Context {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.ctx
+}
+
+// name is the extension this state is filed under, needed by the timers that have
+// to look the template up again when they fire.
+func (st *extState) name() string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.extName
+}
+
+// Acquire is how a caller asks for an instance of an on-demand extension: it
+// reuses one that has been silent long enough to be nobody's, or brings up a new
+// one, and returns the handles (issue #183). It is the whole of `open ext <name>`.
+//
+// THREE BRANCHES, and they are the caller's rule verbatim:
+//
+//	one of the instances has been silent for the whole idle window
+//
+// t                            -> nobody is using it; take it
+//
+//	there is no instance at all   -> bring one up
+//	they were all used recently   -> bring up another one
+//
+// A template that declares a forward is not on demand and has exactly one
+// instance, so its callers all get that one; the reconciler owns its lifecycle
+// and there is nothing to choose between.
+//
+// The wait bounds how long the caller waits for a DIAL, not whether it gets an
+// instance: a host that is slow to answer returns `probing` with what to poll
+// rather than a failure the caller would have to guess was not one.
+func (r *Reconciler) Acquire(name string, wait time.Duration) (Status, error) {
+	ext, err := r.store.Load(name)
+	if err != nil {
+		return Status{}, err
+	}
+	st, ok := r.Status(name)
+	if !ok {
+		return Status{}, fmt.Errorf("extension %q not found", name)
+	}
+	if !ext.IsEnabled() {
+		return st, nil
+	}
+	limit, err := ext.IdleTimeoutDuration()
+	if err != nil {
+		// A template carrying an unreadable window is a broken template, and
+		// refusing it is the only honest answer to a caller asking it to start one.
+		return Status{}, err
+	}
+	if !ext.Lazy() {
+		// Resident: the reconciler keeps exactly one instance and everyone shares
+		// it. Wanting it is what starts it, and the attempt begins now rather than
+		// at whatever moment a sweep would have come round.
+		r.state(name).want()
+		r.retryNow(name)
+		return r.await(name, wait)
+	}
+
+	// EVERY ASK GETS ITS OWN CHANNEL — not a free one, not a reused one. A channel
+	// somebody else may still be driving is the one thing that cannot be handed
+	// over, and deciding "is that one free" costs more code than a fork does. The
+	// process is the cheap part; callers never share a cursor.
+	state := r.state(name)
+	state.want()
+	state.setIdleLimit(limit)
+	sid, shellID, _, _, err := r.bringUp(context.Background(), ext, state, true)
+	if err != nil {
+		// The failure is already recorded and its retry armed; the caller's answer is
+		// the status, which carries the reason.
+		got, _ := r.Status(name)
+		return got, nil
+	}
+	return r.instanceStatus(name, sid, shellID), nil
+}
+
+// closeInstances closes every instance of an on-demand extension, recording why.
+// It is what an edit and a delete have in common: the processes that were running
+// no longer match what the template says, so they go, and the handles that named
+// them answer with the reason.
+func (r *Reconciler) closeInstances(st *extState, keepFP, reason string) {
+	sess := r.sessionOfRecord(st)
+	for _, stale := range st.extraShellsNotBuiltFrom(keepFP) {
+		if st.dropExtra(stale) {
+			if sess != nil {
+				_ = sess.CloseChildShell(stale)
+			}
+			st.recordClosed(sessIDOf(sess), stale, reason)
+		}
+	}
+}
+
+// sessionOfRecord returns the session object this extension names, live or not.
+// Closing a channel is about the channel, not about the connection's health: a
+// session that has gone DEAD still holds the shells that were in it, and a label
+// held by a channel nobody closed is a label the next instance cannot have.
+func (r *Reconciler) sessionOfRecord(st *extState) *session.Session {
+	if id := st.sessionOf(); id != "" && r.sessMgr != nil {
+		return r.sessMgr.Get(id)
+	}
+	return nil
+}
+
+// instanceEndReason reads why a channel ended, for the failure a caller sees. It
+// is channelEndReason for a shell id the extension no longer reports as its own.
+func (r *Reconciler) instanceEndReason(sess *session.Session, shellID string) string {
+	if sess != nil {
+		if shell := sess.GetChildShell(shellID); shell != nil {
+			if reason := exitReason(r.msgMgr, r.sessMgr, shell); reason != "" {
+				return reason
+			}
+		}
+	}
+	return "the instance's process is no longer running"
+}
+
+// bringUp is the only way an extension is brought to available: resolve the
+// template, make sure the connection exists, open the channel it needs, and record
+// what happened.
+//
+// FRESH ASKS FOR A NEW CHANNEL RATHER THAN THE EXTENSION'S OWN (issue #183). An
+// on-demand caller gets a process nobody else is driving; the reconciler's own
+// extension reuses the channel it already has, so a retry after a tunnel failure
+// does not restart the process. Everything else — the resolve, the dial, the
+// failure stages, the budget, the status — is the same work, which is why it is one
+// function: two copies of it is how the two paths start disagreeing about what
+// "dial failed" means.
+func (r *Reconciler) bringUp(ctx context.Context, ext *Extension, st *extState, fresh bool) (sessionID, shellID, label, stage string, err error) {
+	name := st.name()
+	plan, err := r.resolve(ext)
+	if err != nil {
+		// The stage is the diagnosis: a template that does not resolve is fixed by
+		// editing it, not by waiting, so the budget is spent rather than climbed.
+		r.failForGood(st, "target", err.Error())
+		return "", "", "", "target", err
+	}
+	g := r.groupFor(st)
+	if g == nil {
+		// Nothing has registered this extension's group yet: the first ask can arrive
+		// before the first sync.
+		g = r.group(groupKey(ext), ext)
+	}
+	sess, err := r.ensureGroupSession(ctx, g, plan.config)
+	if err != nil {
+		reason := sshclient.DescribeDialError(err)
+		r.fail(st, "dial", reason)
+		return "", "", "", "dial", errors.New(reason)
+	}
+
+	if fresh {
+		label = ""
+		if plan.shell {
+			label = st.nextLabel(ext)
+			shell, cerr := sess.CreateChildShell(plan.command, plan.args, plan.pty, plan.rows, plan.cols, label)
+			if cerr != nil {
+				r.fail(st, "start", cerr.Error())
+				return "", "", "", "start", cerr
+			}
+			shellID = shell.ID
+		}
+		// A template with no shell is served by the connection alone: a read-only file
+		// window has no channel to hand out, and its instance is the session.
+		st.addExtra(sess.ID, shellID, label, fingerprint(ext))
+		r.armIdle(name, st)
+		st.mark(StatusAvailable)
+		st.resetRetryBudget()
+		r.notifyChange()
+		slog.Debug("extension instance up", "name", name, "session_id", sess.ID, "shell_id", shellID)
+		return sess.ID, shellID, label, "", nil
+	}
+
+	shellID, err = r.ensureMemberShell(plan, st, sess)
+	if err != nil {
+		// The connection is up and shared; only this extension's process failed to
+		// start, so the retry is a channel open rather than a redial.
+		r.fail(st, "start", err.Error())
+		return "", "", "", "start", err
+	}
+	st.attach(sess.ID, shellID)
+	// A fresh instance starts with a fresh clock, or the first sync after it came up
+	// reads the moment of the ASK as its last use and reaps it early.
+	st.touch()
+
+	if err := r.ensureForwards(ext, st); err != nil {
+		// The session is up and usable; only the tunnel is missing, so the retry
+		// targets the forward alone instead of tearing the connection down.
+		r.fail(st, "forward", err.Error())
+		return sess.ID, shellID, "", "forward", err
+	}
+	// Proven up: the budget is whole again, so a later failure starts the ladder over
+	// rather than resuming a count from before the extension was working.
+	st.resetRetryBudget()
+	st.mark(StatusAvailable)
+	slog.Debug("extension available", "name", name, "session_id", sess.ID, "shell_id", shellID)
+	r.notifyChange()
+	return sess.ID, shellID, "", "", nil
+}
+
+// nextLabel names an instance's channel. The label has to be unique inside the
+// session (#188 refuses a duplicate), and it is what a human reading `ls <session>`
+// sees, so the first instance keeps the extension's own name and the rest count up
+// from there. The counter never goes back, for the reason it exists.
+func (st *extState) nextLabel(ext *Extension) string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.labels++
+	if st.labels == 1 {
+		return ext.Name
+	}
+	return fmt.Sprintf("%s#%d", ext.Name, st.labels)
+}
+
+// instanceStatus renders a status for the instance just handed out: the
+// extension's own state with THIS caller's handles on it, which is what the
+// reply needs and what `Status` alone cannot say when there is more than one.
+func (r *Reconciler) instanceStatus(name, sessionID, shellID string) Status {
+	got, _ := r.Status(name)
+	got.SessionID, got.ShellID = sessionID, shellID
+	return got
+}
+
+// await polls until the extension has an answer: up, or down with a reason. Used
+// by the resident path, where the walk owns the dial.
+func (r *Reconciler) await(name string, wait time.Duration) (Status, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		got, ok := r.Status(name)
+		if !ok {
+			return Status{}, fmt.Errorf("extension %q not found", name)
+		}
+		switch got.Status {
+		case StatusAvailable, StatusDisabled:
+			return got, nil
+		case StatusUnavailable:
+			// Down WITH a reason is an answer; down without one is still the first
+			// attempt. The distinction is what the caller does next: report the
+			// failure, or keep waiting.
+			if len(got.Failures) > 0 {
+				return got, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return got, nil
+		}
+		time.Sleep(acquirePoll)
+	}
+}
+
+// acquirePoll is how often Acquire re-reads the status. The walk itself runs on
+// the loop interval; this only decides how quickly the answer is noticed, and a
+// dial to a healthy host answers in tens of milliseconds.
+const acquirePoll = 25 * time.Millisecond
+
+// sweepInstances is the walk's whole job for an on-demand extension: check that
+// the channels it handed out are still there, close the ones whose silence has run
+// out, and say what the extension is holding (issue #183).
+//
+// It never opens anything. An instance exists because a caller asked for one, and
+// the only thing that can happen to it here is that it ends — because its process
+// died, or because nobody has touched it for the whole idle window.
+func (r *Reconciler) sweepInstances(name string, ext *Extension, st *extState, limit time.Duration) {
+	// THE CHANNELS THAT ENDED ARE DROPPED, NOT REOPENED. That is the difference
+	// between an extension's own channel — infrastructure the reconciler repairs —
+	// and a caller's instance, which is a lease it lets lapse. The body is
+	// reapEnded's: a status read does the same thing, and one of them having a
+	// special case the other lacks is how a listing starts lying.
+	r.reapEnded(name, st)
+	if r.reapDue(name, st, limit) > 0 {
+		r.notifyChange()
+	}
+	r.settle(name, st)
+}
+
+// reapDue closes the channels whose silence has run out and reports how many it
+// closed. Both the timer and the walk call it: the timer because the window is a
+// promise, the walk because a promise kept only by a timer is one missed callback
+// away from a process nobody will ever close.
+func (r *Reconciler) reapDue(name string, st *extState, limit time.Duration) int {
+	due := st.dueExtras(limit)
+	if len(due) == 0 {
+		return 0
+	}
+	sess := r.sessionOfRecord(st)
+	for _, shellID := range due {
+		if sess != nil {
+			_ = sess.CloseChildShell(shellID)
+		}
+		st.recordClosed(sessIDOf(sess), shellID,
+			"idle for "+limit.Round(time.Second).String()+" with nothing asked of it")
+		slog.Info("extension instance idled out", "name", name, "shell_id", shellID)
+	}
+	return len(due)
+}
+
+// armIdle points the extension's timer at its earliest silence deadline. Called
+// wherever a channel is opened, renewed or dropped, because those are the only
+// moments the answer changes.
+func (r *Reconciler) armIdle(name string, st *extState) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	limit := st.idleLimit
+	if limit <= 0 || len(st.extra) == 0 {
+		return
+	}
+	var next time.Time
+	for _, ex := range st.extra {
+		if d := ex.lastUse.Add(limit); next.IsZero() || d.Before(next) {
+			next = d
+		}
+	}
+	st.timer = time.AfterFunc(time.Until(next), func() {
+		if st.ctx != nil && st.ctx.Err() != nil {
+			return
+		}
+		r.idleFired(name)
+	})
+}
+
+// stopIdle disarms the timer for a state that is going away.
+func (st *extState) stopIdle() {
+	st.mu.Lock()
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	st.mu.Unlock()
+}
+
+// idleFired is the window running out. It closes what is due and re-arms for the
+// next channel, rather than closing everything: channels opened at different
+// moments run out at different moments.
+func (r *Reconciler) idleFired(name string) {
+	ext, err := r.store.Load(name)
+	if err != nil || !ext.Lazy() {
+		return
+	}
+	limit, err := ext.IdleTimeoutDuration()
+	if err != nil {
+		return
+	}
+	st := r.state(name)
+	if r.reapDue(name, st, limit) > 0 {
+		r.settle(name, st)
+		r.notifyChange()
+	}
+	r.armIdle(name, st)
+}
+
+// settle makes the reported status follow what is actually held: something up is
+// available, nothing up is idle ("nothing is running because nothing asked"), and
+// a recorded failure outranks both.
+func (r *Reconciler) settle(name string, st *extState) {
+	switch {
+	case len(st.snapshot().Failures) > 0 && st.instanceCount() == 0:
+		// leave the failure standing
+	case st.instanceCount() > 0:
+		if st.statusOf() != StatusAvailable {
+			st.mark(StatusAvailable)
+			r.notifyChange()
+		}
+	default:
+		if st.statusOf() != StatusIdle {
+			st.mark(StatusIdle)
+			r.notifyChange()
+		}
+	}
+}
+
+// sessIDOf is the session id of a live session, or empty for none.
+func sessIDOf(sess *session.Session) string {
+	if sess == nil {
+		return ""
+	}
+	return sess.ID
+}
+
+// Touch renews the idle clock of whichever instance this call addressed. It is
+// called wherever a tool call resolves a session or a channel, because that is the
+// only moment the daemon learns that somebody is still driving an on-demand
+// extension — the alternative is reaping a channel in the middle of a read.
+//
+// The shell id is the precise answer and is tried first; a call that named only
+// the session renews every instance on it, which is the honest reading of "this
+// connection is in use". A session that serves no extension, or one that is not
+// on demand, is a no-op.
+func (r *Reconciler) Touch(shellID, sessionID string) {
+	if shellID == "" && sessionID == "" {
+		return
+	}
+	// The name comes along because renewing has to re-arm that extension's timer,
+	// and the timer goes back through the store by name.
+	r.mu.Lock()
+	pairs := make(map[string]*extState, len(r.states))
+	for name, st := range r.states {
+		pairs[name] = st
+	}
+	r.mu.Unlock()
+	for name, st := range pairs {
+		if shellID != "" && st.renew(shellID) {
+			r.armIdle(name, st)
+			return
+		}
+		if sessionID != "" && st.renewSession(sessionID) {
+			r.armIdle(name, st)
+			return
+		}
+	}
+}
+
+// Release hands back an instance a caller is done with. It is the explicit half of
+// the idle window: the caller that knows it has finished says so, and the instance
+// stops costing a process on the target immediately instead of when its silence
+// runs out (issue #183).
+//
+// The shell id names which instance; an empty one releases every instance of the
+// extension, which is what "I am done with this extension" means when the caller
+// did not keep the handle. It reports how many were released, so the reply can say
+// whether the caller's handle was one of them.
+func (r *Reconciler) Release(name, shellID string) (int, error) {
+	ext, err := r.store.Load(name)
+	if err != nil {
+		return 0, err
+	}
+	if !ext.Lazy() {
+		// A resident extension's connection is the reconciler's, not the caller's:
+		// its template declares a listener, so there is nothing to hand back.
+		return 0, errors.New("this extension is not on demand: it declares a forward, so its connection stays up")
+	}
+	st := r.state(name)
+	var targets []string
+	if shellID != "" {
+		if !st.hasExtra(shellID) {
+			return 0, fmt.Errorf("extension %q is not running an instance with shell id %q", name, shellID)
+		}
+		targets = []string{shellID}
+	} else {
+		targets = st.extraShells()
+	}
+	sess := r.sessionOfRecord(st)
+	n := 0
+	for _, id := range targets {
+		if !st.dropExtra(id) {
+			continue
+		}
+		if sess != nil {
+			_ = sess.CloseChildShell(id)
+		}
+		st.recordClosed(sessIDOf(sess), id, "released by the caller")
+		n++
+	}
+	if st.instanceCount() == 0 && st.statusOf() == StatusAvailable {
+		st.mark(StatusIdle)
+	}
+	r.armIdle(name, st)
+	r.notifyChange()
+	return n, nil
+}
+
+// hasExtra reports whether this shell id names one of the extension's instances.
+// anyInstanceOn reports whether one of this extension's instances runs on the
+// session, which is what "this call is about this extension" means for a lazy one.
+func (st *extState) anyInstanceOn(sessionID string) bool {
+	for _, ex := range st.extra {
+		if ex.sessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+func (st *extState) hasExtra(shellID string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, ex := range st.extra {
+		if ex.shellID == shellID {
+			return true
+		}
+	}
+	return false
+}
+
+// ExplainClosed answers "what happened to the handle I was using" for a session
+// an on-demand extension gave up. It is what turns the bare not-found reply into
+// the fact and the way forward (issue #183).
+func (r *Reconciler) ExplainClosed(sessionID, shellID string) (name, reason string, at time.Time, ok bool) {
+	if sessionID == "" && shellID == "" {
+		return "", "", time.Time{}, false
+	}
+	r.mu.Lock()
+	states := make(map[string]*extState, len(r.states))
+	for n, st := range r.states {
+		states[n] = st
+	}
+	r.mu.Unlock()
+	for n, st := range states {
+		st.mu.Lock()
+		match := (sessionID != "" && st.closedSessionID == sessionID) ||
+			(shellID != "" && st.closedShellID == shellID)
+		reason, at = st.closedReason, st.closedAt
+		st.mu.Unlock()
+		if match {
+			return n, reason, at, true
+		}
+	}
+	return "", "", time.Time{}, false
 }
 
 // state returns the state for name, creating it on first sight. An extension
@@ -1076,7 +1742,7 @@ func (r *Reconciler) state(name string) *extState {
 	if st, ok := r.states[name]; ok {
 		return st
 	}
-	st := &extState{status: StatusUnavailable, autoRetry: true}
+	st := &extState{status: StatusUnavailable, autoRetry: true, extName: name}
 	r.states[name] = st
 	return st
 }
@@ -1096,6 +1762,135 @@ type extState struct {
 	readyAt     time.Time // earliest moment a retry may run
 	autoRetry   bool      // the automatic budget is unspent; false once it is
 	fingerprint string    // last template applied; a change rebuilds what it holds
+
+	// Lazy and the two fields under it are the on-demand half (issue #183): lazy
+	// says the reconciler never starts this extension by itself, idleLimit is the
+	// window it was given, and lastUse is when anything last asked for or drove an
+	// instance of it.
+	lazy      bool
+	idleLimit time.Duration
+	lastUse   time.Time
+
+	// What was taken away, for a caller still holding the handle: "not found" is
+	// true and useless where "this was closed at 14:02 because it was idle for 10m"
+	// is the answer to the question the caller actually has.
+	closedAt        time.Time
+	closedSessionID string
+	closedShellID   string
+	closedReason    string
+
+	// labels counts the instances this extension has EVER opened in this run. It
+	// only ever goes up, because a label must not be reused while the channel that
+	// held it may still exist: deriving it from the instance count gave the second
+	// instance the first one's name the moment the first was dropped from the
+	// bookkeeping but not from the session, and the session refused it (#188).
+	labels int
+
+	// extra are the channels this extension has handed out. Each is one caller's
+	// own process on the group's connection, so a second caller costs a fork, not a
+	// dial — and no two callers ever share a cursor (issue #183).
+	extra []*extraChannel
+
+	// ctx is the run this state belongs to. The deadline callback checks it, so a
+	// timer that was already scheduled when Stop ran does nothing instead of closing
+	// a channel on a reconciler nobody is watching — which is why Stop does not have
+	// to walk every state and disarm them.
+	ctx context.Context
+
+	// extName is what this state is filed under. The timers need it: they fire
+	// outside any call, and have to read the template again to decide.
+	extName string
+
+	// retry is the pending automatic attempt, or nil. One timer, replaced on every
+	// failure — the ladder is a deadline the status prints, so it must be kept.
+	retry *time.Timer
+
+	// timer fires when the earliest channel's silence runs out. It is what makes
+	// idle_timeout a promise instead of a walk-tick approximation: a caller that
+	// asked for ten minutes gets ten, not ten and a bit because the sweep happened
+	// to be five seconds away. The walk keeps its own check as a backstop — a timer
+	// that fails to fire must not keep a process alive for ever.
+	timer *time.Timer
+}
+
+// setLazy records whether the reconciler starts this extension on demand, and
+// the window it was given. Called by every walk, so a template that gains or
+// loses its forwards changes the answer without any other bookkeeping.
+func (st *extState) setRun(ctx context.Context) {
+	st.mu.Lock()
+	st.ctx = ctx
+	st.mu.Unlock()
+}
+
+func (st *extState) setLazy(lazy bool, limit time.Duration) {
+	st.mu.Lock()
+	st.lazy, st.idleLimit = lazy, limit
+	st.mu.Unlock()
+}
+
+// setIdleLimit records the window without touching anything else, for the calls
+// that arrive before the first walk has run (an Acquire on a cold daemon).
+func (st *extState) setIdleLimit(limit time.Duration) {
+	st.mu.Lock()
+	st.idleLimit = limit
+	st.mu.Unlock()
+}
+
+// want stamps the clock and reports whether this is a fresh ask, which is what
+// decides between "already up" and "starting" on the resident path.
+func (st *extState) want() (fresh bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	fresh = st.lastUse.IsZero()
+	st.lastUse = time.Now()
+	return fresh
+}
+
+// touch renews the clock: something addressed this extension just now. It does
+// NOT set wanted — an extension nobody asked for is not kept up by a stray read
+// of a retained transcript.
+func (st *extState) touch() {
+	st.mu.Lock()
+	st.lastUse = time.Now()
+	st.mu.Unlock()
+}
+
+// idleFor reports how long it has been since the extension was last asked for or
+// addressed, and false when it has never been (nothing to reap).
+func (st *extState) idleFor() (time.Duration, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lastUse.IsZero() {
+		return 0, false
+	}
+	return time.Since(st.lastUse), true
+}
+
+// recordClosed remembers the instance that was taken away, so the handle the
+// caller is still holding has an answer.
+func (st *extState) recordClosed(sessionID, shellID, reason string) {
+	st.mu.Lock()
+	st.closedAt = time.Now()
+	st.closedSessionID, st.closedShellID, st.closedReason = sessionID, shellID, reason
+	st.mu.Unlock()
+}
+
+// renewSession stamps every instance served by this session, for the tool calls
+// that name a session rather than one channel. It reports whether the session is
+// this extension's.
+func (st *extState) renewSession(sessionID string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.sessionID != sessionID && !st.anyInstanceOn(sessionID) {
+		return false
+	}
+	st.lastUse = time.Now()
+	for _, ex := range st.extra {
+		if ex.sessionID == sessionID {
+			ex.lastUse = st.lastUse
+		}
+	}
+	return true
 }
 
 // changed reports whether the template differs from the one this extension was
@@ -1178,10 +1973,161 @@ func (st *extState) groupOf() string {
 	return st.groupKey
 }
 
+// extraChannel is one instance of an on-demand extension: a caller's channel on
+// the group's connection, plus the clock that says whether anybody is still
+// driving it.
+type extraChannel struct {
+	// sessionID is the connection this instance runs on. It is per instance rather
+	// than per extension because an instance outlives a detach: an edit closes the
+	// channels built from the old template and clears the extension's own
+	// attachment, and the instances a caller still holds keep naming the connection
+	// they are on.
+	sessionID string
+	shellID   string
+	label     string
+	lastUse   time.Time
+	// fp is the template this channel was built from. An edit closes the channels
+	// built from the OLD one — and only those, so a channel a caller asked for after
+	// the edit survives the walk that noticed it. Without this the walk closes the
+	// very channel the caller just received, and a caller that asks again after an
+	// edit gets nothing but the edit.
+	fp string
+}
+
+// addExtra records a channel handed to a caller. The session comes with it: an
+// on-demand extension's instances all live on the group's connection, so the first
+// one is also what names the connection the status reports.
+func (st *extState) addExtra(sessionID, shellID, label, fp string) {
+	st.mu.Lock()
+	if st.sessionID == "" {
+		// The first channel also names the connection, and the name OUTLIVES the
+		// channel: the connection is kept for the next caller, so "which session is
+		// this extension served by" must still answer after the last channel goes.
+		st.sessionID = sessionID
+	}
+	st.extra = append(st.extra, &extraChannel{sessionID: sessionID, shellID: shellID, label: label, lastUse: time.Now(), fp: fp})
+	st.mu.Unlock()
+}
+
+// dropInstancesOnSession forgets every instance served by a connection that is
+// gone. It reports whether there were any.
+func (st *extState) dropInstancesOnSession(sessionID string) []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	kept := st.extra[:0]
+	var dropped []string
+	for _, ex := range st.extra {
+		if ex.sessionID == sessionID {
+			dropped = append(dropped, ex.shellID)
+			continue
+		}
+		kept = append(kept, ex)
+	}
+	st.extra = kept
+	return dropped
+}
+
+// renew stamps the instance this shell id names, for the tool calls that keep
+// using it. It reports whether the shell is one of this extension's instances.
+func (st *extState) renew(shellID string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, ex := range st.extra {
+		if ex.shellID == shellID {
+			ex.lastUse = time.Now()
+			return true
+		}
+	}
+	return false
+}
+
+// dropExtra forgets one instance and reports whether it had it.
+func (st *extState) dropExtra(shellID string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i, ex := range st.extra {
+		if ex.shellID == shellID {
+			st.extra = append(st.extra[:i], st.extra[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// dueExtras removes and returns the instances whose silence has run out. Taking
+// them out of the state is what keeps the walk from handing one out while it is
+// being closed.
+func (st *extState) dueExtras(limit time.Duration) []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	now := time.Now()
+	kept := st.extra[:0]
+	var due []string
+	for _, ex := range st.extra {
+		// A channel-less instance is the connection, and the connection is kept for
+		// the next caller — so there is nothing for a window to run out on.
+		if ex.shellID != "" && now.Sub(ex.lastUse) >= limit {
+			due = append(due, ex.shellID)
+			continue
+		}
+		kept = append(kept, ex)
+	}
+	st.extra = kept
+	return due
+}
+
+// extraShells lists the instances beyond the primary, for the walk's liveness
+// check.
+// extraShellsNotBuiltFrom lists the channels whose template is not keepFP: the
+// ones an edit invalidated, as opposed to the ones a caller asked for afterwards.
+func (st *extState) extraShellsNotBuiltFrom(keepFP string) []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	var out []string
+	for _, ex := range st.extra {
+		if ex.fp != keepFP {
+			out = append(out, ex.shellID)
+		}
+	}
+	return out
+}
+
+func (st *extState) extraShells() []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out := make([]string, 0, len(st.extra))
+	for _, ex := range st.extra {
+		out = append(out, ex.shellID)
+	}
+	return out
+}
+
+func (st *extState) instanceCount() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	n := len(st.extra)
+	if st.shellID != "" {
+		n++
+	}
+	return n
+}
+
+// sessionOf and shellOf describe the extension's FIRST instance, which is what
+// the group, the session-death hook and the status surface need: they answer
+// "which connection carries this extension" rather than "which channel is this
+// caller using".
 func (st *extState) sessionOf() string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.sessionID
+	if st.sessionID != "" {
+		return st.sessionID
+	}
+	// An on-demand extension has no attachment of its own: its connection is the one
+	// its first instance runs on.
+	if len(st.extra) > 0 {
+		return st.extra[0].sessionID
+	}
+	return ""
 }
 
 func (st *extState) shellOf() string {
@@ -1243,29 +2189,16 @@ func (st *extState) flags() (status string, autoRetry bool) {
 	return st.status, st.autoRetry
 }
 
-// readyAtLocked reports the instant the backoff window elapses. It is the third
-// read the walk makes, and it must be taken under the same lock as the others:
-// resetRetryBudget clears readyAt to the zero time from the retry path (an MCP
-// call or the panel's key) while the walk is reading it, and the zero time is
-// exactly the value the walk reads as "no window, probe now" — so an unsynchronised
-// read is not only a race the detector sees but a decision made on a torn view.
-func (st *extState) readyAtLocked() time.Time {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.readyAt
-}
-
-// scheduleBackoff sets the earliest retry from the consecutive-failure count.
-// Once the budget is spent it schedules nothing and clears the flag, so the walk
-// stops bringing the extension up on its own; the timer, not a counter, is what
-// would otherwise keep it probing forever.
-func (st *extState) scheduleBackoff() {
+// scheduleBackoff reports how long to wait before the next attempt, and whether
+// there is one at all. Once the budget is spent it schedules nothing, so nothing
+// keeps probing forever: the timer is the only thing that would.
+func (st *extState) scheduleBackoff() (time.Duration, bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.consecutive > maxAutoRetries {
 		st.autoRetry = false
 		st.readyAt = time.Time{}
-		return
+		return 0, false
 	}
 	step := backoffSteps[0]
 	if st.consecutive > 1 {
@@ -1276,6 +2209,39 @@ func (st *extState) scheduleBackoff() {
 		step = backoffSteps[i]
 	}
 	st.readyAt = time.Now().Add(step)
+	return step, true
+}
+
+// armRetry schedules the next attempt. Bound to the run's context for the same
+// reason the idle deadline is: a callback that fires after Stop must do nothing.
+func (r *Reconciler) armRetry(st *extState, wait time.Duration) {
+	st.mu.Lock()
+	if st.retry != nil {
+		st.retry.Stop()
+		st.retry = nil
+	}
+	ctx := st.ctx
+	st.mu.Unlock()
+	if wait <= 0 {
+		return
+	}
+	t := time.AfterFunc(wait, func() {
+		if ctx != nil && ctx.Err() != nil {
+			return
+		}
+		name := st.name()
+		if name == "" {
+			return
+		}
+		ext, err := r.store.Load(name)
+		if err != nil || !ext.IsEnabled() {
+			return
+		}
+		r.retryNow(name)
+	})
+	st.mu.Lock()
+	st.retry = t
+	st.mu.Unlock()
 }
 
 // exhaustRetryBudget spends the automatic budget without scheduling a retry.
@@ -1344,6 +2310,29 @@ func (st *extState) snapshot() Status {
 		Status:    st.status,
 		SessionID: st.sessionID,
 		ShellID:   st.shellID,
+		Lazy:      st.lazy,
+		Instances: len(st.extra),
+	}
+	// THE CHANNEL REPORTED IS ONE THE CALLER CAN DRIVE. For a template with its own
+	// channel that is the reconciler's; for an on-demand extension it is the first
+	// instance it handed out, because there is no other channel to name.
+	if st.shellID != "" {
+		out.Instances++
+	} else if len(st.extra) > 0 {
+		out.ShellID = st.extra[0].shellID
+	}
+	if out.SessionID == "" && len(st.extra) > 0 {
+		out.SessionID = st.extra[0].sessionID
+	}
+	if st.lazy {
+		out.IdleTimeoutMs = st.idleLimit.Milliseconds()
+		if !st.lastUse.IsZero() {
+			out.IdleForMs = time.Since(st.lastUse).Milliseconds()
+		}
+	}
+	if !st.closedAt.IsZero() {
+		out.ClosedAt = st.closedAt.UnixMilli()
+		out.ClosedSessionID, out.ClosedShellID, out.ClosedReason = st.closedSessionID, st.closedShellID, st.closedReason
 	}
 	if len(st.forwards) > 0 {
 		out.Forwards = append([]ForwardStatus(nil), st.forwards...)

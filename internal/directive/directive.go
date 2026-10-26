@@ -494,13 +494,16 @@ var ops = []Op{
 		Usage:     "connect <host> [--argv <command>] [--on-exit keep|close] [--name …]",
 		Detail:    connectDetail},
 	{Name: "open", Core: true, Kind: KindFlags, Target: true, TargetKind: TargetSession,
-		Kinds: []string{"forward", "mcp", "cdp", "jrpc"},
+		// "ext" IS A KIND WITHOUT A TARGET. `open ext <name>` names the extension in
+		// the key position — there is no session to name, because the reconciler owns
+		// the container — which is why TargetOptional is set for it alone below.
+		Kinds: []string{"forward", "mcp", "cdp", "jrpc", "ext"},
 		Flags: []string{"pipe", "pty", "argv", "name", "on-exit:enum=keep,close", "rows:number", "cols:number",
 			"size:geometry", "bind-host", "remote-host", "remote-port:number", "local-port:number",
 			"local-host", "dynamic", "remote", "target"},
 		Valueless: []string{"pipe", "pty", "dynamic", "remote"},
 		RestValue: []string{"argv"},
-		Usage:     "open <session> [--argv <cmd> [--pty]]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>   |   open <session> cdp:N --target <targetId>",
+		Usage:     "open <session> [--argv <cmd> [--pty]]   |   open <session> forward …   |   open <session> mcp|cdp|jrpc <url>   |   open ext <name>   |   open <session> cdp:N --target <targetId>",
 		Detail:    openDetail},
 	{Name: "ls", Core: true, Kind: KindFlags, Target: true, TargetOptional: true, NoPositional: true,
 		Kinds:     []string{"forward", "file", "host", "ext", "alias", "cdp", "mcp", "jrpc", "task"},
@@ -522,12 +525,12 @@ var ops = []Op{
 		// becomes a stray positional argument and the statement still reaches the
 		// container. A declared kind is recognised, and the dispatcher's default branch
 		// then answers with what to write instead.
-		Kinds: []string{"forward", "mcp", "cdp", "jrpc", "file", "task"},
-		Flags: []string{"grace:number", "forward-id"},
+		Kinds: []string{"forward", "mcp", "cdp", "jrpc", "file", "task", "ext"},
+		Flags: []string{"grace:number", "forward-id", "channel"},
 		RetiredFlags: map[string]string{
 			"force": "--force is gone. `close` stops and keeps the record, `rm` erases it.",
 		},
-		Usage:  "close <session> [<index>]   |   close <peer>",
+		Usage:  "close <session> [<index>]   |   close <peer>   |   close ext <name> [<channel>]",
 		Detail: closeDetail},
 	{Name: "rm", Kind: KindFlags, Target: true, NoPositional: true, TargetKind: TargetSession,
 		Kinds:     []string{"file", "host", "ext", "alias"},
@@ -604,7 +607,7 @@ var ops = []Op{
 			"default-shell", "default-mode", "default-approval",
 			"jump-host", "jump-user", "jump-port", "jump-password", "jump-private-key", "jump-key-passphrase",
 			"source", "kind", "target", "command", "args", "url", "headers", "allow", "paths",
-			"notes", "enabled", "forwards", "link-path", "mode", "op"},
+			"notes", "enabled", "forwards", "link-path", "mode", "op", "idle-timeout"},
 		Valueless: []string{"trust-unknown-host", "default-approval", "enabled"},
 		RestValue: []string{"args"},
 		Usage:     "create host|ext|alias <name> [flags]   |   create <session> file <path> [--target <path-it-points-at> [--op link]]",
@@ -616,7 +619,7 @@ var ops = []Op{
 			"default-shell", "default-mode", "default-approval",
 			"jump-host", "jump-user", "jump-port", "jump-password", "jump-private-key", "jump-key-passphrase",
 			"kind", "target", "command", "args", "url", "headers", "allow", "paths", "notes", "enabled",
-			"forwards", "restart"},
+			"forwards", "restart", "idle-timeout"},
 		Valueless: []string{"trust-unknown-host", "default-approval", "enabled", "restart"},
 		RestValue: []string{"args"},
 		Usage:     "edit host|ext|alias <name> [flags]",
@@ -1107,6 +1110,26 @@ value it never found a use for and nothing has run yet.
 `
 
 const openDetail = `Add a child to a session you already have: a channel, a forward, or a peer.
+
+OPEN EXT IS THE ONE FORM WITH NO SESSION IN IT. Every other open names a container first,
+because the caller is adding to a connection it already has; an extension's connection
+belongs to the reconciler, which is what keeps it trimmed to the template. So open ext
+<name> names the extension alone, and answers with the channel to drive it through:
+
+  open ext boxfs      the extension starts if it is not running, and the reply carries
+                      session_id, shell_id and the template's notes
+
+An extension that declares no forward is started ON DEMAND. Every call is answered with
+an instance of its own: one that has been silent for the whole idle_timeout is nobody's
+and is handed over, and one that was used a moment ago belongs to whoever is using it, so
+the next caller gets its own process. An instance nobody touches for the whole window is
+closed, and the id that named it then answers with when and why instead of "not found".
+
+  close ext boxfs             give the instance back now instead of at the end of the
+                              window; close ext boxfs <shell_id> gives back one
+
+A template that declares a forward is the exception - a listener has no caller to start
+it, so it is up from startup and stays up, and its connection is not yours to close.
 
 THE MODE IS SSH'S OWN RULE, which is why it needs no remembering: ssh host gives you a
 terminal, ssh host cmd runs cmd without one, ssh -t host cmd forces a terminal back.

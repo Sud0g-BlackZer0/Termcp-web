@@ -134,6 +134,19 @@ func (s *Server) sessionNotFoundMessage(sessionID string) string {
 	if s.sessMgr == nil {
 		return msg
 	}
+	// AN INSTANCE THAT WAS CLOSED ON PURPOSE IS NOT A TYPO (issue #183). An
+	// on-demand extension is closed when nothing has used it for its idle window,
+	// and the caller holding the old handle would otherwise read the same
+	// not-found a mistyped id gets — the two need different next moves, so the
+	// daemon that took it away says so.
+	if s.extensions != nil {
+		if name, reason, at, ok := s.extensions.ExplainClosed(sessionID, ""); ok {
+			return fmt.Sprintf(
+				"Session '%s' was closed at %s: the extension %q %s. "+
+					"This is not a typo and not a failure — `open ext %s` starts a new instance and returns its handles.",
+				sessionID, at.Format("15:04:05"), name, reason, name)
+		}
+	}
 	sess := s.sessMgr.PersistedSession(sessionID)
 	if sess == nil {
 		return msg
