@@ -69,9 +69,13 @@ const DefaultIdleTimeout = 10 * time.Minute
 type Extension struct {
 	// Identity. Name is the TOML-encoded file's directory name, not a TOML key,
 	// so it is never stored inside the file it names.
-	Name        string `toml:"-"`
-	Kind        string `toml:"kind"`
-	Target      string `toml:"target"` // an ssh_config profile name, or "internal"
+	Name   string `toml:"-"`
+	Kind   string `toml:"kind"`
+	Target string `toml:"target"` // an ssh_config profile name, or "internal"
+	// Description is the author's one-line summary, shown wherever the extension is
+	// listed. It does NOT reach the model by itself: nothing about the set of
+	// installed extensions goes into the MCP instructions, because the tool surface
+	// must not grow with what is installed (see docs/clients.md).
 	Description string `toml:"description,omitempty"`
 	// Enabled is *bool so that an explicit false survives a TOML round trip; a
 	// nil value means enabled, so a file that omits the key keeps working.
