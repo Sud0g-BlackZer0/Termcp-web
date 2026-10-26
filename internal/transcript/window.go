@@ -341,6 +341,23 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		if pre < 0 {
 			return Window{}, errf(ErrReader, "reader_id %d is not registered on this shell", p.ReaderID)
 		}
+		// A REFUSAL MUST NOT EAT THE BYTES (issue #200).
+		//
+		// ReadTerminalStream commits — it advances this reader as it hands the window
+		// over — so every check below answers a question about bytes that have ALREADY
+		// moved: can they survive JSON, does the caller's charset decode them. Refusing
+		// after the commit threw away exactly the data whose remedy the refusal named,
+		// and the caller could watch it happen: `read` answered 400 "pass --encoding gbk",
+		// the caller passed it, and got 204 with the byte count still on `get`.
+		//
+		// Putting them back is what makes this a rejection rather than a read whose
+		// answer was discarded. The seek is a no-op when the caller is already at `pre`,
+		// and refusing to fail the call over a failed seek keeps the reply about the
+		// bytes, which is what the caller asked about.
+		refuse := func(err error) (Window, error) {
+			_ = src.Live.SeekReader(p.ReaderID, pre)
+			return Window{}, err
+		}
 		// THE RULE THE BUFFER CANNOT KNOW. A byte window is cut wherever the caller's
 		// budget falls, and a cut inside a character is not the caller's data being
 		// wrong — but the byte-fidelity check below cannot tell the difference, so it
@@ -370,14 +387,14 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		if p.Charset != "" {
 			decoded, derr := encoding.Decode(p.Charset, raw)
 			if derr != nil {
-				return Window{}, errf(ErrInvalid, "%s", derr.Error())
+				return refuse(errf(ErrInvalid, "%s", derr.Error()))
 			}
 			raw = decoded
 			out = clean(raw, p.StripAnsi)
 		}
 		if p.RequireUTF8 {
 			if err := RenderCheck(raw); err != nil {
-				return Window{}, err
+				return refuse(err)
 			}
 		}
 		output := out
@@ -385,7 +402,7 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 		if p.Stream != "" && p.Stream != "all" {
 			filtered, omitted, ferr := filterStream(raw, pre, src, p.Stream)
 			if ferr != nil {
-				return Window{}, ferr
+				return refuse(ferr)
 			}
 			w.StreamOmitted = omitted
 			output = clean(filtered, p.StripAnsi)
