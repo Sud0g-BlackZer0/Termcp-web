@@ -398,18 +398,25 @@ func Read(ctx context.Context, src *Source, p Params) (Window, error) {
 			}
 		}
 		output := out
+		// `=` AND NOT `:=`. A `:=` here declares a NEW omitted inside this if-block —
+		// the one the literal below reads is the outer one, which stays zero — so every
+		// filtered read on the live path reported `stream_omitted_bytes: 0` while the
+		// filter had passed over the whole window. `--offset 0` looked right only
+		// because its `:=` and its literal share a scope, and the two paths are supposed
+		// to be one behaviour (issue #202).
 		var omitted int64
 		if p.Stream != "" && p.Stream != "all" {
-			filtered, omitted, ferr := filterStream(raw, pre, src, p.Stream)
+			var filtered []byte
+			var ferr error
+			filtered, omitted, ferr = filterStream(raw, pre, src, p.Stream)
 			if ferr != nil {
 				return refuse(ferr)
 			}
-			w.StreamOmitted = omitted
 			output = clean(filtered, p.StripAnsi)
 		}
-		// StreamOmitted goes in the literal, not on the line above: this assignment replaces
-		// the whole struct, so a field set before it is silently thrown away — which is
-		// exactly the shape of the bug the field exists to report.
+		// StreamOmitted goes in the literal: the assignment replaces the whole struct,
+		// so a field set before it is silently thrown away — which is exactly the shape
+		// of the bug the field exists to report, once by ordering and once by shadowing.
 		w = Window{Output: output, Raw: raw, StreamOmitted: omitted, Start: pre, End: end, Total: total, HasMore: end < total, PartialTail: partial, Trimmed: trimmed}
 	}
 	return w, nil

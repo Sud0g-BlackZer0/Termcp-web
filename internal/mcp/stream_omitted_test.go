@@ -84,11 +84,18 @@ func TestAStreamFilterThatSelectsNothingIsNotAnEmptyChannel(t *testing.T) {
 		t.Fatal("a filtered read that returned nothing must still say how much it passed over")
 	}
 
-	got := termText(t, s, map[string]any{
-		"cmd": "read " + shellID + " --stream e --offset 0", "timeout": 1,
-	})
-	if !strings.Contains(got, "Omitted:") {
-		t.Fatalf("an empty body under a full Content-Range must explain itself:\n%s", got)
+	// BOTH SPELLINGS. `--offset 0` and the default cursor are two paths into the same
+	// question, and only one of them used to answer: the live cursor path shadowed the
+	// count inside its own if-block, so `stream_omitted_bytes` came back 0 for every
+	// filtered read that did not name an offset (issue #202). A test that pins one
+	// spelling cannot see that.
+	for _, suffix := range []string{" --offset 0", ""} {
+		got := termText(t, s, map[string]any{
+			"cmd": "read " + shellID + " --stream e" + suffix, "timeout": 1,
+		})
+		if !strings.Contains(got, "Omitted:") {
+			t.Fatalf("an empty body under a full Content-Range must explain itself (suffix %q):\n%s", suffix, got)
+		}
 	}
 }
 
