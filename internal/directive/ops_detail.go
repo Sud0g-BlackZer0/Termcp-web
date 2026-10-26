@@ -891,9 +891,11 @@ page-level method sent to the browser; a sessionId whose tab closed).
                This is the only way to send a notification, which never has an
                answer to wait for.
 
-A BIG ANSWER IS A RECEIPT. Over 4 KB the reply carries the frame's number, its size
-and its first bytes instead of the payload — a JSON document cut in the middle is
-too big to have been worth the tokens and too broken to use. Page it back:
+A BIG ANSWER IS A RECEIPT. When the frame does not fit the window you asked for
+(bytes_limit, 8 KB when you name none) the reply carries its number, its size and
+its first bytes instead of the payload — a JSON document cut in the middle is too
+big to have been worth the tokens and too broken to use. The size is YOUR decision:
+raise bytes_limit and the same frame comes back whole. Page it back:
 
   read internal cdp:1 --at 57 --offset 4096
   read internal cdp:1 --at 57 --offset 0 --bytes 512

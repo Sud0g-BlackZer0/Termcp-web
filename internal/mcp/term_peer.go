@@ -274,7 +274,7 @@ func (s *Server) peerChannel(ctx context.Context, stmt directive.Statement, win 
 		if sub == "send" || boolFlag(stmt, "send") {
 			return []envelope.Slot{s.cdpSend(callCtx, stmt, h, index, f)}
 		}
-		return []envelope.Slot{namePeerTimeout(callCtx, s.cdpCall(callCtx, stmt, h, index, f))}
+		return []envelope.Slot{namePeerTimeout(callCtx, s.cdpCall(callCtx, stmt, h, win, index, f))}
 	}
 	addr := peerKey(h.sessionID, h.kind, h.index)
 	out := stmt

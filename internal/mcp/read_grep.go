@@ -25,8 +25,13 @@ const (
 	// is still 200 MB of reading, and a caller that asked for the last 20 errors
 	// does not want to wait for a full sweep of a file whose beginning is
 	// irrelevant. The tail is what callers actually search.
-	grepMaxScanBytes = 8 << 20 // 8 MiB
+	grepRecommendedScan = 8 << 20 // 8 MiB
 )
+
+// grepMaxScanBytes is grepRecommendedScan, and a variable ONLY so a test can lower it:
+// reaching 8 MiB through a real pipe would take minutes, and the behaviour under test —
+// "did the reply say the scan stopped early" — is not about the size.
+var grepMaxScanBytes = grepRecommendedScan
 
 // readGrep implements `read <handle> --grep <regex>`.
 //
@@ -176,6 +181,22 @@ func (s *Server) readGrepFrom(ctx context.Context, stmt directive.Statement, win
 		"Grep":          pattern,
 		"Lines-Scanned": fmt.Sprint(scanned),
 		"Matches":       fmt.Sprint(hits),
+	}
+	// A SCAN THAT STOPPED EARLY SAYS SO (issue #204).
+	//
+	// One --grep reads at most grepMaxScanBytes of transcript, which is a real
+	// protection — "the last 20 errors" should not sweep a 200 MB log — but a matched
+	// count from a PARTIAL scan reads exactly like a count from a complete one. A
+	// caller told "3 matches" in a 40 MB channel has no way to know that 32 MB were
+	// never looked at, and that is the same failure as a silent truncation: the reply
+	// answers a different question than the one asked, and says nothing.
+	//
+	// Scanning starts at `from` (0 for a plain grep, the command's own offset for
+	// `run --grep`), so the window is [from, end) and the channel is `total`.
+	if endOff := int64(getFloatAny(doc, "end_offset", 0)); endOff < int64(getFloatAny(doc, "total_bytes", 0)) {
+		headers["Scan-Window"] = fmt.Sprintf(
+			"searched bytes %d-%d of %d; the rest was not scanned (raise --from-line, or search a narrower tail)",
+			from, endOff, int64(getFloatAny(doc, "total_bytes", 0)))
 	}
 	if truncated {
 		headers["Truncated"] = fmt.Sprintf("showing %d of %d matches; raise --grep-limit (recommended max %d)", len(matched), hits, grepRecommendedLimit)

@@ -473,7 +473,7 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		frame, ok := h.ch.Take(waitCtx)
 		cancel()
 		if ok {
-			return s.frameReply(ctx, stmt, h, frame)
+			return s.frameReply(ctx, stmt, h, frame, win)
 		}
 		if h.ch.Transport() == jrpc.HTTP {
 			return envelope.Slot{Code: 204, Headers: headers,
@@ -490,7 +490,7 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		// Every other frame — notifications, progress, sampling, anything custom —
 		// keeps the escape hatch unchanged.
 		if op == "mcp" && len(rest) > 1 && !strings.HasPrefix(unquoteWord(strings.TrimSpace(rest[1])), "{") {
-			return s.mcpToolCall(ctx, stmt, h, strings.Join(rest[1:], " "))
+			return s.mcpToolCall(ctx, stmt, h, strings.Join(rest[1:], " "), win)
 		}
 		frame, bad := parseJRPCFrame(stmt, rest[1:])
 		if bad != nil {
@@ -513,7 +513,7 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 		if err != nil {
 			return jrpcError(stmt, err)
 		}
-		return s.frameReply(ctx, stmt, h, reply)
+		return s.frameReply(ctx, stmt, h, reply, win)
 	}
 	// NO FALLBACK: the subcommand is not the caller's word here. The verbs that reach
 	// this function (call, write --send, read --frame, close) each name the one
