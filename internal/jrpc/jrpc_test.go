@@ -3,6 +3,7 @@ package jrpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -205,11 +206,107 @@ func TestCallDeadlineIsNotUnbounded(t *testing.T) {
 	}
 }
 
-// localDial is the process's own network, which is what these tests exercise: the
+// TestHTTPChannelSilentlyHandlesUnsupportedGET ensures an HTTP server that does
+// not implement streamable GET (405 Method Not Allowed) does not cause infinite
+// retry storms or errors.
+func TestHTTPChannelSilentlyHandlesUnsupportedGET(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Mcp-Session-Id", "sess-405")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`))
+		case http.MethodGet:
+			http.Error(w, "not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	ch, err := Open(t.Context(), srv.URL, localDial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := ch.Call(ctx, map[string]any{"id": 1, "method": "initialize"}); err != nil {
+		t.Fatalf("call failed: %v", err)
+	}
+
+	// Wait briefly to confirm no panic, busy-loop, or hang.
+	time.Sleep(100 * time.Millisecond)
+}
+
 // SSH path is covered where it is built (internal/mcp), and this package is about the
 // channel's framing and locking rather than where the bytes came from.
 func localDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, network, addr)
+}
+
+// TestHTTPChannelReceivesUnsolicitedEvents pins unsolicited server-initiated events
+// over the HTTP transport (#210).
+//
+// A spec-compliant streamable HTTP MCP server sends unsolicited notifications on the
+// listening GET stream (text/event-stream with Mcp-Session-Id). The channel must open
+// this stream as soon as a session id is assigned, and unsolicited events must land in
+// the event backlog where Next/Take can read them without waiting for an active POST.
+func TestHTTPChannelReceivesUnsolicitedEvents(t *testing.T) {
+	eventsPushed := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Mcp-Session-Id", "sess-123")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`))
+		case http.MethodGet:
+			if r.Header.Get("Mcp-Session-Id") != "sess-123" {
+				http.Error(w, "missing session id", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.(http.Flusher).Flush()
+			// Push an unsolicited notification.
+			_, _ = fmt.Fprintf(w, "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"text\":\"hello-from-server\"}}\n\n")
+			w.(http.Flusher).Flush()
+			close(eventsPushed)
+			<-r.Context().Done()
+		default:
+			http.Error(w, "bad method", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer srv.Close()
+
+	ch, err := Open(t.Context(), srv.URL, localDial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+
+	// Initial call establishes the session id.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := ch.Call(ctx, map[string]any{"id": 1, "method": "initialize"}); err != nil {
+		t.Fatalf("initialize call failed: %v", err)
+	}
+
+	// Wait until the server has pushed the event over the GET stream.
+	select {
+	case <-eventsPushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the server never received the GET stream or timed out pushing the event")
+	}
+
+	// The unsolicited event must be readable via Next.
+	readCtx, readCancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer readCancel()
+	ev, ok := ch.Next(readCtx)
+	if !ok {
+		t.Fatal("ch.Next failed to read the unsolicited event")
+	}
+	if !strings.Contains(ev, "hello-from-server") {
+		t.Fatalf("unexpected event payload: %s", ev)
+	}
 }
 
 // TestTakeDoesNotStealTheAnswerACallIsWaitingFor pins the race between the two

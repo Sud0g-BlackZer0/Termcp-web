@@ -143,6 +143,23 @@ type Channel struct {
 	// shut reports that Close ran.
 	shut atomic.Bool
 
+	// sseStarted reports that the listening GET stream has been opened. HTTP
+	// only: streamable MCP carries unsolicited server messages on a GET
+	// text/event-stream, so without it a peer can push only inside the body of a
+	// POST the caller happened to be waiting on.
+	sseStarted atomic.Bool
+
+	// sseListening reports that the GET stream is UP RIGHT NOW. It is the
+	// difference between "this peer refuses to push" and "this peer can push but
+	// has nothing to say yet" — a distinction a reader has to be able to act on,
+	// because the first is a fact about the peer and the second is a fact about
+	// the window. A GET that the server answered with 405/404 clears it again.
+	sseListening atomic.Bool
+
+	// sseCancel stops the listening stream on Close, without waiting for a read
+	// deadline that a blocked SSE body does not honour.
+	sseCancel context.CancelFunc
+
 	// readErr carries why the socket stopped; done is closed by Close, releasing
 	// blocked readers and senders; dead is closed by the read loop when the socket
 	// stops delivering, so a waiter learns the difference between "nothing yet" and
@@ -577,7 +594,7 @@ func (c *Channel) TakeFramed(ctx context.Context) (Framed, bool) {
 	if frame, ok := c.pop(); ok {
 		return frame, true
 	}
-	if c.transport != WS {
+	if !c.CanWaitEvents() {
 		return Framed{}, false
 	}
 	// Wait on the backlog until a frame arrives, Close runs, or ctx expires.
@@ -627,7 +644,7 @@ func (c *Channel) Next(ctx context.Context) (string, bool) {
 	if frame, ok := c.popEvent(); ok {
 		return frame.Data, true
 	}
-	if c.transport != WS {
+	if !c.CanWaitEvents() {
 		return "", false
 	}
 	c.evMu.Lock()
@@ -706,6 +723,9 @@ func (c *Channel) Close() error {
 		return nil
 	}
 	close(c.done)
+	if c.sseCancel != nil {
+		c.sseCancel()
+	}
 	if c.conn != nil {
 		_ = c.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
@@ -732,6 +752,91 @@ func (c *Channel) wsCall(ctx context.Context, frame map[string]any, id any) (str
 	return c.awaitAnswer(ctx, id, func() error { return c.writeFrame(ctx, frame) })
 }
 
+// CanWaitEvents reports whether this channel has an active incoming stream that
+// can deliver unsolicited events (WS, or an HTTP channel whose listening GET
+// stream is connected).
+func (c *Channel) CanWaitEvents() bool {
+	return c.transport == WS || c.sseListening.Load()
+}
+
+// ensureSSEStream starts the listening GET stream for an HTTP channel once a
+// session id is known.
+//
+// THE STREAM OPENS AFTER INITIALIZE, NOT BEFORE. Streamable MCP assigns the
+// session on the first POST (initialize), and opening a GET before that makes a
+// spec-compliant server mint a SECOND session rather than attaching to the one
+// being initialized.
+func (c *Channel) ensureSSEStream(sessionID string) {
+	if !c.sseStarted.CompareAndSwap(false, true) {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.sseCancel = cancel
+	go c.readSSEStream(ctx, sessionID)
+}
+
+// readSSEStream maintains the long-lived GET text/event-stream carrier for
+// server-initiated messages.
+//
+// UNSOLICITED NOTIFICATIONS BELONG TO THIS STREAM. A streamable HTTP MCP server
+// delivers notifications and progress here while requests run over separate
+// POST calls; without this stream those frames are permanently lost.
+func (c *Channel) readSSEStream(ctx context.Context, sessionID string) {
+	for !c.shut.Load() && ctx.Err() == nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("Mcp-Session-Id", sessionID)
+		resp, err := c.client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil || c.shut.Load() {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.done:
+				return
+			case <-time.After(500 * time.Millisecond):
+				continue
+			}
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			// A server that refuses GET text/event-stream (405 Method Not Allowed
+			// or 404) does not speak streamable MCP; do not hammer it.
+			if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotFound {
+				c.sseListening.Store(false)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.done:
+				return
+			case <-time.After(time.Second):
+				continue
+			}
+		}
+		c.sseListening.Store(true)
+
+		br := bufio.NewReader(io.LimitReader(resp.Body, maxFrameBytes))
+		for {
+			payload, err := readEvent(br)
+			if err != nil {
+				_ = resp.Body.Close()
+				break
+			}
+			if payload == "" {
+				continue
+			}
+			c.dispatch(c.record(payload))
+		}
+	}
+}
+
 // httpCall posts one frame and reads its answer.
 //
 // The answer is the response body when the peer answers in JSON, and one event
@@ -740,10 +845,9 @@ func (c *Channel) wsCall(ctx context.Context, frame map[string]any, id any) (str
 // reading the whole body and searching it afterwards — which hung whenever the
 // stream stayed open for notifications, as a spec-compliant one does.
 //
-// ponytail: one POST sees only the events carried by its own response. Server
-// messages that arrive while no request is open need the listening GET stream,
-// which this does not open. Add it when a caller depends on unsolicited MCP
-// notifications; a request/response peer (and CDP, which uses a socket) does not.
+// Server-initiated messages (unsolicited notifications, progress) are delivered
+// over the listening GET stream (see ensureSSEStream) which opens once a session
+// id exists; frames carried there land in the backlog and are readable via Take/Next.
 func (c *Channel) httpCall(ctx context.Context, frame map[string]any, id any) (string, error) {
 	resp, err := c.httpPost(ctx, frame)
 	if err != nil {
@@ -802,6 +906,9 @@ func (c *Channel) httpPost(ctx context.Context, frame map[string]any) (*http.Res
 	}
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
 		c.sess.Store(&sid)
+		c.ensureSSEStream(sid)
+	} else if existing := c.sess.Load(); existing != nil && *existing != "" {
+		c.ensureSSEStream(*existing)
 	}
 	return resp, nil
 }

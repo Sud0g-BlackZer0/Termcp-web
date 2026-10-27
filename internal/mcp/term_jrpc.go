@@ -476,12 +476,20 @@ func (s *Server) jrpcChannel(ctx context.Context, stmt directive.Statement, win 
 			return s.frameReply(ctx, stmt, h, frame, win)
 		}
 		// A RECV THAT TOOK NOTHING DELIVERED NOTHING, so it is a 204 — and the two
-		// sentences below are not the same news: on HTTP there is nothing to wait for at
-		// all, on a socket the window was simply empty. Each rides in the Hint header,
-		// never the body, for the reason noContentSaying documents.
-		if h.ch.Transport() == jrpc.HTTP {
-			return noContentSaying(headers, "no frame. On an HTTP channel every frame is an answer to a call, so there is "+
-				"nothing to wait for; a peer that pushes on its own needs a socket (cdp open ws://…).")
+		// sentences below are not the same news: a peer with no incoming stream has
+		// nothing that could ever arrive, while a live one simply had an empty window.
+		// Each rides in the Hint header, never the body, for the reason
+		// noContentSaying documents.
+		//
+		// AN HTTP CHANNEL NOW HAS A THIRD SHAPE, which is why this can no longer be a
+		// check on the transport: streamable MCP carries server-initiated frames on a
+		// listening GET stream, so "HTTP" stopped meaning "cannot be pushed to" (issue
+		// #210). The channel is asked instead of the transport.
+		if !h.ch.CanWaitEvents() {
+			return noContentSaying(headers, "no frame. This peer sends nothing on its own: it answers "+
+				"inside the response to a call, and an answer is read by the call that asked, so there is "+
+				"nothing to wait for. A peer that pushes needs a socket, or an MCP endpoint whose listening "+
+				"GET stream it accepts.")
 		}
 		return noContentSaying(headers, "no frame within the window")
 	case "call", "send":
