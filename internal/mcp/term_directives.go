@@ -761,6 +761,22 @@ const ptyQuiet = 500 * time.Millisecond
 // swallow bytes meant for `read`.
 const ptyPoll = 20 * time.Millisecond
 
+// pipeQuiet is how long a pipe's stream must stand still before a wait on a
+// resident process calls the command done.
+//
+// SHORTER THAN ptyQuiet ON PURPOSE, because the two streams are not the same
+// thing. A pty interposes a line discipline and, on the shells that reach a
+// caller here, a prompt that repaints itself in several chunks over a second —
+// ptyQuiet is sized for those gaps. A pipe is a byte stream from a child this
+// server started: a command's output lands as it is written, with no repaint and
+// no echo of the typed line to survive, so the gap it must outlast is one write
+// and not five.
+//
+// IT IS A CALIBRATION, NOT A LAW. Raise it if a command's output ever arrives
+// split across two replies; `read` returns the rest either way, and that is what
+// makes a 100ms guess affordable where 500ms would be a tax on every call.
+const pipeQuiet = 100 * time.Millisecond
+
 // parseSince reads the --since cursor.
 func parseSince(raw string) (int64, error) {
 	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)

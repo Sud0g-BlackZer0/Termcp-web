@@ -587,10 +587,14 @@ THE SAME IS TRUE OF A PIPE. Its stdin is a real stdin: whoever holds the other e
 a person, a supervisor, another tool — can type into it between your calls. So
 "nothing came back" never means "nothing is running", on either kind of channel.
 
-WHEN THIS CALL RETURNS. A pipe channel reports its process exiting, so run returns
-as soon as it does. A pty does not: whatever runs inside it is the shell's child,
-and a terminal has no "the command finished" signal. run on a pty therefore waits
-for the stream to go STILL — half a second without a new byte ends the wait — and
+WHEN THIS CALL RETURNS. A pipe channel's process is a child this server started,
+so its exit is observed and run returns as soon as it happens. A pipe that stays
+alive across commands — a shell you keep open — has no exit of its own to report,
+so there the wait ends when the output stops moving: a tenth of a second with no
+new byte. A pty has no exit to observe at all: whatever runs inside it is the
+shell's child, and a terminal has no "the command finished" signal. run on a pty
+therefore waits for the stream to go STILL — half a second without a new byte
+ends the wait, longer than a pipe needs because a prompt repaints itself — and
 falls back to timeout seconds (default 2) only while the command has printed
 nothing at all, where there is nothing else to watch.
 
