@@ -22,6 +22,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -110,9 +111,12 @@ type Task struct {
 	startedAt time.Time
 	cancel    context.CancelFunc
 
+	// done and total are atomic so the 32 KB copy loop never takes a lock (the
+	// comment on Add documented that intention and previously did the opposite).
+	done  atomic.Int64
+	total atomic.Int64
+
 	mu       sync.Mutex
-	done     int64
-	total    int64
 	status   Status
 	err      error
 	endedAt  time.Time
@@ -123,19 +127,14 @@ type Task struct {
 func (t *Task) ID() string { return t.id }
 
 // Add records n more bytes as transferred. Called from the copy loop, so it is
-// lock-free: a mutex per 32 KB chunk would serialise the transfer against every
-// reader asking how it is going.
+// lock-free: atomic add, no mutex per chunk (issue #223).
 func (t *Task) Add(n int64) {
-	t.mu.Lock()
-	t.done += n
-	t.mu.Unlock()
+	t.done.Add(n)
 }
 
 // SetTotal records the size the transfer expects to move.
 func (t *Task) SetTotal(n int64) {
-	t.mu.Lock()
-	t.total = n
-	t.mu.Unlock()
+	t.total.Store(n)
 }
 
 // finish moves the task to a terminal status exactly once.
@@ -159,7 +158,7 @@ func (t *Task) view() View {
 	v := View{
 		ID: t.id, Kind: t.kind, SessionID: t.sessionID,
 		Path: t.path, LocalPath: t.localPath,
-		Status: t.status, BytesDone: t.done, BytesTotal: t.total,
+		Status: t.status, BytesDone: t.done.Load(), BytesTotal: t.total.Load(),
 		StartedAt: t.startedAt, EndedAt: t.endedAt,
 	}
 	if t.err != nil {
