@@ -103,6 +103,9 @@ var ops = []Op{
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
 		Kinds: []string{"file", "host", "ext", "protocol", "cdp", "mcp", "jrpc", "task"},
 		Flags: []string{"op"},
+		RetiredFlags: map[string]string{
+			"action-verb": "--action-verb is gone; use --op instead.",
+		},
 		// `get <s> cdp:1 protocol <Domain>` and `get <s> mcp:1 tools <name>`: the
 		// word after the key is a NAME the peer understands, not grammar of ours.
 		DataArgs: 1,
@@ -175,6 +178,9 @@ var ops = []Op{
 		// flag for size did not exist.
 		Flags: []string{"data", "mode", "local-path", "offset:number", "length:number", "size:number",
 			"old-text", "new-text", "op", "uid:number", "gid:number", "atime:number", "mtime:number"},
+		RetiredFlags: map[string]string{
+			"action-verb": "--action-verb is gone; use --op instead.",
+		},
 		Usage:  "write <session> file <path> [--data TEXT|--local-path FILE] [--mode …] [--op chmod|truncate|…]",
 		Detail: writeDetail},
 
@@ -1082,8 +1088,12 @@ five characters $HOME, and so does --data "$HOME" — the parser reports where a
 expansion SITS instead of guessing what it means. Single quotes are still the
 cleaner habit, because they are unambiguous about what is literal.
 
---action-verb is the older spelling of --op and does the same thing; --op wins if
-both are given. Prefer --op.
+--action-verb WAS a second spelling of --op and has been REMOVED. It never worked
+through this parser — an undeclared flag is refused at parse time — so the only
+callers it could have had were reading a lie. Writing it now answers with where
+the sub-action goes:
+
+  write <session> file <path> --op chmod --mode 493
 
 perm, link and fs take a SUB-ACTION via --op:
   --action perm --op chmod    --remote-path --mode DECIMAL  (0644 -> 420, 0755 -> 493)

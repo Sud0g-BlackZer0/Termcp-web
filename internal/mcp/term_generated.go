@@ -735,17 +735,20 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	if action != "read" && action != "write" && action != "getwd" {
 		// perm/link/fs each dispatch on their OWN action field (chmod, symlink,
 		// realpath …), so the sub-action overwrites the verb that selected the
-		// tool. --op is the spelling; --action-verb is the older alias.
+		// tool.
 		//
 		// A missing flag yields "", not nil — the previous `== nil` test therefore
 		// never fired and the sub-action was silently empty, which is what made
 		// these three reachable only as "action must be chmod, chown, or chtimes".
+		//
+		// THERE IS NO --action-verb FALLBACK HERE ANY MORE, and there never needed
+		// to be: the parser refuses a flag the directive does not declare, so a call
+		// carrying --action-verb died at parse time and this branch was unreachable.
+		// It read as a supported spelling and was not one. The name is in the
+		// directive's RetiredFlags now, so the refusal says what to write instead.
 		switch action {
 		case "perm", "link", "fs":
 			sub, _ := stmt.Flag("op")
-			if sub == "" {
-				sub, _ = stmt.Flag("action-verb")
-			}
 			if sub == "" {
 				return badRequest(stmt, "file --action "+action+" needs the sub-action: --op "+fileSubActions(action))
 			}
