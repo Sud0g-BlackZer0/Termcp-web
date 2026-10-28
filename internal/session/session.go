@@ -479,36 +479,97 @@ func (s *Session) Restriction() Restriction {
 // buffers, and its byte log are all kept for read-only viewing; nothing
 // is removed from the registry or purged. Only Manager.Delete/finalize release
 // resources.
+//
+// IT IS BOUNDED, AND THAT IS THE WHOLE POINT (issue #218). Every step below used to
+// be a synchronous call into x/crypto, and each one writes a packet: `Signal` writes a
+// "signal" request, `CloseSessionOnly` writes a channel-close. When the far side stops
+// reading its socket -- a target pinned in userspace with the kernel still answering
+// handshakes, or a peer whose receive window never grows again -- that write never
+// returns, and it holds the SSH channel's write mutex while it waits. Three
+// consequences followed from one stuck write:
+//
+//   - Terminate never returned, so `close` never answered;
+//   - the grace period never even started, because Signal ran BEFORE the timer;
+//   - markDead never ran, so the session reported `status: running` forever;
+//   - and sync.Once made it everyone's problem: a second caller BLOCKS inside Do
+//     rather than skipping it, so every later close queued behind the first.
+//
+// So the graceful half runs in its own goroutine and the caller waits on a deadline.
+// On expiry the only move that actually helps is closing the underlying connection:
+// x/crypto's writes are blocked in the OS, and net.Conn.Close is what makes them
+// return. The goroutine then unwinds on its own -- nothing is left parked.
 func (s *Session) Terminate(force bool, gracePeriod time.Duration) {
 	s.terminateOnce.Do(func() {
 		s.beginClosing()
+		// DEFERRED, so the state transition happens on every path including the one
+		// where the graceful close never comes back. A session that cannot be marked
+		// dead is a session the caller keeps trying to close.
+		defer s.markDead()
+
 		es := s.execSession
 		if es == nil {
 			// Restored (restart) placeholder with no live transport.
-			s.markDead()
 			return
 		}
-		if !force {
-			es.Signal(ssh.SIGTERM)
-			select {
-			case <-es.Done():
-				s.markDead()
-				return
-			case <-time.After(gracePeriod):
-			}
-		}
 
-		// Close the session's own transport, not sibling session channels.
-		// For remote sessions the shared SSH client is left for Disconnect(); for
-		// internal loopback there's no multiplexing so close everything here.
-		if s.SSHEndpoint == "internal" {
-			es.Close()
-		} else {
-			es.CloseSessionOnly()
+		// THE BUDGET. A graceful close gets the caller's grace period plus a little
+		// room for the round trip; a forced one gets a short fixed window, because
+		// there is nothing to wait for. Either way this call returns within it.
+		timeout := gracePeriod + terminateSlack
+		if force || gracePeriod <= 0 {
+			timeout = terminateSlack
 		}
-		s.markDead()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		// THE GRACEFUL PATH, OFF THE CALLER'S STACK. Everything in here can block on a
+		// write that will never complete; none of it may block the deadline below.
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			if !force {
+				_ = es.Signal(ssh.SIGTERM)
+				select {
+				case <-es.Done():
+					return
+				case <-time.After(gracePeriod):
+				case <-ctx.Done():
+					return
+				}
+			}
+			// Close the session's own transport, not sibling session channels.
+			// For remote sessions the shared SSH client is left for Disconnect(); for
+			// internal loopback there's no multiplexing so close everything here.
+			if s.SSHEndpoint == "internal" {
+				_ = es.Close()
+			} else {
+				_ = es.CloseSessionOnly()
+			}
+		}()
+
+		select {
+		case <-closed:
+		case <-ctx.Done():
+			// THE PEER IS NOT READING. Dropping the connection is the only thing that
+			// unblocks a write already stuck in the kernel: it makes every parked
+			// writePacket return an error, which is what lets the goroutine above
+			// finish instead of leaking.
+			if client := es.SSHClient(); client != nil {
+				_ = client.Close()
+			}
+			_ = es.Close()
+		}
 	})
 }
+
+// terminateSlack is how much longer than the grace period a close may take before the
+// connection is dropped instead of asked politely.
+//
+// A ROUND TRIP, NOT A SECOND GRACE PERIOD: the grace period is time for the remote
+// process to exit after SIGTERM, and this is time for the messages that request and
+// report that exit to cross the network. Two seconds is generous for a healthy link
+// and irrelevant for a dead one, where the point is to stop waiting.
+const terminateSlack = 2 * time.Second
 
 // transportLostMessage is the system message recorded when a session's SSH
 // connection dies under it (network loss, remote sshd gone). The per-shell
