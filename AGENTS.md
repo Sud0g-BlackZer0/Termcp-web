@@ -28,10 +28,15 @@
 4. **生命周期终止（如 `Terminate`）必须具备有界超时与底层强拆兜底**：
    - 优雅关闭动作必须异步执行并受 `context.WithTimeout` 约束；
    - 超时后唯一的有效解法是主动调用底层 `net.Conn.Close()`，使内核中所有阻塞在底层读写上的协程立即报错并解开。
-5. **纯计数器与单状态标记优先使用 `sync/atomic`**：
+5. **纯计数器与单状态标记一律使用 `sync/atomic`**：
    - 纯数值累加使用 `atomic.Int64` / `atomic.Uint64`；
    - 状态开闭使用 `atomic.Bool`；
-   - 避免为了一个数字的累加而在高频传输循环中加解互斥锁。
+   - 避免为了一个数字的累加引入全局锁（如曾经的 `forwardCounter`）。
+6. **无跨 key 事务的纯 map 查增删，一律使用 `sync.Map`**：
+   - 别再写 `type X struct { mu sync.Mutex; m map[K]V }` —— AI 写锁基本全是 bug（漏解锁、死锁、嵌套锁）；
+   - 单 key 的查、增、删用 `Load` / `Store` / `LoadOrStore` / `LoadAndDelete`，不需要任何互斥锁；
+   - 遍历快照用 `Range` 收集；
+   - 本项目已将 `aliasTable`、`task.Manager`、`ForwardManager`、`sessionListHub`、`uiNotifyHub`、`viewerRegistry`、`sshserver.pending`、`sshserver.builtins`、`cdpState`、`Server.recvCursors`、`Server.closedReads` 等全部换成 `sync.Map`，消除了 12+ 处死锁可能。
 
 ## Agent skills
 

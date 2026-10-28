@@ -633,7 +633,7 @@ func TestMCPRecvCursorIsDroppedOnClose(t *testing.T) {
 	if out := termText(t, s, map[string]any{"cmd": "close " + h}); !statusLineIs(out, "204") {
 		t.Fatalf("close: %s", out)
 	}
-	if _, ok := s.recvCursors[h]; ok {
+	if _, ok := s.recvCursors.Load(h); ok {
 		t.Errorf("handle %s still has a recv cursor after close; the map grows for the life of the process", h)
 	}
 }

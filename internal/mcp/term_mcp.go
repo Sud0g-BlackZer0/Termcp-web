@@ -454,18 +454,13 @@ const minRecvWindow = 1 << 20
 // recvReader returns the one-token gate that gives a handle one reader at a time,
 // creating it on first use. The token is in the channel when the gate is free.
 func (s *Server) recvReader(handle string) chan struct{} {
-	s.recvCursorMu.Lock()
-	defer s.recvCursorMu.Unlock()
-	if s.recvReaders == nil {
-		s.recvReaders = make(map[string]chan struct{})
+	if v, ok := s.recvReaders.Load(handle); ok {
+		return v.(chan struct{})
 	}
-	tok, ok := s.recvReaders[handle]
-	if !ok {
-		tok = make(chan struct{}, 1)
-		tok <- struct{}{}
-		s.recvReaders[handle] = tok
-	}
-	return tok
+	tok := make(chan struct{}, 1)
+	tok <- struct{}{}
+	actual, _ := s.recvReaders.LoadOrStore(handle, tok)
+	return actual.(chan struct{})
 }
 
 // lineLock returns the mutex that makes one channel's writes land as whole lines,
@@ -476,43 +471,34 @@ func (s *Server) recvReader(handle string) chan struct{} {
 // parse (issue #212). Callers hold this across both writes and release it before
 // waiting for output.
 func (s *Server) lineLock(handle string) *sync.Mutex {
-	s.lineMu.Lock()
-	defer s.lineMu.Unlock()
-	if s.lineLocks == nil {
-		s.lineLocks = make(map[string]*sync.Mutex)
+	if v, ok := s.lineLocks.Load(handle); ok {
+		return v.(*sync.Mutex)
 	}
-	m, ok := s.lineLocks[handle]
-	if !ok {
-		m = &sync.Mutex{}
-		s.lineLocks[handle] = m
-	}
-	return m
+	m := &sync.Mutex{}
+	actual, _ := s.lineLocks.LoadOrStore(handle, m)
+	return actual.(*sync.Mutex)
 }
 
 func (s *Server) recvCursor(handle string) int64 {
-	s.recvCursorMu.Lock()
-	defer s.recvCursorMu.Unlock()
-	return s.recvCursors[handle]
+	v, ok := s.recvCursors.Load(handle)
+	if !ok {
+		return 0
+	}
+	n, _ := v.(int64)
+	return n
 }
 
 // dropRecvCursor forgets a closed handle's read position.
 func (s *Server) dropRecvCursor(handle string) {
-	s.recvCursorMu.Lock()
-	defer s.recvCursorMu.Unlock()
-	delete(s.recvCursors, handle)
-	// The reader lock goes too: handles are minted monotonically, so a reopened
+	s.recvCursors.Delete(handle)
+	// The reader gate goes too: handles are minted monotonically, so a reopened
 	// channel never reuses this key and the map would grow by one entry per channel
 	// the process ever opened.
-	delete(s.recvReaders, handle)
+	s.recvReaders.Delete(handle)
 }
 
 func (s *Server) setRecvCursor(handle string, at int64) {
-	s.recvCursorMu.Lock()
-	defer s.recvCursorMu.Unlock()
-	if s.recvCursors == nil {
-		s.recvCursors = make(map[string]int64)
-	}
-	s.recvCursors[handle] = at
+	s.recvCursors.Store(handle, at)
 }
 
 // notAFrame says what the buffer holds when nothing in it parsed as a value, so a
@@ -680,16 +666,14 @@ func isSyntaxEOF(err error) bool {
 // such reader, and a position that is not kept anywhere is a default read that
 // replays the same bytes forever (#159 C1).
 func (s *Server) closedReadCursor(key string) int64 {
-	s.closedReadMu.Lock()
-	defer s.closedReadMu.Unlock()
-	return s.closedReads[key]
+	v, ok := s.closedReads.Load(key)
+	if !ok {
+		return 0
+	}
+	n, _ := v.(int64)
+	return n
 }
 
 func (s *Server) setClosedReadCursor(key string, at int64) {
-	s.closedReadMu.Lock()
-	defer s.closedReadMu.Unlock()
-	if s.closedReads == nil {
-		s.closedReads = make(map[string]int64)
-	}
-	s.closedReads[key] = at
+	s.closedReads.Store(key, at)
 }
