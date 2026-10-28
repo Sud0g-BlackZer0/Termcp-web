@@ -96,42 +96,8 @@ func (s *Server) handleFileWrite(ctx context.Context, request mcpgo.CallToolRequ
 	data := getString(args, "data", "")
 	mode := getString(args, "mode", "")
 
-	// --local-path WAS REMOVED FROM THIS HANDLER, and the reason is a hole rather
-	// than a tidiness preference.
-	//
-	// The flag made the daemon open a file on ITS OWN filesystem and stream it to the
-	// session. Nothing checked whether the caller was allowed to touch that filesystem:
-	// --no-internal hides the loopback profile so an MCP client cannot reach the
-	// machine termcp runs on, and this handler walked around the refusal by reading
-	// the file directly, with `data` arriving as the reply. An isolation flag that
-	// one neighbouring flag can undo is not isolation.
-	//
-	// It was also redundant. `read internal file <path> | write <session> file <path>`
-	// moves the same bytes, node to node, without passing them through the caller's
-	// context — and it goes THROUGH the internal profile, so --no-internal refuses it
-	// the way it refuses every other route to the daemon's disk. The same holds for
-	// the reverse direction.
-	//
-	// The refusal is explicit rather than "unknown argument", because a caller that
-	// knows this option existed needs to be told where it went, not that they
-	// misspelled something.
-	if _, had := args["local_path"]; had {
-		return toolError(CodeInvalidArgument, "%s",
-			"local_path is gone: this handler writes --data and nothing else. "+
-				"To move a file from the daemon's host, use a pipeline through the internal profile: "+
-				"`read internal file <path> | write <session> file <path>`. Going through that profile is "+
-				"what makes --no-internal able to refuse local reads at all."), nil
-	}
-
 	switch mode {
 	case "", "text", "hex":
-	case "file":
-		// "file" said "the bytes come from --local-path", which no longer exists. Left
-		// as a named refusal so the error explains the absence instead of calling a
-		// valid token unknown.
-		return toolError(CodeInvalidArgument, "%s",
-			"mode \"file\" meant \"read --local-path\", and --local-path is gone. Stream the bytes across a "+
-				"pipeline instead: `read internal file <path> | write <session> file <path>`."), nil
 	default:
 		return toolError(CodeInvalidArgument, "%s",
 			"unknown mode "+strconv.Quote(mode)+": it is the ENCODING of --data, one of text, hex. "+

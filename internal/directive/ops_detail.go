@@ -103,9 +103,6 @@ var ops = []Op{
 	{Name: "get", Core: true, Kind: KindFlags, Target: true,
 		Kinds: []string{"file", "host", "ext", "protocol", "cdp", "mcp", "jrpc", "task"},
 		Flags: []string{"op"},
-		RetiredFlags: map[string]string{
-			"action-verb": "--action-verb is gone; use --op instead.",
-		},
 		// `get <s> cdp:1 protocol <Domain>` and `get <s> mcp:1 tools <name>`: the
 		// word after the key is a NAME the peer understands, not grammar of ours.
 		DataArgs: 1,
@@ -178,10 +175,6 @@ var ops = []Op{
 		// flag for size did not exist.
 		Flags: []string{"data", "mode", "offset:number", "length:number", "size:number",
 			"old-text", "new-text", "op", "uid:number", "gid:number", "atime:number", "mtime:number"},
-		RetiredFlags: map[string]string{
-			"action-verb": "--action-verb is gone; use --op instead.",
-			"local-path":  "--local-path is gone. Use a pipeline: read <source-session> file <path> | write <target-session> file <path> (use the internal session for daemon-local files). A pipeline moves bytes between nodes without passing through the caller's context.",
-		},
 		Usage:  "write <session> file <path> [--data TEXT] [--mode …] [--op chmod|truncate|…]",
 		Detail: writeDetail},
 
@@ -1084,25 +1077,11 @@ characters l-i-n-e-1-backslash-n. With --mode hex the value is hex and writes
 those exact bytes; a payload that is already binary belongs in --mode hex, or
 streamed across a pipeline: read <source> file <path> | write <target> file <path>.
 
---local-path HAS BEEN REMOVED. Moving bytes from the daemon host to a remote
-session is a pipeline: read internal file <path> | write <session> file <path>.
-The pipeline enforces the same isolation as other operations (including
---no-internal), moves bytes without passing them through the caller's context,
-and provides task-backed progress reporting. Passing --local-path now answers
-with where to write the pipeline instead.
-
 Quoting is the SHELL's, not this protocol's: a flag value is the caller's own
 bytes with the quotes removed and nothing else touched. --data '$HOME' writes the
 five characters $HOME, and so does --data "$HOME" — the parser reports where an
 expansion SITS instead of guessing what it means. Single quotes are still the
 cleaner habit, because they are unambiguous about what is literal.
-
---action-verb WAS a second spelling of --op and has been REMOVED. It never worked
-through this parser — an undeclared flag is refused at parse time — so the only
-callers it could have had were reading a lie. Writing it now answers with where
-the sub-action goes:
-
-  write <session> file <path> --op chmod --mode 493
 
 perm, link and fs take a SUB-ACTION via --op:
   --action perm --op chmod    --remote-path --mode DECIMAL  (0644 -> 420, 0755 -> 493)
@@ -1113,15 +1092,6 @@ perm, link and fs take a SUB-ACTION via --op:
   --action link --op link     --existing-path E --new-path P   (hard link)
   --action fs   --op truncate --remote-path --size N
   --action fs   --op realpath|statvfs  --remote-path
-
---local-path HAS BEEN REMOVED, and it is in the parser's retired list so writing it
-answers where the capability went rather than "unknown flag". It read the daemon
-host's filesystem from inside the file handler with no capability check, which made
---no-internal decorative: a client that could not open the loopback profile could
-still name any path on that machine. A pipeline goes through a session, so the
-isolation flag can refuse it:
-
-  read internal file <path> | write <session> file <path>
 
 A path outside the session's whitelist is refused. Credentials are never echoed; a
 write reports bytes written, not content.`

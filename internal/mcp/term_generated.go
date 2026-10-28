@@ -1797,7 +1797,7 @@ func capGeneratedCounted(body string, win termArgs) (capped string, code, cut, t
 //
 // The old `ok && v != ""` test is why an explicitly empty `--data` could not write
 // an empty file: the caller's explicit empty value was discarded here, the handler
-// saw no `data` key at all, and answered "data or local_path required" for a flag
+// saw no `data` key at all, and answered that no data had been given — for a flag
 // that had been given. The other half of the same test was worse: `--remote-path`
 // with no value was also discarded, so a fumbled flag looked identical to a
 // forgotten one.
