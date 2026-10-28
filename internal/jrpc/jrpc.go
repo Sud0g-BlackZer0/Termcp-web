@@ -725,7 +725,7 @@ func (c *Channel) pop() (Framed, bool) {
 }
 
 // Close shuts the channel. A socket is closed with a normal closure frame so the
-// peer does not log an abnormal one.
+// peer does not log an abnormal one, when write access is free.
 func (c *Channel) Close() error {
 	if !c.shut.CompareAndSwap(false, true) {
 		return nil
@@ -735,8 +735,17 @@ func (c *Channel) Close() error {
 		c.sseCancel()
 	}
 	if c.conn != nil {
-		_ = c.conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		// THE WRITE GATE IS HONOURED, NOT RACED WITH. gorilla/websocket forbids
+		// concurrent writers, so sending CloseMessage while a Call/Send is in flight
+		// races on the connection's writer. If the gate is available, send the polite
+		// close frame; if it is occupied, skip the frame and drop the socket directly.
+		select {
+		case c.callGate <- struct{}{}:
+			_ = c.conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			<-c.callGate
+		default:
+		}
 		return c.conn.Close()
 	}
 	return nil
