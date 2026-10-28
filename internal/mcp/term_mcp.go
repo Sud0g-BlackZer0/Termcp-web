@@ -456,6 +456,27 @@ func (s *Server) recvReader(handle string) *sync.Mutex {
 	return m
 }
 
+// lineLock returns the mutex that makes one channel's writes land as whole lines,
+// creating it on first use.
+//
+// THE UNIT IS A LINE, not a write: `run` sends the text and the enter that ends it as
+// two calls, and two runs interleaving there produce a stream no line reader can
+// parse (issue #212). Callers hold this across both writes and release it before
+// waiting for output.
+func (s *Server) lineLock(handle string) *sync.Mutex {
+	s.lineMu.Lock()
+	defer s.lineMu.Unlock()
+	if s.lineLocks == nil {
+		s.lineLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := s.lineLocks[handle]
+	if !ok {
+		m = &sync.Mutex{}
+		s.lineLocks[handle] = m
+	}
+	return m
+}
+
 func (s *Server) recvCursor(handle string) int64 {
 	s.recvCursorMu.Lock()
 	defer s.recvCursorMu.Unlock()

@@ -80,6 +80,20 @@ type Server struct {
 	// it for fifteen seconds.
 	recvReaders map[string]*sync.Mutex
 
+	// lineLocks serialises the two writes that make ONE line on a channel.
+	//
+	// `run` is two calls into the shell layer — the text, then the enter that ends it
+	// — and nothing used to keep another `run` from landing between them. Two
+	// concurrent runs therefore produced `{"id":1}{"id":2}\n\n`: a byte stream that
+	// is not two lines and not one valid line either, so a line-protocol peer (a
+	// stdio MCP server, a JSON-RPC relay) read it as corrupt and exited (issue #212).
+	//
+	// PER HANDLE and held ONLY around the writes: the wait for output that follows
+	// must not hold it, or a run would park every later command on the same channel
+	// for the length of its window.
+	lineMu    sync.Mutex
+	lineLocks map[string]*sync.Mutex
+
 	// closedReads is where each CLOSED channel's plain `read` has read up to.
 	//
 	// A live channel's position lives in its ring-buffer reader, which is the only

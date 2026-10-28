@@ -652,12 +652,28 @@ func (s *Server) runOne(ctx context.Context, stmt directive.Statement, win termA
 		return s.slotFromFailure(ctx, stmt, f)
 	}
 
-	if _, fail := s.callTool(ctx, "shell_input", argsOf("shell_id", stmt.Target, "text", stmt.Payload)); fail != nil {
-		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, fail, s))
+	// THE LINE IS ONE UNIT: THE TEXT AND ITS ENTER LAND TOGETHER (issue #212).
+	//
+	// These are two calls into the shell layer, and nothing used to keep a second
+	// `run` from landing between them -- so two concurrent runs wrote
+	// `{"id":1}{"id":2}\n\n`, which is neither two lines nor one valid line, and a
+	// line-protocol peer (a stdio MCP server, a JSON-RPC relay) read it as corruption
+	// and exited.
+	//
+	// THE LOCK COVERS THE WRITES ONLY. The wait for output below must not hold it, or
+	// a slow command would park every later run on this channel for the length of its
+	// window -- the same reason recvReaders is per handle rather than global.
+	line := s.lineLock(stmt.Target)
+	line.Lock()
+	_, inputFail := s.callTool(ctx, "shell_input", argsOf("shell_id", stmt.Target, "text", stmt.Payload))
+	if inputFail != nil {
+		line.Unlock()
+		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, inputFail, s))
 	}
-	keyRes, fail := s.callTool(ctx, "shell_key", argsOf("shell_id", stmt.Target, "key", "enter"))
-	if fail != nil {
-		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, fail, s))
+	keyRes, keyFail := s.callTool(ctx, "shell_key", argsOf("shell_id", stmt.Target, "key", "enter"))
+	line.Unlock()
+	if keyFail != nil {
+		return s.slotFromFailure(ctx, stmt, pipeClosedHint(stmt.Target, keyFail, s))
 	}
 	// A held command line: review mode staged the text and queued it on the enter.
 	// The reply is the review shape, not a read — there is nothing to read yet.
