@@ -9,6 +9,30 @@
 - 禁止出现 `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>` 相关字样
 - 只有在人工同意后才能push和commit。在多次commit后，人工要求push再进行push，绝对不要主动push。
 
+## Concurrency & Deadlock Prevention
+
+**建议优先使用 `channel` + `context.WithTimeout` + `sync/atomic` 替代互斥锁（`sync.Mutex`）。**
+
+本项目在网络层、传输层和会话生命周期中，曾因使用互斥锁包裹跨网络写入、握手或等待外部对端响应，导致了 **10 次以上的死锁与雪崩 bug**（#189、#206、#207、#212、#218、#219、#220、#221、#222 等）：
+
+1. **绝对禁止持锁进行网络 I/O、对端握手或等待不可控的外部响应**：
+   - 目标主机卡死（如用户态无响应但内核仍应答 TCP）、对端停止读取套接字时，任何同步的 `Write`、`Signal`、`Close` 都可能在操作系统的 TCP 发送队列上永久阻塞；
+   - 一旦在互斥锁内部阻塞，持有锁的 goroutine 永不释放，后续所有请求（甚至跨会话的关闭请求）全部排队死锁，导致整个实例挂起。
+2. **串行化推荐使用「带缓冲的一槽 channel 令牌」**：
+   - 例如 `tok := make(chan struct{}, 1); tok <- struct{}{}`；
+   - 获取令牌必须带超时：`select { case <-tok: ... case <-timer.C: ... case <-ctx.Done(): ... }`；
+   - 超时后必须明确报错或放弃，**绝不允许无限期挂死在 `Lock()` 上**。
+3. **并发单飞与通知使用「`channel` 广播」替代锁内等待**：
+   - 第一个请求负责建立连接/执行握手，完成后关闭 `done chan struct{}`；
+   - 并发的后续请求监听 `select { case <-done: ... case <-ctx.Done(): ... }`，确保随时能响应自身的上下文超时并干净退出。
+4. **生命周期终止（如 `Terminate`）必须具备有界超时与底层强拆兜底**：
+   - 优雅关闭动作必须异步执行并受 `context.WithTimeout` 约束；
+   - 超时后唯一的有效解法是主动调用底层 `net.Conn.Close()`，使内核中所有阻塞在底层读写上的协程立即报错并解开。
+5. **纯计数器与单状态标记优先使用 `sync/atomic`**：
+   - 纯数值累加使用 `atomic.Int64` / `atomic.Uint64`；
+   - 状态开闭使用 `atomic.Bool`；
+   - 避免为了一个数字的累加而在高频传输循环中加解互斥锁。
+
 ## Agent skills
 
 ### Issue tracker
