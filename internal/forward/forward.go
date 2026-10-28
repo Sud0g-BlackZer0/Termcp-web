@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/crypto/ssh"
 
@@ -75,17 +76,15 @@ type forwardState struct {
 	cancelFunc context.CancelFunc
 }
 
-var forwardCounter struct {
-	mu    sync.Mutex
-	count int
-}
+// forwardCounter is atomic rather than a mutex around an int: one counter is one
+// atomic, and a lock that guards a single scalar is a deadlock waiting for a
+// reason to happen.
+var forwardCounter atomic.Uint64
 
 // ForwardID generates a unique forward id.
 func ForwardID(direction ForwardDirection) string {
-	forwardCounter.mu.Lock()
-	defer forwardCounter.mu.Unlock()
-	forwardCounter.count++
-	return fmt.Sprintf("fw-%s-%d-%d", direction, clock.Now(), forwardCounter.count)
+	n := forwardCounter.Add(1)
+	return fmt.Sprintf("fw-%s-%d-%d", direction, clock.Now(), n)
 }
 
 // put registers a forward after SessionID/SSHConfig are set on fw.
