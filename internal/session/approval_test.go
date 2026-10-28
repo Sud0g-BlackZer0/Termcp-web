@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -220,6 +221,44 @@ func TestDisableApprovalReleasesWaiter(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Wait did not return after approval mode was disabled")
+	}
+}
+
+// Terminating a session cancels pending approvals but keeps their final state
+// queryable. Detaching the queue made the request disappear from /api/approvals,
+// leaving no evidence of what happened to a decision that could no longer run.
+func TestTerminateRetainsCancelledApprovalHistory(t *testing.T) {
+	s := startInteractiveSession(t)
+	if err := s.EnableApproval(1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	q := s.ApprovalQueue()
+	cs := s.PrimaryShell()
+	id, err := cs.SubmitForApproval("mcp", "echo cancelled", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.Terminate(true, 0)
+
+	if got := s.ApprovalQueue(); got != q {
+		t.Fatal("termination detached the approval queue and erased its history")
+	}
+	req, err := q.Get(id)
+	if err != nil {
+		t.Fatalf("Get after terminate: %v", err)
+	}
+	if req.State != approval.Cancelled {
+		t.Errorf("state = %q after terminate, want cancelled", req.State)
+	}
+	if _, err := q.SubmitShellInput(cs.ID, "mcp", "echo later", nil); err == nil {
+		t.Error("a closed session's approval queue accepted a new request")
+	}
+	if _, err := q.Approve(id); !errors.Is(err, approval.ErrNotPending) {
+		t.Errorf("approve after terminate err = %v, want ErrNotPending", err)
+	}
+	if err := s.EnableApproval(1, time.Minute); !errors.Is(err, ErrSessionClosing) {
+		t.Errorf("re-enable after terminate err = %v, want ErrSessionClosing", err)
 	}
 }
 

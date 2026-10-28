@@ -114,6 +114,36 @@ func TestExpiryIsFailClosed(t *testing.T) {
 	}
 }
 
+// Expiry cannot depend on a waiter. Listing, reading, or deciding a request
+// after its deadline must settle it as expired first; in particular, a late
+// approval must never execute the request.
+func TestExpiryIsSettledWithoutWaiter(t *testing.T) {
+	q := newQ(t, 1, 20*time.Millisecond)
+	id, _ := q.SubmitShellInput("shell-1", "mcp", "echo late", nil)
+
+	time.Sleep(40 * time.Millisecond)
+
+	listed := q.List()
+	if len(listed) != 1 || listed[0].State != approval.Expired {
+		t.Fatalf("List state = %+v, want one expired request", listed)
+	}
+	got, err := q.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != approval.Expired {
+		t.Errorf("Get state = %q, want expired", got.State)
+	}
+	if got, err := q.Approve(id); !errors.Is(err, approval.ErrNotPending) {
+		t.Errorf("late approve err = %v, want ErrNotPending", err)
+	} else if got.State != approval.Expired {
+		t.Errorf("late approve state = %q, want expired", got.State)
+	}
+	if got, _ := q.Get(id); len(got.Approvals) != 0 {
+		t.Errorf("expired request must carry no approvals, got %v", got.Approvals)
+	}
+}
+
 // Wait must observe an approval promptly, not after the timeout.
 func TestWaitUnblocksOnApproval(t *testing.T) {
 	q := newQ(t, 1, 10*time.Second)
@@ -194,6 +224,23 @@ func TestCloseRefusesNewSubmissionsAndCancelsPending(t *testing.T) {
 	}
 	if _, err := q.SubmitShellInput("shell-1", "mcp", "two", nil); err == nil {
 		t.Error("Submit on a closed queue must fail")
+	}
+}
+
+// Closing distinguishes a request that outlived its deadline from one cancelled
+// while it was still actionable.
+func TestClosePreservesExpiredBeforeCancelled(t *testing.T) {
+	q := newQ(t, 1, 20*time.Millisecond)
+	id, _ := q.SubmitShellInput("shell-1", "mcp", "one", nil)
+	time.Sleep(40 * time.Millisecond)
+
+	q.Close("session released")
+	got, err := q.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != approval.Expired {
+		t.Errorf("state = %q, want expired rather than cancelled", got.State)
 	}
 }
 

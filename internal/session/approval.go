@@ -176,12 +176,20 @@ func (s *Session) EnableApprovalScoped(need int, timeout time.Duration, scopes [
 		},
 	})
 
-	// Swap under both locks so a concurrent input either sees the old queue
-	// (and was approved under the old rule) or the new one, never a half state.
+	// Install under shellStateMu so session shutdown cannot interleave between
+	// checking its closing flag and publishing the queue. Without this, an
+	// enable racing with terminate could install a fresh open queue after the
+	// closed session had already been given a read-only history.
+	s.shellStateMu.Lock()
+	if s.closing {
+		s.shellStateMu.Unlock()
+		return ErrSessionClosing
+	}
 	s.mu.Lock()
 	prev := s.approval
 	s.approval = st
 	s.mu.Unlock()
+	s.shellStateMu.Unlock()
 
 	if prev != nil {
 		prev.discardStaged()
@@ -205,6 +213,20 @@ func (s *Session) DisableApproval() {
 		st.discardStaged()
 		st.queue.Close("approval mode disabled")
 	}
+}
+
+// closeApproval closes the active queue and keeps it attached to the session.
+// Closing cancels pending requests and refuses new submissions, while preserving
+// their final state for the session's read-only history.
+func (s *Session) closeApproval(reason string) {
+	s.mu.RLock()
+	st := s.approval
+	s.mu.RUnlock()
+	if st == nil {
+		return
+	}
+	st.discardStaged()
+	st.queue.Close(reason)
 }
 
 // ApprovalEnabled reports whether this session gates anything at all.
@@ -331,6 +353,10 @@ func (s *Session) SubmitOperation(sub approval.Submission) (string, error) {
 // ErrApprovalOff reports that a session does not gate input, so the caller
 // should write the bytes straight through.
 var ErrApprovalOff = fmt.Errorf("approval mode is off")
+
+// ErrSessionClosing reports that approval mode cannot be reconfigured while the
+// session is shutting down.
+var ErrSessionClosing = fmt.Errorf("session is closing")
 
 // ChildShell-side view of the session's approval state.
 //

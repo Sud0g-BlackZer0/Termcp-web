@@ -180,19 +180,25 @@ func (q *Queue) SubmitShellInput(shellID, source, text string, keys []string) (s
 // Get returns a snapshot of one request.
 func (q *Queue) Get(id string) (Request, error) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	r, ok := q.byID[id]
 	if !ok {
+		q.mu.Unlock()
 		return Request{}, ErrNotFound
 	}
-	return r.clone(), nil
+	expired := q.expireDueLocked(r, clock.Now())
+	snap := r.clone()
+	q.mu.Unlock()
+	if expired {
+		q.notify(snap)
+	}
+	return snap, nil
 }
 
 // List returns every request, pending first, so the API can show a worklist
 // with the actionable entries at the top.
 func (q *Queue) List() []Request {
 	q.mu.Lock()
-	defer q.mu.Unlock()
+	expired := q.expireAllDueLocked()
 	out := make([]Request, 0, len(q.byID))
 	for _, r := range q.byID {
 		if r.State == Pending {
@@ -204,19 +210,31 @@ func (q *Queue) List() []Request {
 			out = append(out, r.clone())
 		}
 	}
+	q.mu.Unlock()
+	for _, r := range expired {
+		q.notify(r)
+	}
 	return out
 }
 
 // ListForShell returns one shell's requests, oldest first.
 func (q *Queue) ListForShell(shellID string) []Request {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	ids := q.byShell[shellID]
 	out := make([]Request, 0, len(ids))
+	now := clock.Now()
+	var expired []Request
 	for _, id := range ids {
 		if r, ok := q.byID[id]; ok {
+			if q.expireDueLocked(r, now) {
+				expired = append(expired, r.clone())
+			}
 			out = append(out, r.clone())
 		}
+	}
+	q.mu.Unlock()
+	for _, r := range expired {
+		q.notify(r)
 	}
 	return out
 }
@@ -233,6 +251,12 @@ func (q *Queue) Approve(id string) (Request, error) {
 	if !ok {
 		q.mu.Unlock()
 		return Request{}, ErrNotFound
+	}
+	if q.expireDueLocked(r, clock.Now()) {
+		snap := r.clone()
+		q.mu.Unlock()
+		q.notify(snap)
+		return snap, ErrNotPending
 	}
 	if r.State != Pending {
 		snap := r.clone()
@@ -259,6 +283,12 @@ func (q *Queue) Reject(id, reason string) (Request, error) {
 		q.mu.Unlock()
 		return Request{}, ErrNotFound
 	}
+	if q.expireDueLocked(r, clock.Now()) {
+		snap := r.clone()
+		q.mu.Unlock()
+		q.notify(snap)
+		return snap, ErrNotPending
+	}
 	if r.State != Pending {
 		snap := r.clone()
 		q.mu.Unlock()
@@ -280,7 +310,17 @@ func (q *Queue) Cancel(id, reason string) {
 	}
 	q.mu.Lock()
 	r, ok := q.byID[id]
-	if !ok || r.State != Pending {
+	if !ok {
+		q.mu.Unlock()
+		return
+	}
+	if q.expireDueLocked(r, clock.Now()) {
+		snap := r.clone()
+		q.mu.Unlock()
+		q.notify(snap)
+		return
+	}
+	if r.State != Pending {
 		q.mu.Unlock()
 		return
 	}
@@ -295,7 +335,10 @@ func (q *Queue) Cancel(id, reason string) {
 // when a session ends or approval mode is turned off, where a request left
 // pending could otherwise be approved later and write into a shell that is gone.
 func (q *Queue) CancelAll(reason string) {
-	for _, r := range q.cancelPending(reason) {
+	q.mu.Lock()
+	cancelled := q.cancelPendingLocked(reason)
+	q.mu.Unlock()
+	for _, r := range cancelled {
 		q.notify(r)
 	}
 }
@@ -305,18 +348,27 @@ func (q *Queue) CancelAll(reason string) {
 func (q *Queue) Close(reason string) {
 	q.mu.Lock()
 	q.stopped = true
+	cancelled := q.cancelPendingLocked(reason)
 	q.mu.Unlock()
-	for _, r := range q.cancelPending(reason) {
+	for _, r := range cancelled {
 		q.notify(r)
 	}
 }
 
-// cancelPending cancels every pending request and returns their snapshots.
-func (q *Queue) cancelPending(reason string) []Request {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+// cancelPendingLocked cancels every pending request and returns their snapshots.
+// The queue lock must be held so Close can refuse new work and settle every
+// existing request as one atomic transition.
+func (q *Queue) cancelPendingLocked(reason string) []Request {
 	var out []Request
+	now := clock.Now()
 	for _, r := range q.byID {
+		// A deadline that passed before the session ended is an expiry, not a
+		// cancellation. Preserve that distinction even when nobody observed the
+		// deadline while the queue was still open.
+		if q.expireDueLocked(r, now) {
+			out = append(out, r.clone())
+			continue
+		}
 		if r.State == Pending {
 			q.resolveLocked(r, Cancelled, "", reason)
 			out = append(out, r.clone())
@@ -374,17 +426,40 @@ func (q *Queue) expire(id string) (Request, error) {
 		q.mu.Unlock()
 		return Request{}, ErrNotFound
 	}
-	if r.State != Pending || r.ExpiresAt == 0 || clock.Now() < r.ExpiresAt {
+	if !q.expireDueLocked(r, clock.Now()) {
 		snap := r.clone()
 		q.mu.Unlock()
 		return snap, nil
 	}
-	q.resolveLocked(r, Expired, "", "")
 	snap := r.clone()
 	q.mu.Unlock()
 
 	q.notify(snap)
 	return snap, ErrTimeout
+}
+
+// expireDueLocked expires one request whose deadline has passed. Every read and
+// decision path calls it so a request cannot remain internally pending merely
+// because nobody called Wait. The queue lock must be held.
+func (q *Queue) expireDueLocked(r *Request, now int64) bool {
+	if r.State != Pending || r.ExpiresAt == 0 || now < r.ExpiresAt {
+		return false
+	}
+	q.resolveLocked(r, Expired, "", "")
+	return true
+}
+
+// expireAllDueLocked expires every request whose deadline has passed and returns
+// snapshots for notification after the lock is released.
+func (q *Queue) expireAllDueLocked() []Request {
+	now := clock.Now()
+	var out []Request
+	for _, r := range q.byID {
+		if q.expireDueLocked(r, now) {
+			out = append(out, r.clone())
+		}
+	}
+	return out
 }
 
 // resolveLocked performs the one-way transition to a terminal state and signals

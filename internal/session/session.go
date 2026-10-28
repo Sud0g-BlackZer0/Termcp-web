@@ -742,15 +742,13 @@ func (s *Session) beginClosing() {
 	s.shellStateMu.Unlock()
 
 	// A closing session can no longer execute anything, so its pending requests
-	// must not stay decidable. Without this, Terminate (which does not run the
-	// scope cascade) left them pending: a later approve succeeded and recorded a
-	// grant, while the bytes were refused because the process was already gone.
-	// The decision then read as effective in the audit trail when nothing ran.
+	// must not stay decidable. Close the queue without detaching it: a later
+	// approve must fail, while the cancelled request remains visible in the
+	// approval history for the session's read-only lifetime.
 	//
 	// Called after releasing shellStateMu: the lock order in this file is
-	// shellStateMu then s.mu (see CreateChildShell), and DisableApproval takes
-	// s.mu.
-	s.DisableApproval()
+	// shellStateMu then s.mu.
+	s.closeApproval("session closed")
 }
 
 // terminateChildren closes all child shells. Called during parent session termination.

@@ -1388,6 +1388,10 @@ different threshold: an input queued under one policy must not become
 executable under another. A queued request that is cancelled is fail-closed —
 its bytes are never written.
 
+Closing a session also cancels its pending requests, but keeps the approval
+queue available for reading. The cancelled entries remain visible through
+`GET /api/approvals`; the closed queue refuses new submissions.
+
 Errors: `400` `need` > 1, negative timeout, malformed body; `404` unknown session.
 
 ### `GET /api/approvals`
@@ -1441,6 +1445,9 @@ Semantics:
 - **One rejection is final.** Review gates a dangerous command; it is not a vote
   that can be outvoted.
 - Expiry is fail-closed: the request becomes `expired`, never `approved`.
+  Expiry is settled whenever the request is listed, read, decided, or awaited;
+  it does not depend on a caller having entered `Wait`. A late approve is
+  refused with `409` and executes nothing.
 - An approved request is executed by the deciding call. If the write fails, the
   response says so (`409`) rather than reporting success.
 - `404` unknown id; `409` already decided or execution failed.

@@ -371,6 +371,74 @@ func TestApprovalListEndpoint(t *testing.T) {
 	}
 }
 
+func TestApprovalExpiryIsVisibleAndCannotBeApproved(t *testing.T) {
+	e := newApprovalEnv(t)
+	if err := e.sess.EnableApproval(1, 20*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	q := e.sess.ApprovalQueue()
+	id, err := q.SubmitShellInput(e.shellID, "mcp", "echo late", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(40 * time.Millisecond)
+
+	rr := e.do(t, http.MethodGet, "/api/approvals?session_id="+e.sess.ID, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list = %d: %s", rr.Code, rr.Body.String())
+	}
+	m := e.decode(t, rr)
+	items, _ := m["approvals"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("approvals = %d, want 1", len(items))
+	}
+	req := items[0].(map[string]any)["request"].(map[string]any)
+	if req["state"] != "expired" {
+		t.Errorf("state = %v, want expired", req["state"])
+	}
+
+	rr = e.do(t, http.MethodPost, "/api/approvals/"+id+"/approve", "")
+	if rr.Code != http.StatusConflict {
+		t.Errorf("late approve = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+	if got, _ := q.Get(id); len(got.Approvals) != 0 {
+		t.Errorf("expired request carries approvals: %v", got.Approvals)
+	}
+}
+
+func TestApprovalHistorySurvivesSessionTermination(t *testing.T) {
+	e := newApprovalEnv(t)
+	if err := e.sess.EnableApproval(1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	id, err := e.sess.ApprovalQueue().SubmitShellInput(e.shellID, "mcp", "echo cancelled", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e.sess.Terminate(true, 0)
+
+	rr := e.do(t, http.MethodGet, "/api/approvals?session_id="+e.sess.ID, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list = %d: %s", rr.Code, rr.Body.String())
+	}
+	m := e.decode(t, rr)
+	items, _ := m["approvals"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("approvals = %d, want the cancelled request", len(items))
+	}
+	req := items[0].(map[string]any)["request"].(map[string]any)
+	if req["state"] != "cancelled" {
+		t.Errorf("state = %v after termination, want cancelled", req["state"])
+	}
+
+	rr = e.do(t, http.MethodPost, "/api/approvals/"+id+"/approve", "")
+	if rr.Code != http.StatusConflict {
+		t.Errorf("approve after termination = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // An unknown pending id is a 404, not a silent success.
 func TestApprovalDecisionUnknownID(t *testing.T) {
 	e := newApprovalEnv(t)
