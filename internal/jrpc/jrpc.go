@@ -143,18 +143,23 @@ type Channel struct {
 	// shut reports that Close ran.
 	shut atomic.Bool
 
-	// sseStarted reports that the listening GET stream has been opened. HTTP
+	// sseStarted reports that the listening GET stream has been dispatched. HTTP
 	// only: streamable MCP carries unsolicited server messages on a GET
 	// text/event-stream, so without it a peer can push only inside the body of a
 	// POST the caller happened to be waiting on.
 	sseStarted atomic.Bool
 
-	// sseListening reports that the GET stream is UP RIGHT NOW. It is the
-	// difference between "this peer refuses to push" and "this peer can push but
-	// has nothing to say yet" — a distinction a reader has to be able to act on,
-	// because the first is a fact about the peer and the second is a fact about
-	// the window. A GET that the server answered with 405/404 clears it again.
-	sseListening atomic.Bool
+	// sseRefused reports that the peer answered the listening GET with a permanent
+	// refusal (405/404), so it has no stream to push on and nothing will ever arrive
+	// there.
+	//
+	// IT IS NOT THE SAME QUESTION AS "IS THE STREAM UP". A reader that asked
+	// "is the stream up RIGHT NOW" got false for the whole handshake — which is a
+	// few hundred microseconds during which a pushed frame is perfectly able to
+	// arrive — and returned "no frame" at once instead of waiting for it (issue
+	// #213). The wait asks whether a frame COULD still arrive, so the refusal is
+	// what it watches, and the handshake is allowed to finish underneath it.
+	sseRefused atomic.Bool
 
 	// sseCancel stops the listening stream on Close, without waiting for a read
 	// deadline that a blocked SSE body does not honour.
@@ -601,7 +606,10 @@ func (c *Channel) TakeFramed(ctx context.Context) (Framed, bool) {
 	c.evMu.Lock()
 	defer c.evMu.Unlock()
 	for len(c.ev) == 0 {
-		if c.shut.Load() || ctx.Err() != nil || c.socketGone() {
+		// THE REFUSAL IS CHECKED INSIDE THE LOOP, not only before it: while this
+		// wait was parked the peer may have answered the listening GET with
+		// "no" — a fact this wait has to act on rather than spend its window on.
+		if c.shut.Load() || ctx.Err() != nil || c.socketGone() || c.sseRefused.Load() {
 			return Framed{}, false
 		}
 		// A helper goroutine releases the condition when ctx or done closes, so a
@@ -621,7 +629,7 @@ func (c *Channel) TakeFramed(ctx context.Context) (Framed, bool) {
 		if len(c.ev) > 0 {
 			break
 		}
-		if c.shut.Load() || ctx.Err() != nil || c.socketGone() {
+		if c.shut.Load() || ctx.Err() != nil || c.socketGone() || c.sseRefused.Load() {
 			return Framed{}, false
 		}
 	}
@@ -656,7 +664,7 @@ func (c *Channel) Next(ctx context.Context) (string, bool) {
 				return f.Data, true
 			}
 		}
-		if c.shut.Load() || ctx.Err() != nil || c.socketGone() {
+		if c.shut.Load() || ctx.Err() != nil || c.socketGone() || c.sseRefused.Load() {
 			return "", false
 		}
 		stop := make(chan struct{})
@@ -752,11 +760,15 @@ func (c *Channel) wsCall(ctx context.Context, frame map[string]any, id any) (str
 	return c.awaitAnswer(ctx, id, func() error { return c.writeFrame(ctx, frame) })
 }
 
-// CanWaitEvents reports whether this channel has an active incoming stream that
-// can deliver unsolicited events (WS, or an HTTP channel whose listening GET
-// stream is connected).
+// CanWaitEvents reports whether a frame could still arrive on this channel that no
+// call is waiting for: always true on a socket, and true on HTTP once the listening
+// stream has been dispatched and the peer has not refused it.
+//
+// IT DELIBERATELY DOES NOT REQUIRE THE STREAM TO BE UP YET. Waiting for the
+// handshake before allowing a wait would make the first read after `open` lose the
+// race against it and answer "no frame" while the frame was in flight (issue #213).
 func (c *Channel) CanWaitEvents() bool {
-	return c.transport == WS || c.sseListening.Load()
+	return c.transport == WS || (c.sseStarted.Load() && !c.sseRefused.Load())
 }
 
 // ensureSSEStream starts the listening GET stream for an HTTP channel once a
@@ -808,7 +820,11 @@ func (c *Channel) readSSEStream(ctx context.Context, sessionID string) {
 			// A server that refuses GET text/event-stream (405 Method Not Allowed
 			// or 404) does not speak streamable MCP; do not hammer it.
 			if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotFound {
-				c.sseListening.Store(false)
+				c.sseRefused.Store(true)
+				// WAKE THE PARKED READERS: "nothing will ever arrive here" is a
+				// change they asked to be told about, and a waiter that is not woken
+				// spends the rest of its window on a stream that already said no.
+				c.evCond.Broadcast()
 				return
 			}
 			select {
@@ -820,11 +836,10 @@ func (c *Channel) readSSEStream(ctx context.Context, sessionID string) {
 				continue
 			}
 		}
-		c.sseListening.Store(true)
 
-		br := bufio.NewReader(io.LimitReader(resp.Body, maxFrameBytes))
+		br := bufio.NewReader(resp.Body)
 		for {
-			payload, err := readEvent(br)
+			payload, err := readEvent(br, maxFrameBytes)
 			if err != nil {
 				_ = resp.Body.Close()
 				break
@@ -869,7 +884,7 @@ func (c *Channel) httpCall(ctx context.Context, frame map[string]any, id any) (s
 	}
 	br := bufio.NewReader(io.LimitReader(resp.Body, maxFrameBytes))
 	for {
-		payload, err := readEvent(br)
+		payload, err := readEvent(br, maxFrameBytes)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return "", fmt.Errorf("the event stream ended before the reply to id %v arrived", id)
@@ -998,7 +1013,13 @@ func isEventStream(ct string) bool {
 // Multi-line data is joined with newlines, which is what the spec says and what
 // a pretty-printed JSON frame produces; a comment line (`:keepalive`) is skipped
 // rather than concatenated, which is what makes a long-lived stream usable.
-func readEvent(br *bufio.Reader) (string, error) {
+//
+// `max` IS PER EVENT, NOT PER CONNECTION. A listening stream lives for as long as
+// the channel does and is expected to deliver an unbounded number of frames, so a
+// limit wrapped around the body would end the stream once the total passed it —
+// silently turning "the peer has been chatty for an hour" into "the peer stopped
+// talking" (issue #213). Bounding each frame is the thing the limit was for.
+func readEvent(br *bufio.Reader, max int) (string, error) {
 	var data strings.Builder
 	for {
 		line, err := br.ReadString('\n')
@@ -1009,6 +1030,9 @@ func readEvent(br *bufio.Reader) (string, error) {
 					data.WriteByte('\n')
 				}
 				data.WriteString(payload)
+				if max > 0 && data.Len() > max {
+					return "", fmt.Errorf("an event exceeded %d bytes", max)
+				}
 			}
 		} else if data.Len() > 0 {
 			// The blank line that ends an event.

@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -90,7 +89,6 @@ func TestRecvOnAStreamableHttpMcpChannelReadsUnsolicitedEvents(t *testing.T) {
 	s := newTestServer(t)
 	internalSession(t, s)
 
-	pushed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
@@ -102,7 +100,6 @@ func TestRecvOnAStreamableHttpMcpChannelReadsUnsolicitedEvents(t *testing.T) {
 			w.(http.Flusher).Flush()
 			_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/test\",\"params\":{\"val\":42}}\n\n"))
 			w.(http.Flusher).Flush()
-			close(pushed)
 			<-r.Context().Done()
 		}
 	}))
@@ -117,14 +114,9 @@ func TestRecvOnAStreamableHttpMcpChannelReadsUnsolicitedEvents(t *testing.T) {
 		t.Fatalf("init call failed:\n%s", initGot)
 	}
 
-	// Bounded rather than a bare receive: a GET stream that never opened would
-	// hang this test until the package timeout instead of failing where it broke.
-	select {
-	case <-pushed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the channel never opened the listening GET stream")
-	}
-
+	// NO WAITING FOR THE HANDSHAKE (issue #213). The read runs immediately after the
+	// call, so it exercises the window where the listening GET has not yet finished
+	// connecting.
 	got := termText(t, s, map[string]any{"cmd": "read " + h + " --frame", "timeout": 2})
 	if !strings.HasPrefix(got, "TERM/1 200") {
 		t.Fatalf("expected 200 with the unsolicited event, got:\n%s", got)
