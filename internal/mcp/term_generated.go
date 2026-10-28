@@ -682,7 +682,6 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 		[2]string{"remote-path", "remote_path"},
 		[2]string{"from-path", "from_path"},
 		[2]string{"to-path", "to_path"},
-		[2]string{"local-path", "local_path"},
 		[2]string{"data", "data"},
 	); bad {
 		return slot

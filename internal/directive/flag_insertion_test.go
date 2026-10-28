@@ -48,7 +48,7 @@ var flagProbes = map[string]string{
 	"reader": `reader h:1 --drop ${1}`,
 	"read":   `read h:1 --cursor ${1} --since ${2} --at ${3} --offset ${4} --bytes ${5} --from-line ${6} --tail ${7} --stream ${8} --grep ${9} --grep-limit ${10} --encoding ${11}`,
 	"run":    `run h:1 --tail ${1} --grep ${2} --grep-limit ${3} --encoding ${4} $cmd`,
-	"write":  `write h file /x --data ${1} --mode ${2} --local-path ${3} --offset ${4} --length ${5} --size ${6} --old-text ${7} --new-text ${8} --op ${9} --uid ${10} --gid ${11} --atime ${12} --mtime ${13}`,
+	"write":  `write h file /x --data ${1} --mode ${2} --offset ${3} --length ${4} --size ${5} --old-text ${6} --new-text ${7} --op ${8} --uid ${9} --gid ${10} --atime ${11} --mtime ${12}`,
 	"notify": `notify --level ${1} --on ${2} --title ${3} --for ${4} body`,
 	"create": `create host --name ${1} --host ${2} --user ${3} --port ${4} --password ${5} --private-key ${6} --key-passphrase ${7} ` +
 		`--known-hosts ${8} --dial-timeout-seconds ${9} --proxy ${10} --description ${11} --default-shell ${12} --default-mode ${13} ` +

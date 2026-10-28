@@ -94,117 +94,67 @@ func (s *Server) handleFileWrite(ctx context.Context, request mcpgo.CallToolRequ
 	// byte. They shared the value 0 once, and the destructive one was the default.
 	offset := int64PtrFromArgs(args, "offset")
 	data := getString(args, "data", "")
-	// EMPTY MEANS NOT GIVEN, and the distinction is load-bearing: --mode is the
-	// ENCODING of --data, so an explicit "text" on a --local-path write is a flag that
-	// cannot be honoured, while saying nothing is the ordinary case. Spelling the
-	// default as "text" made the two indistinguishable (#190).
 	mode := getString(args, "mode", "")
-	localPath := getString(args, "local_path", "")
-	localOffset := int64(getFloat64(args, "local_offset", 0))
-	length := int64(getFloat64(args, "length", 0))
 
-	// ONE PLACE, BOTH PATHS (#190).
+	// --local-path WAS REMOVED FROM THIS HANDLER, and the reason is a hole rather
+	// than a tidiness preference.
 	//
-	// `--mode` was validated on the `--data` path and IGNORED on the `--local-path`
-	// one: `--mode 0755` answered 500 on the first and 202 "done" on the second,
-	// while the file landed with the default permissions. A caller who meant "make
-	// this script executable" then watched `open --argv` fail with "permission
-	// denied" and went looking at mounts, users and paths — the parameter had been
-	// dropped in silence, which is the one failure mode a reply cannot recover from.
+	// The flag made the daemon open a file on ITS OWN filesystem and stream it to the
+	// session. Nothing checked whether the caller was allowed to touch that filesystem:
+	// --no-internal hides the loopback profile so an MCP client cannot reach the
+	// machine termcp runs on, and this handler walked around the refusal by reading
+	// the file directly, with `data` arriving as the reply. An isolation flag that
+	// one neighbouring flag can undo is not isolation.
 	//
-	// The check is on the VALUE, so both routes refuse the same input with the same
-	// sentence. Empty means "not given", which is text.
+	// It was also redundant. `read internal file <path> | write <session> file <path>`
+	// moves the same bytes, node to node, without passing them through the caller's
+	// context — and it goes THROUGH the internal profile, so --no-internal refuses it
+	// the way it refuses every other route to the daemon's disk. The same holds for
+	// the reverse direction.
+	//
+	// The refusal is explicit rather than "unknown argument", because a caller that
+	// knows this option existed needs to be told where it went, not that they
+	// misspelled something.
+	if _, had := args["local_path"]; had {
+		return toolError(CodeInvalidArgument, "%s",
+			"local_path is gone: this handler writes --data and nothing else. "+
+				"To move a file from the daemon's host, use a pipeline through the internal profile: "+
+				"`read internal file <path> | write <session> file <path>`. Going through that profile is "+
+				"what makes --no-internal able to refuse local reads at all."), nil
+	}
+
 	switch mode {
-	case "":
-		// NOT GIVEN. For --data that means text, which is what every caller expects;
-		// for --local-path it means nothing is decoded, which is the ordinary case.
-	case "text", "hex":
-		// A LOCAL FILE CARRIES ITS OWN BYTES, so a decoding mode has nothing to do
-		// here — and saying so is the difference between a caller fixing its command
-		// and a caller believing the flag took effect.
-		if localPath != "" {
-			return toolError(CodeInvalidArgument, "%s",
-				"--mode "+mode+" does not apply to --local-path: the file's bytes are sent as they are. "+
-					"Drop --mode, or pass --mode file to say so."), nil
-		}
+	case "", "text", "hex":
 	case "file":
+		// "file" said "the bytes come from --local-path", which no longer exists. Left
+		// as a named refusal so the error explains the absence instead of calling a
+		// valid token unknown.
+		return toolError(CodeInvalidArgument, "%s",
+			"mode \"file\" meant \"read --local-path\", and --local-path is gone. Stream the bytes across a "+
+				"pipeline instead: `read internal file <path> | write <session> file <path>`."), nil
 	default:
 		return toolError(CodeInvalidArgument, "%s",
-			"unknown mode "+strconv.Quote(mode)+": it is the ENCODING of --data, one of text, hex, file. "+
+			"unknown mode "+strconv.Quote(mode)+": it is the ENCODING of --data, one of text, hex. "+
 				"(Permissions are not this flag: use --op chmod --mode 0755.)"), nil
 	}
 
 	if remotePath == "" {
 		return toolError(CodeInvalidArgument, "%s", "remote_path required"), nil
 	}
-	if localPath == "" && data == "" {
-		return toolError(CodeInvalidArgument, "%s", "data or local_path required"), nil
-	}
-
-	// A LOCAL PATH IS RESOLVED ONCE, HERE, AND THE RESOLUTION IS WHAT TRAVELS (#192).
-	//
-	// The path is relative to the DAEMON's working directory — not the caller's, and
-	// not the session's — because the file is read by the process that owns this
-	// handler. A caller whose cwd is elsewhere gets `open local file: open
-	// ./autopilot/s1.sh: no such file or directory`, which quotes the path it TYPED
-	// and never the path that was tried, so the first reading is "but the file is
-	// right there". Resolving up front puts the answer in the error and in the task
-	// record, and it is the same path the transfer then opens.
-	if localPath != "" {
-		localPath = resolveLocalPath(localPath)
+	if data == "" {
+		return toolError(CodeInvalidArgument, "%s", "data required"), nil
 	}
 
 	sftpCli, bad := s.sftpClient(sessionID)
 	if bad != nil {
 		return bad, nil
 	}
-
-	// INLINE DATA STAYS SYNCHRONOUS. It is a string the caller already holds, bounded
-	// by the request size, and its whole point is the byte count in the reply —
-	// turning it into a receipt would make every small config edit a two-call dance.
-	if localPath == "" {
-		defer sftpCli.Close()
-		n, err := sftpCli.WriteFile(remotePath, offset, data, mode, localPath, localOffset, length)
-		if err != nil {
-			return fileErr(err, remotePath), nil
-		}
-		return jsonResult(map[string]any{"ok": true, "bytes_written": n}), nil
+	defer sftpCli.Close()
+	n, err := sftpCli.WriteFile(remotePath, offset, data, mode, "", 0, 0)
+	if err != nil {
+		return fileErr(err, remotePath), nil
 	}
-
-	// A LOCAL FILE IS A TRANSFER, AND A TRANSFER IS ALWAYS ASYNC (#158). The caller is
-	// usually an agent behind a tool-call watchdog of 30-60s, and moving a large file
-	// over SFTP takes longer than that on a slow link — so a synchronous write is not
-	// "slow", it is a call that gets killed partway, leaving a truncated file on the
-	// far side with no error anywhere. The receipt costs milliseconds.
-	//
-	// The transfer gets its OWN context and its own client handle: the request's
-	// context is cancelled the moment this handler returns, which is now before
-	// the copy is done, and the sftp client must outlive the return as well.
-	taskCtx, cancel := context.WithCancel(context.Background())
-	t := s.tasks.Start(task.Upload, sessionID, remotePath, localPath, cancel)
-	go func() {
-		defer sftpCli.Close()
-		localInfo, statErr := os.Stat(localPath)
-		if statErr == nil {
-			t.SetTotal(localInfo.Size())
-		}
-		n, err := sftpCli.WriteFromLocalProgress(taskCtx, remotePath, offset, localPath, localOffset, length, t.Add)
-		if err == nil {
-			t.SetTotal(n)
-		}
-		s.tasks.Finish(t.ID(), err)
-	}()
-	return jsonResult(map[string]any{
-		"ok":          true,
-		"accepted":    true,
-		"task_id":     t.ID(),
-		"status":      string(task.Running),
-		"kind":        string(task.Upload),
-		"bytes_total": getFloat64(args, "length", 0),
-		"remote_path": remotePath,
-		"local_path":  localPath,
-		"next":        "get task " + t.ID() + "   (give the call a `timeout` and it waits)",
-	}), nil
+	return jsonResult(map[string]any{"ok": true, "bytes_written": n}), nil
 }
 
 // handleFileReplace performs an exact, unique, atomic replacement inside a file.

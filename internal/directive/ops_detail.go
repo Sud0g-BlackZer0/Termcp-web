@@ -176,12 +176,13 @@ var ops = []Op{
 		// --size is the truncate target. It was missing, so `--op truncate` could not be
 		// satisfied by any spelling: the handler requires remote_path and size, and the
 		// flag for size did not exist.
-		Flags: []string{"data", "mode", "local-path", "offset:number", "length:number", "size:number",
+		Flags: []string{"data", "mode", "offset:number", "length:number", "size:number",
 			"old-text", "new-text", "op", "uid:number", "gid:number", "atime:number", "mtime:number"},
 		RetiredFlags: map[string]string{
 			"action-verb": "--action-verb is gone; use --op instead.",
+			"local-path":  "--local-path is gone. Use a pipeline: read <source-session> file <path> | write <target-session> file <path> (use the internal session for daemon-local files). A pipeline moves bytes between nodes without passing through the caller's context.",
 		},
-		Usage:  "write <session> file <path> [--data TEXT|--local-path FILE] [--mode …] [--op chmod|truncate|…]",
+		Usage:  "write <session> file <path> [--data TEXT] [--mode …] [--op chmod|truncate|…]",
 		Detail: writeDetail},
 
 	// --- a peer: one call, or the manual send/recv pair ---
@@ -917,11 +918,11 @@ window, and the frame stays outstanding — read <peer> may still deliver it.`
 const writeDetail = `Write a file on a session.
 
   write a1f3 file /tmp/x --data hello
-  write a1f3 file /tmp/x --local-path ./x
+  read internal file ./x | write a1f3 file /tmp/x
   write a1f3 file /tmp/x --data hex:00ff
 
 --data decodes by --mode (text by default, so \n is a newline). For binary use hex:
-or --local-path. The write is a plain overwrite, not an append: use --offset only
+or a pipeline. The write is a plain overwrite, not an append: use --offset only
 when you mean to patch bytes in place.
 
 PATHS ARE POSIX ON THE WIRE, ON EVERY PLATFORM. SFTP is a POSIX-shaped protocol, so
@@ -934,10 +935,11 @@ admitted the path. Use /C:/... in the request and in the extension's declared
 paths, which are matched against the same string you pass. help read, docs/api.md
 and this page said nothing about it until issue #186.
 
---local-path IS A TRANSFER AND ANSWERS 202 WITH A RECEIPT. Moving a file over SFTP
-takes as long as the link takes, and a caller behind a tool-call watchdog would
-otherwise be killed partway through — leaving a truncated file on the far side with
-no error anywhere. So the call returns in milliseconds:
+A PIPELINE IS A TRANSFER AND ANSWERS 202 WITH A RECEIPT. Moving a file between nodes
+(including from the daemon host via the internal session) takes as long as the link
+takes, and a caller behind a tool-call watchdog would otherwise be killed partway
+through — leaving a truncated file on the far side with no error anywhere. So the call
+returns in milliseconds:
 
   TERM/1 202 Accepted
   Task: task_9f2c11ab
@@ -952,8 +954,8 @@ close task <id> cancels one.
 
 IT CAN ALSO BE THE DESTINATION OF A PIPELINE. read a1f3:1 | write b2c4 file /tmp/x
 copies bytes between two nodes without them passing through the caller's context;
-the content comes from the left side, so --data and --local-path are refused there
-rather than silently ignored. See help read.
+the content comes from the left side, so --data is refused there rather than silently
+ignored. See help read.
 
 THE TARGET NEVER HOLDS A PARTIAL FILE. A whole-file write streams to a temporary
 sibling and is renamed over the target only on a clean exit, so an interrupted or
@@ -1047,9 +1049,8 @@ const fileDetail = `Actions and the flags each one uses.
   mkdir|urls|getwd     --remote-path            (getwd ignores it)
   rename               --from-path --to-path
   read                 --remote-path --offset --length [--mode text|hex|file]
-  write                --remote-path --data | --local-path --mode text|hex|file
-                       --offset is the REMOTE write position; --local-offset the
-                       position inside --local-path; --length caps the transfer
+  write                --remote-path --data --mode text|hex|file
+                       --offset is the write position; --length caps it
   replace              --remote-path --old-text --new-text
 
 REPLACE IS EXACT AND UNIQUE, AND THAT IS THE FEATURE. --old-text must appear in the
@@ -1062,7 +1063,8 @@ mode is preserved. Use it for editing a line in a file too big to rewrite by han
 you read it. Files over 16 MiB are refused: exact replace is an edit, not a copy.
 
 --mode MEANS TWO DIFFERENT THINGS, by action. For read and write it is a STRING:
-text, hex, or file ("file" reads or writes --local-path as raw bytes). For
+text, hex, or file ("file" on read means "write the bytes to local_path", which is
+the download half of the API and not reachable from this directive). For
 --action perm --op chmod it is a NUMBER, and the number is DECIMAL, not octal:
 0644 is 420 and 0755 is 493. Writing "0644" there does not fail — it is parsed as
 the decimal value 644, which sets a different (and surprising) permission set, so
@@ -1079,8 +1081,15 @@ nothing evaluated) and then DECODED by --mode. With --mode text the sequences
 \n \r \t \xHH become the byte they name — that is the documented way to put a
 newline in a payload, so --data "line1\nline2" writes two lines rather than the
 characters l-i-n-e-1-backslash-n. With --mode hex the value is hex and writes
-those exact bytes; a payload that is already binary belongs in --mode hex or in
---local-path, never in --mode text.
+those exact bytes; a payload that is already binary belongs in --mode hex, or
+streamed across a pipeline: read <source> file <path> | write <target> file <path>.
+
+--local-path HAS BEEN REMOVED. Moving bytes from the daemon host to a remote
+session is a pipeline: read internal file <path> | write <session> file <path>.
+The pipeline enforces the same isolation as other operations (including
+--no-internal), moves bytes without passing them through the caller's context,
+and provides task-backed progress reporting. Passing --local-path now answers
+with where to write the pipeline instead.
 
 Quoting is the SHELL's, not this protocol's: a flag value is the caller's own
 bytes with the quotes removed and nothing else touched. --data '$HOME' writes the
@@ -1105,10 +1114,17 @@ perm, link and fs take a SUB-ACTION via --op:
   --action fs   --op truncate --remote-path --size N
   --action fs   --op realpath|statvfs  --remote-path
 
---local-path and --remote-path are DIFFERENT HOSTS: which machine each one names
-depends on the direction, so read them as "the file on that side", not as a
-local file and a remote file. A path outside the session's whitelist is refused.
-Credentials are never echoed; a write reports bytes written, not content.`
+--local-path HAS BEEN REMOVED, and it is in the parser's retired list so writing it
+answers where the capability went rather than "unknown flag". It read the daemon
+host's filesystem from inside the file handler with no capability check, which made
+--no-internal decorative: a client that could not open the loopback profile could
+still name any path on that machine. A pipeline goes through a session, so the
+isolation flag can refuse it:
+
+  read internal file <path> | write <session> file <path>
+
+A path outside the session's whitelist is refused. Credentials are never echoed; a
+write reports bytes written, not content.`
 
 // extDetail is the extension directive's flag map and the two kinds that
 // actually need explaining.

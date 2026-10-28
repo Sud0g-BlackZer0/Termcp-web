@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### 安全
+
+- **`write --local-path` 移除，它绕过 `--no-internal`（#新版）**。这个 flag 让守护进程打开**自己主机上的文件**再发到会话去；没有任何地方检查调用方是否有权访问那台主机的磁盘——`--no-internal` 遮住回环 profile 就是为了让 MCP 客户端碰不到 termcp 跑的机器，而这条路直接读了它的文件系统，把内容发进客户端控制的会话，反方向也能写。一条能用一个邻居 flag 推翻的隔离，不叫隔离。（扩展声明了路径白名单时守卫会检查 `local_path`，但普通客户端没有白名单，也就没有检查——这正是被绕的那个场景。）
+
+  它同时也是冗余的：`read internal file <path> | write <session> file <path>` 搬同样的字节，节点到节点，不经过调用方的上下文，而且**走的是 internal profile**，所以 `--no-internal` 能像拒绝其它所有通往本机磁盘的路径一样拒绡它。现在写 `--local-path` 会得到一句“它没了，用管道”，而不是“未知 flag”。
+
+- **管道曾丢失原子性**。`StreamWriteFrom` 直接打开目标文件写，而 `--local-path` 那条路是写临时兄弟文件再 rename（#158）。于是 `read a file x | write b file y` 在 x 打不开时会留下一个空的 y：一次报告失败的复制，仍然毁掉了目标。现在整文件写入也走临时兄弟文件 + rename，只有干净退出才盖过去。
+
+- **管道右侧的 `$N` 没有被替换（占位符泄漏）**。`expandStatement` 展开 `Path`/`Target`/`Key`/`Args`/`Flags`，**但没有递归进 `Pipe`**，所以 `read a file x | write b file $1` 把字面名为 `__hole_…__` 的文件当成了目标。
+
+### 变更
+
+- **DSL 不保留废弃期**。调用方是每次重新读文档的 AI，不是需要迁移的人类，所以旧拼写不会给任何人省事，只会让参考文档里留着一个错的写法。`--action-verb` 一并移除——它**从来没工作过**：解析器在 handler 之前就拒绡未声明的 flag，而文档写着“和 `--op` 一样，两者都给时 `--op` 优先”，`term_generated.go` 里还留着一段读 `stmt.Flag("action-verb")` 的回退代码，输入永远到不了。两个名字都进了 `RetiredFlags`，拒绝时直接说该写什么。
+
 
 ## v0.2.8 — 2026-10-26
 

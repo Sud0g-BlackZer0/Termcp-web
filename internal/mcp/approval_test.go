@@ -311,7 +311,10 @@ func TestOperationSummaryNamesTheOperationAndItsTarget(t *testing.T) {
 		want []string
 	}{
 		{"file_write", map[string]any{"remote_path": "/etc/hosts", "data": strings.Repeat("x", 2048)}, []string{"/etc/hosts", "2.0 KB"}},
-		{"file_write", map[string]any{"remote_path": "/tmp/a", "local_path": "/local/b"}, []string{"/tmp/a", "/local/b"}},
+		// NO file_write/local_path CASE ANY MORE. The summary used to fold the source path
+		// into the line a reviewer reads; the flag is gone, so there is no second path to
+		// name. Kept as a note rather than a silent deletion because a reviewer's summary
+		// is exactly where a stale argument would look like a real one.
 		{"file_delete", map[string]any{"remote_path": "/etc/hosts"}, []string{"delete", "/etc/hosts"}},
 		{"file_rename", map[string]any{"from_path": "/a", "to_path": "/b"}, []string{"/a", "/b"}},
 		{"file_mkdir", map[string]any{"remote_path": "/srv/new"}, []string{"/srv/new"}},

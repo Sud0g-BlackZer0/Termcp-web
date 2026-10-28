@@ -422,9 +422,7 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 				action, extra["op"] = group, op
 			} else if _, ok := stmt.Flag("mode"); ok {
 				if _, hasData := stmt.Flag("data"); !hasData {
-					if _, hasFile := stmt.Flag("local-path"); !hasFile {
-						action, extra["op"] = "perm", "chmod"
-					}
+					action, extra["op"] = "perm", "chmod"
 				}
 			}
 			flags := map[string]string{"action": action, "remote-path": stmt.Key}
