@@ -108,7 +108,7 @@ func (s *Server) handleExtensionList(ctx context.Context, request mcpgo.CallTool
 		}
 		// A file that no longer parses is still listed, with the failure the
 		// reconciler recorded on it: the status explains the rest.
-		extensionRuntimeFields(entry, st, false)
+		s.extensionRuntimeFields(entry, st, false)
 		out = append(out, entry)
 	}
 	b, err := json.Marshal(map[string]any{"extensions": out})
@@ -133,7 +133,7 @@ func (s *Server) handleExtensionGet(ctx context.Context, request mcpgo.CallToolR
 	}
 	entry := extensionConfigMap(ext)
 	st, _ := s.extensions.Status(name)
-	extensionRuntimeFields(entry, st, true)
+	s.extensionRuntimeFields(entry, st, true)
 	b, err := json.Marshal(entry)
 	if err != nil {
 		return toolError(CodeInternalError, "encoding extension: %s", err), nil
@@ -234,7 +234,7 @@ func (s *Server) handleExtensionUse(ctx context.Context, request mcpgo.CallToolR
 		return toolError(CodeOperationFailed, "starting extension %q: %s", name, err), nil
 	}
 	entry := extensionConfigMap(ext)
-	extensionRuntimeFields(entry, st, true)
+	s.extensionRuntimeFields(entry, st, true)
 	if st.Status == extensions.StatusIdle {
 		entry["status"] = extensions.StatusAvailable
 	}
@@ -408,7 +408,7 @@ func extensionStatusWord(name string, st extensions.Status, enabled bool) (word,
 // attempt. The list and get surfaces differ only in how much of the failure
 // history they carry — the list keeps the latest reason, get keeps the history —
 // so everything they share is written once, here.
-func extensionRuntimeFields(entry map[string]any, st extensions.Status, withHistory bool) {
+func (s *Server) extensionRuntimeFields(entry map[string]any, st extensions.Status, withHistory bool) {
 	enabled, _ := entry["enabled"].(bool)
 	name, _ := entry["name"].(string)
 	status, next := extensionStatusWord(name, st, enabled)
@@ -421,6 +421,18 @@ func extensionRuntimeFields(entry map[string]any, st extensions.Status, withHist
 	}
 	if st.ShellID != "" {
 		entry["shell_id"] = st.ShellID
+		// THE INDEX IS A FACT THE SESSION MANAGER OWNS (issue #211). An extension
+		// restarted by the reconciler takes the next index on the shared connection
+		// (`:2`, `:3`), and leaving it off made the open envelope invent `:1` from
+		// nowhere — right by accident for the first channel, and a guaranteed 404
+		// once the instance had been rebuilt.
+		if s.sessMgr != nil {
+			if cs, bad := s.requireShell(st.ShellID); bad == nil && cs != nil {
+				if idx := cs.Info().Index; idx > 0 {
+					entry["index"] = float64(idx)
+				}
+			}
+		}
 	}
 	if st.Lazy {
 		// HOW LONG IT HAS BEEN IDLE, AND HOW LONG IT HAS LEFT. Both are facts the

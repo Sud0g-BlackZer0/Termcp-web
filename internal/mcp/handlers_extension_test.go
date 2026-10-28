@@ -451,3 +451,64 @@ func TestExtensionSessionsStayOutOfSessionList(t *testing.T) {
 		t.Errorf("session_info returned %v, want %q", got, sid)
 	}
 }
+
+// TestOpenExtReflectsRebuiltShellIndex pins that open ext advertises the channel
+// that is actually running, not :1 from an uninitialised default (issue #211).
+//
+// When an extension's process exits, the reconciler starts a new one on the same
+// connection. The new shell has index 2 (or higher), while the dead index 1 is either
+// gone or closed. An `open ext` whose Handle header fell back to index 1 therefore
+// emitted a locator that immediately answered 404.
+func TestOpenExtReflectsRebuiltShellIndex(t *testing.T) {
+	s := newExtensionTestServer(t)
+	// Create a pipe-mode prompt extension that runs a resident command.
+	callExtension(t, s, map[string]any{
+		"action":  "create",
+		"name":    "worker",
+		"kind":    "prompt",
+		"target":  "internal",
+		"command": blockingCommand(),
+	})
+
+	// First use: brings it up at index 1.
+	used := callExtension(t, s, map[string]any{"action": "use", "name": "worker"})
+	firstShellID := used["shell_id"].(string)
+
+	// Close the first shell directly, simulating a process exit.
+	if _, err := s.sessMgr.CloseChildShell(firstShellID); err != nil {
+		t.Fatalf("closing first shell: %v", err)
+	}
+
+	// Trigger reconciler by asking for the extension again.
+	// The reconciler starts a replacement on the same session, which takes index 2.
+	used2 := callExtension(t, s, map[string]any{"action": "use", "name": "worker"})
+	newShellID := used2["shell_id"].(string)
+	if newShellID == firstShellID {
+		t.Fatal("the shell was not replaced")
+	}
+
+	// Now drive the user-facing command: `open ext worker`
+	reply := termText(t, s, map[string]any{"cmd": "open ext worker"})
+	if !strings.HasPrefix(reply, "TERM/1 200") {
+		t.Fatalf("open ext worker failed:\n%s", reply)
+	}
+	handle, ok := headerValue(t, reply, "Handle")
+	if !ok || handle == "" {
+		t.Fatalf("open ext worker reply missing Handle header:\n%s", reply)
+	}
+
+	// The handle MUST NOT be :1, and must resolve to the live shell.
+	if strings.HasSuffix(handle, ":1") {
+		t.Fatalf("open ext advertised dead channel :1 (handle=%q); want :2 or the bare shell id", handle)
+	}
+
+	// Driving the handle with a command must succeed and not return 404 out of range.
+	runGot := termText(t, s, map[string]any{
+		"cmd":     "run " + handle + " $1",
+		"args":    []any{"hello-rebuilt"},
+		"timeout": 2,
+	})
+	if strings.Contains(runGot, "out of range") || strings.Contains(runGot, "404") {
+		t.Fatalf("running on the advertised handle failed with out of range:\n%s", runGot)
+	}
+}
