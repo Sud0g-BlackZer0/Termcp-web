@@ -37,6 +37,10 @@
    - 单 key 的查、增、删用 `Load` / `Store` / `LoadOrStore` / `LoadAndDelete`，不需要任何互斥锁；
    - 遍历快照用 `Range` 收集；
    - 本项目已将 `aliasTable`、`task.Manager`、`ForwardManager`、`sessionListHub`、`uiNotifyHub`、`viewerRegistry`、`sshserver.pending`、`sshserver.builtins`、`cdpState`、`Server.recvCursors`、`Server.closedReads` 等全部换成 `sync.Map`，消除了 12+ 处死锁可能。
+7. **即使保留了锁，也绝对禁止在锁内调用第三方接口或用户回调**：
+   - 第三方库（如 `mcp-go`、`charmbracelet/ssh`）内部如何加锁、是否阻塞、是否反向回调，完全不在你的控制之下；
+   - 在锁内调用外部方法（如 `e.session.GetClientInfo()`、`onChange(r)`）极易引发 AB-BA 嵌套死锁；
+   - **正确做法**：锁内只做纯内存字段的快速快照/复制，立刻释放锁，在锁外去调外部接口、用户回调或排序（如 `connRegistry.list()` 和 `approval.Queue.notify()`）。
 
 ## Agent skills
 
