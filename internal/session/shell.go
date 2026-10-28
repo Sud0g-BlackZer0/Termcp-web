@@ -59,7 +59,6 @@ type ChildShell struct {
 	done        chan struct{}
 	closeOnce   sync.Once
 	cleanupOnce sync.Once // guards explicit removal from the parent shell map
-	stdinMu     sync.Mutex
 	// status is stored through atomic.Value so the zero value stays "" (a shell
 	// built directly in a test), matching the old plain field. Load returns nil
 	// until the constructor publishes running.
@@ -254,9 +253,11 @@ func (cs *ChildShell) SendTerminalBytesFrom(data []byte, pressEnter bool, src In
 	// and a keystroke that leaves the line open is not a span of the transcript.
 	// See logInput for why a partial line writes nothing.
 	cs.logInput(src, submit)
-	cs.stdinMu.Lock()
+	// NO LOCK HERE: ExecSession owns the only write serialisation (a one-token
+	// channel that a caller can give up on), and wrapping it in a second, unbounded
+	// mutex was what turned one stuck network write into "every input on this channel
+	// hangs" (issue #219).
 	_, err := cs.execSession.WriteStdin(toWrite)
-	cs.stdinMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -292,9 +293,7 @@ func (cs *ChildShell) PressKeyFrom(key string, repeat int, src InputSource) erro
 	// receives.
 	submit := submitsLine(payload)
 	cs.logInput(src, submit)
-	cs.stdinMu.Lock()
 	_, err = cs.execSession.WriteStdin(payload)
-	cs.stdinMu.Unlock()
 	if err != nil {
 		return err
 	}
