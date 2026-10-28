@@ -126,13 +126,23 @@ func (s *Server) mcpStdio(ctx context.Context, stmt directive.Statement, sub str
 // peer writes) are skipped by the trim in firstMCPMessage, and the offset advances
 // over them too, so a resumed read starts at the next '{'.
 func (s *Server) mcpRecvFrame(ctx context.Context, stmt directive.Statement, handle string, win termArgs) envelope.Slot {
-	// ONE READER AT A TIME, FOR THE WHOLE READ (#183). The lock spans the poll loop
+	// ONE READER AT A TIME, FOR THE WHOLE READ (#183). The gate spans the poll loop
 	// because that is where the duplication happens: two readers that both start
 	// before the frame arrives both find it. It is held across the recursive call's
 	// setup but NOT across the recursion itself, which re-enters here.
+	//
+	// ACQUIRED WITH A DOOR (issue #224). A mutex here meant a second recv on the same
+	// handle could not leave when its own window expired: it waited out the first
+	// caller's whole poll loop. The token is a one-slot channel so the waiter can
+	// select against ctx.Done() and report its own deadline instead.
 	reader := s.recvReader(handle)
-	reader.Lock()
-	defer reader.Unlock()
+	select {
+	case <-reader:
+	case <-ctx.Done():
+		return noContentSaying(map[string]string{"Path": stmt.Path},
+			"another reader on this channel is still inside its own window; this call gave up waiting for it")
+	}
+	defer func() { reader <- struct{}{} }()
 	for {
 		slot, readAgain := s.mcpRecvFrameOnce(ctx, stmt, handle, win)
 		if !readAgain {
@@ -440,20 +450,22 @@ const minRecvWindow = 1 << 20
 // Keyed by handle without the server's own offset bookkeeping: two callers reading
 // the same channel is a race the protocol does not describe, and serialising here
 // means neither silently loses a frame to the other's window.
-// recvReader returns the mutex that makes one handle's frames have one reader at a
-// time, creating it on first use.
-func (s *Server) recvReader(handle string) *sync.Mutex {
+//
+// recvReader returns the one-token gate that gives a handle one reader at a time,
+// creating it on first use. The token is in the channel when the gate is free.
+func (s *Server) recvReader(handle string) chan struct{} {
 	s.recvCursorMu.Lock()
 	defer s.recvCursorMu.Unlock()
 	if s.recvReaders == nil {
-		s.recvReaders = make(map[string]*sync.Mutex)
+		s.recvReaders = make(map[string]chan struct{})
 	}
-	m, ok := s.recvReaders[handle]
+	tok, ok := s.recvReaders[handle]
 	if !ok {
-		m = &sync.Mutex{}
-		s.recvReaders[handle] = m
+		tok = make(chan struct{}, 1)
+		tok <- struct{}{}
+		s.recvReaders[handle] = tok
 	}
-	return m
+	return tok
 }
 
 // lineLock returns the mutex that makes one channel's writes land as whole lines,

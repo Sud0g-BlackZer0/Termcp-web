@@ -108,7 +108,6 @@ type Session struct {
 	mu            sync.RWMutex
 	shellStateMu  sync.Mutex // serializes child registration with close/DEAD transition
 	closing       bool       // guarded by shellStateMu; blocks new child channels
-	stdinMu       sync.Mutex
 	terminateOnce sync.Once
 	deadOnce      sync.Once
 	exitOnce      sync.Once

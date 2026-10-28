@@ -75,10 +75,15 @@ type Server struct {
 	// JSON-RPC id pairing cannot survive: two `id:3` and no `id:4` leaves the client
 	// waiting for an answer another reader already consumed.
 	//
-	// Per HANDLE rather than one global mutex, because a recv can wait out the
-	// caller's whole window: a global lock would park every unrelated channel behind
-	// it for fifteen seconds.
-	recvReaders map[string]*sync.Mutex
+	// Per HANDLE rather than one global gate, because a recv can wait out the
+	// caller's whole window: a shared gate would park every unrelated channel behind
+	// it for the same length of time.
+	//
+	// A TOKEN, NOT A MUTEX (issue #224). Acquiring a mutex takes no context, so a
+	// second recv on the same handle could not leave when its own window expired — it
+	// waited out the FIRST caller's entire poll loop. A one-slot channel is the same
+	// exclusivity with a door: the waiter selects against ctx.Done().
+	recvReaders map[string]chan struct{}
 
 	// lineLocks serialises the two writes that make ONE line on a channel.
 	//
