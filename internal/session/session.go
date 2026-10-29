@@ -137,6 +137,10 @@ type Session struct {
 	// It is session-scoped because production access is per-target: one
 	// deployment can hold a scratch host and a prod host at the same time.
 	approval *approvalState
+	// retainedQueue holds the closed queue after approval mode is disabled or the
+	// session closes, so /api/approvals can still report the terminal cancelled
+	// state to a harness or an auditor (issue #217). It gates nothing.
+	retainedQueue *approval.Queue
 	// approvalSink is the change handler installed before approval mode is
 	// enabled, so a handler set at startup is not lost.
 	approvalSink func(sessionID string, req approval.Request)

@@ -181,6 +181,9 @@ func (s *Session) EnableApprovalScoped(need int, timeout time.Duration, scopes [
 	s.mu.Lock()
 	prev := s.approval
 	s.approval = st
+	// A live queue supersedes the retained one: the cancelled history belongs to a
+	// mode that is no longer in force.
+	s.retainedQueue = nil
 	s.mu.Unlock()
 
 	if prev != nil {
@@ -199,6 +202,14 @@ func (s *Session) DisableApproval() {
 	s.mu.Lock()
 	st := s.approval
 	s.approval = nil
+	if st != nil {
+		// KEEP THE QUEUE READABLE (issue #217). Clearing it made every pending
+		// request vanish from /api/approvals the moment the session closed: the
+		// safety half was right (approving answered 404/409 and nothing executed),
+		// but the promised terminal `cancelled` state could never be observed, so a
+		// harness could not tell why a request ended.
+		s.retainedQueue = st.queue
+	}
 	s.mu.Unlock()
 
 	if st != nil {
@@ -271,10 +282,14 @@ func (st *approvalState) scopeList() []approval.Kind {
 func (s *Session) ApprovalQueue() *approval.Queue {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.approval == nil {
-		return nil
+	if s.approval != nil {
+		return s.approval.queue
 	}
-	return s.approval.queue
+	// A disabled or closed session retains its closed queue so readers can observe
+	// the terminal cancelled state (issue #217). It gates nothing — ApprovalEnabled
+	// and GatesKind both read s.approval — and approving from it answers
+	// ErrNotPending, so a late click cannot execute anything.
+	return s.retainedQueue
 }
 
 // SetApprovalChangeHandler installs the sink notified on every queue
