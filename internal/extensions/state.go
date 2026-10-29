@@ -178,7 +178,11 @@ func (st *extState) changed(ext *Extension) bool {
 // the same edit.
 func fingerprint(ext *Extension) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s|%s|%s|%q|", ext.Kind, ext.Target, ext.Mode, ext.Command)
+	// KIND IS NOT IN THE FINGERPRINT. It is a label and a preset scaffold, not a
+	// code path — nothing downstream branches on it, so renaming `custom` to `mcp`
+	// on an unchanged template describes nothing that runs and must not trigger a
+	// rebuild of a live instance.
+	fmt.Fprintf(&b, "%s|%s|%q|", ext.Target, ext.Mode, ext.Command)
 	for _, a := range ext.Args {
 		fmt.Fprintf(&b, "%q,", a)
 	}

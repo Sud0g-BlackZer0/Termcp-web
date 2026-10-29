@@ -138,8 +138,10 @@ func TestStoreListAndDelete(t *testing.T) {
 		t.Errorf("empty store listed %v", names)
 	}
 
+	// A template must declare at least one capability (see Validate): this test is
+	// about directory ordering, so each one carries the smallest real declaration.
 	for _, n := range []string{"b-ext", "a-ext"} {
-		if err := s.Save(&Extension{Name: n, Kind: KindCustom, Target: "mac"}); err != nil {
+		if err := s.Save(&Extension{Name: n, Kind: KindCustom, Target: "mac", Mode: "pty"}); err != nil {
 			t.Fatalf("Save(%s): %v", n, err)
 		}
 	}
@@ -268,4 +270,76 @@ func contains(slice []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestKindIsALabelNotACodePath pins that kind no longer gates what a template may
+// declare (issue #235 / the original "kinds are presets, not code paths").
+//
+// It used to be a selector: kind=skill forced paths and nothing else, kind=mcp owned
+// the channel, and the combination a business actually needs — an MCP server AND the
+// port behind it AND the files worth reading — could not be written down. The fields
+// are the fact; the label is not.
+func TestKindIsALabelNotACodePath(t *testing.T) {
+	s := newTestStore(t)
+
+	// One template: stdio MCP + exposed paths + three mixed forwards, labelled "skill"
+	// (the label that used to forbid all of it).
+	ext := &Extension{
+		Name:    "everything",
+		Kind:    KindSkill,
+		Target:  "mac",
+		Mode:    "pipe",
+		Command: "node",
+		Args:    []string{"server.js"},
+		Paths:   []string{"/var/log"},
+		Forwards: []ForwardDecl{
+			{Kind: ForwardLocal, LocalPort: 9222, RemoteHost: "127.0.0.1", RemotePort: 9222},
+			{Kind: ForwardRemote, LocalHost: "127.0.0.1", LocalPort: 9000, RemoteHost: "127.0.0.1", RemotePort: 9000},
+			{Kind: ForwardDynamic, LocalPort: 0},
+		},
+	}
+	if err := s.Save(ext); err != nil {
+		t.Fatalf("a template declaring command + paths + mixed forwards must be accepted, got: %v", err)
+	}
+	got, err := s.Load("everything")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Forwards) != 3 {
+		t.Fatalf("forwards round-tripped as %d entries, want 3", len(got.Forwards))
+	}
+
+	// A template with no capability at all is refused rather than silently stored as
+	// an empty container that can never do anything.
+	empty := &Extension{Name: "nothing", Kind: KindCustom, Target: "mac"}
+	if err := s.Save(empty); err == nil {
+		t.Fatal("a template declaring no capability should be refused")
+	}
+}
+
+// TestKindChangeDoesNotRebuildALiveInstance pins that the label is out of the
+// fingerprint: renaming custom to mcp on an unchanged template describes nothing
+// that runs, so it must not tear down and rebuild the instance.
+func TestKindChangeDoesNotRebuildALiveInstance(t *testing.T) {
+	ext := Preset(KindCustom)
+	ext.Name = "probe"
+	ext.Target = "internal"
+	ext.Mode = "pty"
+
+	st := &extState{status: StatusUnavailable}
+	st.setGroup(groupKey(&ext))
+	if !st.changed(&ext) {
+		t.Fatal("the first walk should see the template as new")
+	}
+
+	relabelled := ext
+	relabelled.Kind = KindMCP
+	if st.changed(&relabelled) {
+		t.Fatal("changing only the label must not be read as a template change")
+	}
+
+	relabelled.Command = "node"
+	if !st.changed(&relabelled) {
+		t.Fatal("changing what runs must still be read as a template change")
+	}
 }

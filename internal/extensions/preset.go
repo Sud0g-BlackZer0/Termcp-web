@@ -184,8 +184,14 @@ func ApplyDefaults(e *Extension) {
 // caller that refreshes a stored template consults isPresetNotes so that editing
 // a template from stdio to an endpoint does not leave the wrong recipe behind.
 func PresetNotes(ext *Extension) string {
-	if ext.Kind == KindMCP && ext.URL != "" {
+	// BY WHAT THE TEMPLATE DECLARES, not by its label: a kind is a scaffold an
+	// author may leave at "custom" while filling in a url, and asking the label
+	// then handed back the wrong recipe. The fields are the fact; the kind is not.
+	if ext.URL != "" {
 		return mcpHTTPNotes
+	}
+	if ext.Command != "" {
+		return Preset(KindMCP).Notes
 	}
 	return Preset(ext.Kind).Notes
 }

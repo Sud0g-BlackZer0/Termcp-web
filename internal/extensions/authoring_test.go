@@ -72,6 +72,9 @@ func TestApplyArgsDropsOnExit(t *testing.T) {
 	ext := Preset(KindCustom)
 	ext.Name = "probe"
 	ext.Target = "internal"
+	// A real declaration, so this test stays about on_exit being dropped rather than
+	// about a capability-less template being refused (see Validate).
+	ext.Mode = "pty"
 	if err := ApplyArgs(&ext, map[string]any{"on_exit": "close"}, true); err != nil {
 		t.Fatalf("ApplyArgs: %v", err)
 	}

@@ -35,7 +35,9 @@ const (
 	KindCustom = "custom" // everything by hand
 )
 
-// validKinds is the set Validate accepts. An empty kind is saved as custom.
+// validKinds retains the historical preset names for documentation and authoring.
+// Kind is a display label and preset scaffold, NOT a code path: runtime capabilities
+// are inferred from what the template actually declares (command, url, paths, forwards, mode).
 var validKinds = map[string]bool{
 	KindMCP:    true,
 	KindSkill:  true,
@@ -278,9 +280,7 @@ func (e *Extension) Validate() error {
 	if e.Target == "" {
 		return fmt.Errorf("target is required (an ssh_config profile name or \"internal\")")
 	}
-	if !validKinds[e.Kind] {
-		return fmt.Errorf("unknown extension kind %q (mcp, skill, prompt or custom)", e.Kind)
-	}
+	// Kind is an author-facing label/preset, not a rigid constraint. Any kind is allowed.
 	switch e.Mode {
 	case "", "pty", "pipe":
 	default:
@@ -293,10 +293,18 @@ func (e *Extension) Validate() error {
 	if e.Mode == "pipe" && e.Command == "" && e.URL == "" {
 		return fmt.Errorf("mode=pipe requires a command (a pipe channel has no fallback shell)")
 	}
-	// URL and Command are two answers to one question — what runs on the channel
-	// — so a template carrying both would have to pick one silently.
+	// URL AND COMMAND STILL EXCLUDE EACH OTHER, and the reason is mechanical rather
+	// than conceptual: a template gets ONE channel, and both fields claim it. With
+	// `url` what runs on the channel is termcp's bridge (resolve() replaces cmd/args
+	// with bridgeCommand), so a `command` here would be saved and silently never run.
+	//
+	// "Start the server, then connect to it" IS a real need — an HTTP MCP server that
+	// termcp itself brings up — but it needs TWO channels (one daemon, one bridge),
+	// which the template cannot express yet. Refusing is what keeps that gap visible;
+	// accepting would ship a field that does nothing.
 	if e.URL != "" && e.Command != "" {
-		return fmt.Errorf("url and command are alternatives: set one, not both")
+		return fmt.Errorf("url and command are alternatives on one channel: with url, the channel runs termcp's bridge, so a command here would never execute. " +
+			"Split it in two for now — one extension runs the server, another takes its url — or use a stdio command that speaks MCP itself")
 	}
 	if e.URL != "" {
 		if err := validEndpointURL(e.URL); err != nil {
@@ -320,10 +328,13 @@ func (e *Extension) Validate() error {
 			return fmt.Errorf("rows and cols must be 0 (default) or 1-1000")
 		}
 	}
-	// A skill with no paths would be a read-only window onto nothing. Any other
-	// kind may leave paths empty to stay unrestricted.
-	if e.Kind == KindSkill && len(e.Paths) == 0 {
-		return fmt.Errorf("a skill extension requires at least one path (the directories it may read)")
+	// AN EXTENSION MUST EXPLICITLY DECLARE AT LEAST ONE CAPABILITY.
+	// We no longer rely on kind as a gate: an author (or AI) must declare what the
+	// extension actually does (a command, an mcp url, exposed file paths, port forwards,
+	// or an interactive pty shell). Declaring none of these is an empty useless container.
+	hasCapability := e.Command != "" || e.URL != "" || len(e.Paths) > 0 || len(e.Forwards) > 0 || e.Mode == "pty"
+	if !hasCapability {
+		return fmt.Errorf("extension declares no capability: explicitly specify at least one of command, url, paths, forward, or mode=pty")
 	}
 	for i := range e.Forwards {
 		if err := e.Forwards[i].Validate(); err != nil {
