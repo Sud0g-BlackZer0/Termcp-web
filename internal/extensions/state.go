@@ -591,15 +591,23 @@ func (st *extState) snapshot() Status {
 		Instances: len(st.extra),
 	}
 	// THE CHANNEL REPORTED IS ONE THE CALLER CAN DRIVE. For a template with its own
-	// channel that is the reconciler's; for an on-demand extension it is the first
-	// instance it handed out, because there is no other channel to name.
+	// channel that is the reconciler's; for an on-demand extension it is the instance
+	// handed out MOST RECENTLY (issue #230).
+	//
+	// It used to be the FIRST one, which made `ls ext` and `open ext` name different
+	// channels in the same breath: every ask gets its own channel (see Acquire), so
+	// after two opens `ls` reported :1 while `open` returned :2 — two directives, two
+	// addresses, no way to tell which was live. The newest is the one an `open` just
+	// returned, so the two now agree; Instances carries how many exist, and
+	// `get <session>` still lists every one of them.
 	if st.shellID != "" {
 		out.Instances++
 	} else if len(st.extra) > 0 {
-		out.ShellID = st.extra[0].shellID
+		newest := st.extra[len(st.extra)-1]
+		out.ShellID = newest.shellID
 	}
 	if out.SessionID == "" && len(st.extra) > 0 {
-		out.SessionID = st.extra[0].sessionID
+		out.SessionID = st.extra[len(st.extra)-1].sessionID
 	}
 	if st.lazy {
 		out.IdleTimeoutMs = st.idleLimit.Milliseconds()

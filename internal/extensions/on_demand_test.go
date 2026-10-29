@@ -457,3 +457,37 @@ func TestDrivingAChannelResetsTheReportedSilence(t *testing.T) {
 		t.Errorf("driving the channel left the reported silence at %d ms (was %d)", after.IdleForMs, before.IdleForMs)
 	}
 }
+
+// TestStatusReportsTheNewestInstancePinsIssue230 pins that repeated asks for an
+// on-demand extension report the newest instance in Status/snapshot rather than
+// sticking to the first one (issue #230).
+func TestStatusReportsTheNewestInstancePinsIssue230(t *testing.T) {
+	r := startReconciler(t)
+	lazyExt(t, r, "multichannel", "10m")
+
+	first, err := r.Acquire("multichannel", 10*time.Second)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	second, err := r.Acquire("multichannel", 10*time.Second)
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+
+	if first.ShellID == second.ShellID {
+		t.Fatal("every ask must get its own channel, got the same shell_id twice")
+	}
+
+	current, ok := r.Status("multichannel")
+	if !ok {
+		t.Fatal("extension disappeared from status")
+	}
+
+	if current.ShellID != second.ShellID {
+		t.Fatalf("Status().ShellID = %q, want newest instance %q (issue #230: old code returned the first instance %q)",
+			current.ShellID, second.ShellID, first.ShellID)
+	}
+	if current.Instances != 2 {
+		t.Fatalf("Instances = %d, want 2", current.Instances)
+	}
+}
