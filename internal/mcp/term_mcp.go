@@ -162,8 +162,16 @@ func (s *Server) mcpRecvFrameOnce(ctx context.Context, stmt directive.Statement,
 	// A whole frame has to fit the window, or a single large reply could never be
 	// delivered: the window is a cap on what one recv will consider, not a
 	// statement about how long a frame may be.
-	window := defaultBytesLimit
-	if window < minRecvWindow {
+	//
+	// THE CALLER'S bytes_limit IS THE WINDOW (issue #229). This used to be the
+	// constant defaultBytesLimit raised to minRecvWindow — a hard 1 MiB wall with no
+	// knob — so an MCP server returning a base64 screenshot answered 413 forever: no
+	// cursor could page inside a frame, and both `read --frame` and `call` went
+	// through here. `minRecvWindow` is now a FLOOR, not the answer, and bytes_limit
+	// is documented as having no upper bound because the caller is the party that
+	// pays for what lands in its context.
+	window := win.BytesLimit
+	if !win.BytesLimitSet || window < minRecvWindow {
 		window = minRecvWindow
 	}
 	// POLL, BECAUSE THE READ ITSELF DOES NOT WAIT FOR AN OFFSETTED WINDOW.
