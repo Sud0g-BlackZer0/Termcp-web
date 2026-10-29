@@ -491,3 +491,44 @@ func TestStatusReportsTheNewestInstancePinsIssue230(t *testing.T) {
 		t.Fatalf("Instances = %d, want 2", current.Instances)
 	}
 }
+
+// TestExtensionIdleTimeoutZeroDisablesCollectionPinsIssue227 pins that
+// idle_timeout = "0" is accepted by configuration validation and prevents instances
+// from ever being collected for silence (issue #227).
+func TestExtensionIdleTimeoutZeroDisablesCollectionPinsIssue227(t *testing.T) {
+	r := startReconciler(t)
+
+	// 1. Negative is still rejected.
+	neg := &Extension{Name: "neg", Target: "internal", IdleTimeout: "-5s"}
+	if _, err := neg.IdleTimeoutDuration(); err == nil {
+		t.Fatal("negative idle_timeout should be rejected")
+	}
+
+	// 2. Zero is accepted as "no idle collection".
+	zero := &Extension{Name: "forever", Target: "internal", IdleTimeout: "0"}
+	dur, err := zero.IdleTimeoutDuration()
+	if err != nil {
+		t.Fatalf("idle_timeout=0 should be accepted, got: %v", err)
+	}
+	if dur != 0 {
+		t.Fatalf("expected duration 0, got %v", dur)
+	}
+
+	// 3. Runtime verification: instances are NEVER reaped when limit <= 0.
+	lazyExt(t, r, "forever", "0")
+	inst, err := r.Acquire("forever", 10*time.Second)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	st := r.state("forever")
+	// Sweep with limit = 0: must return 0 reaped.
+	if reaped := r.reapDue("forever", st, 0); reaped != 0 {
+		t.Fatalf("reapDue with limit=0 reaped %d instances, want 0", reaped)
+	}
+
+	current, ok := r.Status("forever")
+	if !ok || current.Instances != 1 || current.ShellID != inst.ShellID {
+		t.Fatalf("instance was reaped despite idle_timeout=0: %+v", current)
+	}
+}

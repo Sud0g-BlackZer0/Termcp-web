@@ -327,6 +327,13 @@ func (st *extState) dropExtra(shellID string) bool {
 // them out of the state is what keeps the walk from handing one out while it is
 // being closed.
 func (st *extState) dueExtras(limit time.Duration) []string {
+	// A ZERO WINDOW COLLECTS NOTHING (issue #227). Without this guard the comparison
+	// below reads `now.Sub(lastUse) >= 0`, which is true for every instance — so
+	// allowing idle_timeout = 0 at the config layer alone would have reaped every
+	// channel the moment it was created.
+	if limit <= 0 {
+		return nil
+	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	now := time.Now()

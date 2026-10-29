@@ -191,8 +191,13 @@ func (e *Extension) IdleTimeoutDuration() (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("idle_timeout is not a duration (%q): write it as a Go duration, such as 10m or 90s", e.IdleTimeout)
 	}
-	if d <= 0 {
-		return 0, fmt.Errorf("idle_timeout must be positive, got %q", e.IdleTimeout)
+	// ZERO MEANS "NO IDLE COLLECTION", the same word the daemon's own
+	// --idle-timeout uses (issue #227). An extension that carries a background duty
+	// — an MCP server holding a WebSocket so it can push events — is not idle when
+	// nobody calls a tool, and it had no way to say so: every legal window eventually
+	// reaped it, and the only workaround was a semantic lie like "87600h".
+	if d < 0 {
+		return 0, fmt.Errorf("idle_timeout cannot be negative, got %q; write 0 to disable idle collection", e.IdleTimeout)
 	}
 	return d, nil
 }
