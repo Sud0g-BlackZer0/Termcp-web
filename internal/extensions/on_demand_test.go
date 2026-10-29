@@ -341,7 +341,10 @@ func TestResidentExtensionIsNotOnDemand(t *testing.T) {
 // wrote "10 minutes" meant something and running with ten minutes instead of what
 // it wrote is the kind of help that hides a typo.
 func TestIdleTimeoutMustBeADuration(t *testing.T) {
-	for _, raw := range []string{"10 minutes", "-5m", "0"} {
+	// "0" is NOT in this list: it is the word for "no idle collection" (issue #227),
+	// the same one the daemon's --idle-timeout uses. It is covered by
+	// TestExtensionIdleTimeoutZeroDisablesCollectionPinsIssue227.
+	for _, raw := range []string{"10 minutes", "-5m"} {
 		ext := Preset(KindMCP)
 		ext.Name = "bad"
 		ext.Target = "internal"
