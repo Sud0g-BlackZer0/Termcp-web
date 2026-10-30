@@ -56,8 +56,7 @@ type Store struct {
 	// markIdx caches one sparse index per shell (see markIndex). It is memory the
 	// files do not have to carry: the index is rebuilt from log.jsonl on demand and
 	// dropped with the shell's directory.
-	idxMu   sync.Mutex
-	markIdx map[string]*markIndex
+	markIdx sync.Map // "<session>:<shell>" -> *markIndex (sync.Map, no mutex)
 
 	// deleted remembers sessions whose directory was removed, so a late append is
 	// refused instead of recreating it. Guarded by mu, and cleared by SaveSession:
@@ -89,7 +88,6 @@ type Store struct {
 func New(dataDir string) *Store {
 	s := &Store{
 		dataDir:      dataDir,
-		markIdx:      make(map[string]*markIndex),
 		deleted:      make(map[string]bool),
 		manifestHash: make(map[string][32]byte),
 	}
