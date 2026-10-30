@@ -31,9 +31,9 @@ func (e *processGoneError) Error() string {
 }
 func (e *processGoneError) Is(target error) bool { return target == ErrProcessGone }
 
-// Lock ordering: shellStateMu -> stdinMu. Never acquire in reverse order.
+// Lock ordering: shellStateMu -> mu.
 // shellStateMu is only taken by session-level transitions (close/DEAD/terminate,
-// new shells), and stdinMu serializes writes only. Per-shell state that changes
+// new shells), and stdin uses a bounded channel token (see #219). Per-shell state that changes
 // after creation is atomic, so there is no per-shell lock to order: a reader
 // never blocks the exit watcher (see the field docs below).
 

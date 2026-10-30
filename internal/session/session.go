@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Lock ordering: shellStateMu -> mu -> stdinMu (and shellStateMu -> cs.mu).
+// Lock ordering: shellStateMu -> mu (and shellStateMu -> cs.mu).
 // Never acquire in reverse order. s.mu and cs.mu are leaves; shellStateMu is
 // only taken by session-level transitions (close/DEAD/terminate, new shells).
 // The manager-assigned callbacks and the per-shell closed flag are atomics and
@@ -106,8 +106,8 @@ type Config struct {
 type Session struct {
 	api.Session
 	mu            sync.RWMutex
-	shellStateMu  sync.Mutex // serializes child registration with close/DEAD transition
-	closing       bool       // guarded by shellStateMu; blocks new child channels
+	shellStateMu  sync.Mutex  // serializes child registration with close/DEAD transition
+	closing       atomic.Bool // blocks new child channels and approval reconfiguration
 	terminateOnce sync.Once
 	deadOnce      sync.Once
 	exitOnce      sync.Once
@@ -631,11 +631,10 @@ func (s *Session) closeIfLastShellEnded() {
 		}
 		return true
 	})
-	closing := s.closing
 	s.shellStateMu.Unlock()
 	// A live channel (or a session already going down) means this was not the
 	// end of the session's work; another shell will report its own exit.
-	if live || closing {
+	if live || s.closing.Load() {
 		return
 	}
 	slog.Debug("one-shot session closing after its last shell exited", "session_id", s.ID)
@@ -656,14 +655,14 @@ func (s *Session) markDeadWithMessage(systemMessage string) {
 	// A deliberate close may race with an exit watcher that already observed
 	// the transport error. Do not turn that intentional close into a network-loss
 	// notification.
-	if systemMessage != "" && s.closing {
+	if systemMessage != "" && s.closing.Load() {
 		return
 	}
 	// A session the CALLER closed has a reason too, and "no reason" is not it: whoever
 	// asks `get` after a close wants to be told the close was theirs, not left to guess
 	// between that and something breaking. beginClosing() sets s.closing before the
 	// deliberate paths call here, which is exactly what distinguishes them.
-	if systemMessage == "" && s.closing {
+	if systemMessage == "" && s.closing.Load() {
 		systemMessage = exitReasonRequested
 	}
 	s.markDeadLocked(systemMessage)
@@ -671,7 +670,7 @@ func (s *Session) markDeadWithMessage(systemMessage string) {
 
 // markDeadLocked requires shellStateMu.
 func (s *Session) markDeadLocked(systemMessage string) {
-	s.closing = true
+	s.closing.Store(true)
 	s.deadOnce.Do(func() {
 		// Flush output pipe goroutines so the last bytes are appended to the
 		// byte log before DEAD becomes observable.
@@ -793,17 +792,13 @@ func (s *Session) Disconnect() {
 }
 
 func (s *Session) beginClosing() {
-	s.shellStateMu.Lock()
-	if s.closing {
-		s.shellStateMu.Unlock()
+	if !s.closing.CompareAndSwap(false, true) {
 		return
 	}
-	s.closing = true
 	s.shells.Range(func(_, v any) bool {
 		v.(*ChildShell).deliberateClose.Store(true)
 		return true
 	})
-	s.shellStateMu.Unlock()
 
 	// A closing session can no longer execute anything, so its pending requests
 	// must not stay decidable. Without this, Terminate (which does not run the

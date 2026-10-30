@@ -445,12 +445,10 @@ func TestEnableApprovalFailsOnClosingSessionPinsIssue226(t *testing.T) {
 	s := startInteractiveSession(t)
 
 	// Mark the session as closing WITHOUT the follow-up teardown, which is the state
-	// a racing enable actually observes: beginClosing sets the flag under
-	// shellStateMu and calls DisableApproval only after releasing it, so there is a
-	// window in which `closing` is true and a queue is still absent.
-	s.shellStateMu.Lock()
-	s.closing = true
-	s.shellStateMu.Unlock()
+	// a racing enable actually observes: beginClosing sets the flag and calls
+	// DisableApproval afterwards, so there is a window in which `closing` is true and
+	// a queue is still absent.
+	s.closing.Store(true)
 
 	err := s.EnableApproval(1, 0)
 	if !errors.Is(err, ErrSessionClosing) {
