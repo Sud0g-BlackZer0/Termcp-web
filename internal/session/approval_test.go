@@ -433,3 +433,32 @@ func TestApprovalCancelledStateIsRetainedAfterSessionClosePinsIssue217(t *testin
 		t.Fatalf("approving a cancelled request err = %v, want ErrNotPending", err)
 	}
 }
+
+// TestEnableApprovalFailsOnClosingSessionPinsIssue226 pins that approval mode cannot
+// be enabled or reconfigured while a session is closing (PR #226).
+//
+// beginClosing sets `closing` and tears down the queue, but EnableApproval used to
+// take only s.mu and miss that fact — so an enable racing with shutdown could reinstall
+// a fresh open queue on a closed session, handing back a gate whose requests could
+// never execute.
+func TestEnableApprovalFailsOnClosingSessionPinsIssue226(t *testing.T) {
+	s := startInteractiveSession(t)
+
+	// Mark the session as closing WITHOUT the follow-up teardown, which is the state
+	// a racing enable actually observes: beginClosing sets the flag under
+	// shellStateMu and calls DisableApproval only after releasing it, so there is a
+	// window in which `closing` is true and a queue is still absent.
+	s.shellStateMu.Lock()
+	s.closing = true
+	s.shellStateMu.Unlock()
+
+	err := s.EnableApproval(1, 0)
+	if !errors.Is(err, ErrSessionClosing) {
+		t.Fatalf("EnableApproval on closing session err = %v, want ErrSessionClosing", err)
+	}
+
+	// The refused attempt must not have installed a queue that gates input.
+	if s.ApprovalEnabled() {
+		t.Fatal("ApprovalEnabled is true after a refused enable on a closing session")
+	}
+}

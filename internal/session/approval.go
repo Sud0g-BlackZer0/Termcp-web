@@ -176,8 +176,23 @@ func (s *Session) EnableApprovalScoped(need int, timeout time.Duration, scopes [
 		},
 	})
 
-	// Swap under both locks so a concurrent input either sees the old queue
-	// (and was approved under the old rule) or the new one, never a half state.
+	// Install under shellStateMu so shutdown cannot interleave between checking its
+	// closing flag and publishing the queue.
+	//
+	// TWO LOCKS, TWO OWNERS, AND THEY USED TO MISS EACH OTHER (PR #226). beginClosing
+	// takes shellStateMu and clears s.approval; this function took only s.mu, so an
+	// enable racing with a terminate could reinstall a FRESH OPEN QUEUE on a session
+	// that had already been given a read-only history — the exact state the close was
+	// meant to make impossible. Taking shellStateMu across the check and the publish
+	// is what makes "the session is closing" and "a queue was just installed" unable
+	// to both be true.
+	s.shellStateMu.Lock()
+	if s.closing {
+		s.shellStateMu.Unlock()
+		st.discardStaged()
+		st.queue.Close("session is closing")
+		return ErrSessionClosing
+	}
 	s.mu.Lock()
 	prev := s.approval
 	s.approval = st
@@ -185,10 +200,26 @@ func (s *Session) EnableApprovalScoped(need int, timeout time.Duration, scopes [
 	// mode that is no longer in force.
 	s.retainedQueue = nil
 	s.mu.Unlock()
+	s.shellStateMu.Unlock()
 
 	if prev != nil {
 		prev.discardStaged()
 		prev.queue.Close("approval mode reconfigured")
+	}
+
+	// THE CLOSE MAY HAVE STARTED WHILE THE PREVIOUS QUEUE WAS BEING CLOSED. beginClosing
+	// marks `closing` under shellStateMu and then calls DisableApproval AFTER releasing
+	// it (the lock order in this file is shellStateMu then s.mu), so a terminate that
+	// began just after the check above would leave the queue installed with nothing to
+	// remove it — the session would carry an open gate it can never execute through.
+	// Re-reading the flag after the swap is what closes that window; DisableApproval is
+	// idempotent, so if the shutdown path already ran, this is a no-op.
+	s.shellStateMu.Lock()
+	closing := s.closing
+	s.shellStateMu.Unlock()
+	if closing {
+		s.DisableApproval()
+		return ErrSessionClosing
 	}
 	return nil
 }
@@ -346,6 +377,11 @@ func (s *Session) SubmitOperation(sub approval.Submission) (string, error) {
 // ErrApprovalOff reports that a session does not gate input, so the caller
 // should write the bytes straight through.
 var ErrApprovalOff = fmt.Errorf("approval mode is off")
+
+// ErrSessionClosing reports that approval mode cannot be reconfigured while the
+// session is shutting down (PR #226): installing a fresh queue on a closed session
+// would hand back a gate whose requests can never execute.
+var ErrSessionClosing = fmt.Errorf("session is closing")
 
 // ChildShell-side view of the session's approval state.
 //
